@@ -7,6 +7,6 @@ This fork of [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux) is a mirror
 - `ouro-patches` holds our patch stack on top of upstream `main`. It is empty for now.
 - `ouro` (this default branch) holds only the sync workflow and this README.
 
-The [Upstream sync](.github/workflows/upstream-sync.yml) workflow runs every 6 hours and on demand. It fast-forwards `main`, mirrors tags and rebases `ouro-patches` onto upstream `main`. If the patch stack stops rebasing cleanly, it opens or updates one issue and closes it once a later sync succeeds.
+GitHub Actions is disabled on this repository so that none of upstream's workflows ever run here.
 
-Upstream's own workflows never run here: scheduled workflows run only from the default branch, which carries none of them, and the sync bot's ref updates use `GITHUB_TOKEN`, which does not trigger workflows.
+The [Upstream sync](.github/workflows/upstream-sync.yml) workflow fast-forwards `main`, mirrors tags and rebases `ouro-patches` onto upstream `main`; if the patch stack stops rebasing cleanly, it opens or updates one issue and closes it once a later sync succeeds. It needs a `FORK_SYNC_TOKEN` secret, because `GITHUB_TOKEN` may not move refs across upstream changes to `.github/workflows`, and it must run from another repository, because pushes made with any other token trigger upstream's push workflows here. The file's header explains both.

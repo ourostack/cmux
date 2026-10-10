@@ -1,14 +1,19 @@
-# Keeps this fork in step with manaflow-ai/cmux:
+# Keeps ourostack/cmux in step with manaflow-ai/cmux:
 #   main          fast-forwarded to upstream main (pure mirror, never committed to here)
 #   tags v*       mirrored from upstream
 #   ouro-patches  our patch stack, rebased onto upstream main; a conflict opens one issue
 #
-# Ref updates go through the REST API on the fork network's shared objects, so
-# nothing is cloned unless ouro-patches carries commits. Pushes made with
-# GITHUB_TOKEN do not trigger workflows, so upstream's own workflows never run here.
-# If GitHub ever refuses GITHUB_TOKEN (for example over workflow-file changes),
-# add a repo secret FORK_SYNC_TOKEN (fine-grained PAT, ourostack/cmux only,
-# Contents + Workflows read/write) and it is used for ref updates automatically.
+# All ref updates go through the REST API on the fork network's shared objects, so
+# nothing is cloned unless ouro-patches carries commits.
+#
+# Needs secret FORK_SYNC_TOKEN: a fine-grained PAT for ourostack/cmux only with
+# Contents, Workflows and Issues read/write. GITHUB_TOKEN is not enough: GitHub refuses
+# any ref update or tag creation that brings in .github/workflows changes without the
+# `workflows` permission, which GITHUB_TOKEN cannot have.
+#
+# Any token other than GITHUB_TOKEN makes upstream's push-triggered workflows fire on
+# our main and tags. So run this from a repo other than ourostack/cmux and keep Actions
+# disabled on ourostack/cmux; REPO below is explicit so the file can move unchanged.
 name: Upstream sync
 
 on:
@@ -17,8 +22,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  issues: write
+  contents: read
 
 concurrency:
   group: upstream-sync
@@ -30,16 +34,17 @@ jobs:
     timeout-minutes: 30
     env:
       UPSTREAM: manaflow-ai/cmux
-      REPO: ${{ github.repository }}
+      REPO: ourostack/cmux
       PATCH_BRANCH: ouro-patches
       CONFLICT_TITLE: "Upstream sync: ouro-patches does not rebase cleanly"
-      REF_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
-      ISSUE_TOKEN: ${{ github.token }}
+      REF_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+      ISSUE_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
     steps:
       - name: Resolve upstream main
         id: up
         run: |
           set -euo pipefail
+          if [ -z "$REF_TOKEN" ]; then echo "::error::secret FORK_SYNC_TOKEN is not set"; exit 1; fi
           sha=$(git ls-remote "https://github.com/$UPSTREAM.git" refs/heads/main | cut -f1)
           test -n "$sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
