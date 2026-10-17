@@ -21,6 +21,9 @@ public protocol TerminalSurfaceNativeViewing: NSView, TerminalSurfaceHosting {
     /// Whether keyboard copy mode is active on this view.
     var isKeyboardCopyModeActive: Bool { get }
 
+    /// Positive evidence that no clipboard read, replay, or IME work precedes input.
+    var acceptsGuardedImmediateInput: Bool { get }
+
     /// Toggles keyboard copy mode.
     ///
     /// - Returns: Whether the view handled the toggle.
@@ -82,6 +85,9 @@ public protocol TerminalSurfaceNativeViewing: NSView, TerminalSurfaceHosting {
 }
 
 public extension TerminalSurfaceNativeViewing {
+    /// Unqualified hosts cannot admit guarded input.
+    var acceptsGuardedImmediateInput: Bool { false }
+
     var renderedFrameSequence: UInt64 { 0 }
 
     /// Views outside a portal size themselves from their own bounds.
