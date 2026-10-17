@@ -331,6 +331,13 @@ public final class TerminalSurface: Identifiable, ObservableObject {
     }
     /// Routes accepted explicit user input to the surface's current panel owner.
     @MainActor public var onExplicitInput: (@MainActor () -> Void)?
+    /// Advances before explicit input, including input refused by a cold runtime.
+    @MainActor public internal(set) var shepherdInputRevision: UInt64 = 0
+    /// Advances whenever the native focus state changes.
+    @MainActor public internal(set) var shepherdFocusRevision: UInt64 = 0
+    /// Uptime of the latest native focus acquisition, not a wall-clock timestamp.
+    @MainActor public internal(set) var shepherdLastFocusedAt: TimeInterval?
+    @MainActor var shepherdInputReservation: (id: UUID, deadline: TimeInterval, generation: UInt64)?
     /// Set while another participant disconnected this pane's view of a
     /// shared terminal (docs/shared-terminal-sizing.md). The pane drops
     /// keyboard and text input until the user reattaches.

@@ -663,12 +663,13 @@ extension TerminalSurface {
         canonicalKeyCharacter(keycode: keycode)?.unicodeScalars.first?.value
     }
 
+    @discardableResult
     @MainActor
     func sendKeyEvent(
         surface: ghostty_surface_t,
         keycode: UInt32,
         mods: ghostty_input_mods_e = GHOSTTY_MODS_NONE
-    ) {
+    ) -> Bool {
         TerminalPredictionCenter.shared.sentUntrackedInput(surfaceID: id)
         var keyEvent = ghostty_input_key_s()
         keyEvent.action = GHOSTTY_ACTION_PRESS
@@ -719,6 +720,7 @@ extension TerminalSurface {
             "handled=\(handled ? 1 : 0)"
         )
 #endif
+        return handled
     }
 
     @MainActor

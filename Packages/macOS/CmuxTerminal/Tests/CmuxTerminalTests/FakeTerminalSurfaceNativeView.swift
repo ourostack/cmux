@@ -10,6 +10,7 @@ final class FakeTerminalSurfaceNativeView: NSView {
     var attachedSurfaceController: (any TerminalSurfaceControlling)? { attachedController }
     var currentKeyStateIndicatorText: String? { nil }
     var isKeyboardCopyModeActive = false
+    var acceptsGuardedImmediateInput: Bool { !shouldDeferRuntimeInput && !isKeyboardCopyModeActive }
     private(set) var keyboardCopyModeCancellationCount = 0
     var shouldDeferRuntimeInput = false
     var runtimeInputDeferralResponses: [Bool] = []
