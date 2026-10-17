@@ -499,6 +499,29 @@ struct TerminalSurfaceExplicitInputTests {
         #expect(!fixture.surface.sendShepherdSubmit(requestID: second))
     }
 
+    @Test
+    func reentrantAttentionCallbackCannotReserveDuringAnOrdinaryWrite() {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.surface.onExplicitInput = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        #expect(fixture.surface.sendTextResult("human") == .sent)
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+    }
+
     private func makeFixture(
         initialInput: String? = nil,
         preparePaneHost: @Sendable @MainActor (any TerminalSurfacePaneHosting) -> Void = { _ in },
