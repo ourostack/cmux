@@ -206,4 +206,109 @@ struct ShepherdAdmissionTests {
         #expect(failed.pasteAdmitted)
         #expect(!failed.submitAdmitted)
     }
+
+    @Test
+    func submitCannotReenterAnUnfinishedPasteWriter() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        var after = before
+        after.composer = .draft("continue")
+        var submits = 0
+        let receipt = gate.paste(
+            requestID: request, token: token.id, text: "continue",
+            snapshot: before, now: 100.1
+        ) {
+            _ = gate.submit(requestID: request, snapshot: after, now: 100.3) {
+                submits += 1
+                return true
+            }
+            return .notAdmitted
+        }
+        #expect(receipt.state == .notSent)
+        #expect(!receipt.pasteAdmitted)
+        #expect(submits == 0)
+    }
+
+    @Test
+    func conflictingPayloadCannotChangeTheStoredReceipt() throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        let request = UUID()
+        let first = gate.paste(
+            requestID: request, token: token.id, text: "continue",
+            snapshot: snapshot, now: 100.1
+        ) { .admitted(inputRevision: 11) }
+        var writes = 0
+        let conflict = gate.paste(
+            requestID: request, token: token.id, text: "different",
+            snapshot: snapshot, now: 100.2
+        ) {
+            writes += 1
+            return .admitted(inputRevision: 12)
+        }
+        #expect(conflict.state == .unknown)
+        #expect(conflict.reason == "request_conflict")
+        #expect(gate.receipt(requestID: request) == first)
+        #expect(writes == 0)
+    }
+
+    @Test
+    func earlySubmitPreservesReservationUntilRequiredSeparation() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        _ = gate.paste(
+            requestID: request, token: token.id, text: "continue",
+            snapshot: before, now: 100.1
+        ) { .admitted(inputRevision: 11) }
+        var after = before
+        after.composer = .draft("continue")
+        after.inputRevision = 11
+        var submits = 0
+        let early = gate.submit(requestID: request, snapshot: after, now: 100.2) {
+            submits += 1
+            return true
+        }
+        #expect(early.state == .unknown)
+        #expect(submits == 0)
+        let ready = gate.submit(requestID: request, snapshot: after, now: 100.3) {
+            submits += 1
+            return true
+        }
+        #expect(ready.state == .accepted)
+        #expect(submits == 1)
+    }
+
+    @Test
+    func boundedReceiptCapacityRefusesWithoutDiscardingReplayBarriers() throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        var firstRequest: UUID?
+        for _ in 0..<1024 {
+            let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+            let request = UUID()
+            firstRequest = firstRequest ?? request
+            _ = gate.paste(
+                requestID: request, token: token.id, text: "continue",
+                snapshot: snapshot, now: 100.1
+            ) { .notAdmitted }
+        }
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        var writes = 0
+        let refused = gate.paste(
+            requestID: UUID(), token: token.id, text: "continue",
+            snapshot: snapshot, now: 100.1
+        ) {
+            writes += 1
+            return .admitted(inputRevision: 11)
+        }
+        #expect(refused.reason == "receipt_capacity")
+        #expect(refused.state == .notSent)
+        #expect(gate.receipt(requestID: try #require(firstRequest)) != nil)
+        #expect(writes == 0)
+    }
 }
