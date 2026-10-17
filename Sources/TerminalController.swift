@@ -16456,6 +16456,9 @@ class TerminalController {
         let col = (params["col"] as? NSNumber)?.intValue ?? 0
         let row = (params["row"] as? NSNumber)?.intValue ?? 0
         if deltaLines != 0 {
+            if let answer = shepherdReservedMobileInputAnswer(delivery, surface: terminalTarget.surface) {
+                return answer
+            }
             terminalTarget.surface.mobileScroll(deltaLines: deltaLines, col: max(0, col), row: max(0, row))
             MobileTerminalRenderObserver.shared.noteTerminalBytes(surfaceID: terminalTarget.surfaceID)
         }
@@ -16486,6 +16489,9 @@ class TerminalController {
         }
         let col = (params["col"] as? NSNumber)?.intValue ?? 0
         let row = (params["row"] as? NSNumber)?.intValue ?? 0
+        if let answer = shepherdReservedMobileInputAnswer(delivery, surface: terminalTarget.surface) {
+            return answer
+        }
         terminalTarget.surface.mobileClick(col: max(0, col), row: max(0, row))
         MobileTerminalRenderObserver.shared.noteTerminalBytes(surfaceID: terminalTarget.surfaceID)
         let acknowledgement = MobileHostTerminalInputApplier.shared.completeAccepted(delivery)

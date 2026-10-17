@@ -11,6 +11,9 @@ extension TerminalSurface {
     @MainActor
     @discardableResult
     public func performBindingAction(_ action: String) -> Bool {
+        guard !hasShepherdInputReservation else { return false }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: action.utf8.count,
             replay: { [weak self] in
@@ -24,6 +27,9 @@ extension TerminalSurface {
 
     @MainActor
     private func performBindingActionImmediately(_ action: String) -> Bool {
+        guard !hasShepherdInputReservation else { return false }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         guard let surface = liveSurfaceForGhosttyAccess(reason: "bindingAction") else { return false }
         return withRuntimeClipboardPasteIntent {
             action.withCString { cString in
@@ -105,6 +111,8 @@ extension TerminalSurface {
     @MainActor
     @discardableResult
     public func performExplicitInputBindingAction(_ action: String) -> Bool {
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         return performExplicitBindingActionAfterInputNotification(action)
     }
@@ -135,6 +143,8 @@ extension TerminalSurface {
     @discardableResult
     @MainActor
     public func toggleKeyboardCopyMode() -> Bool {
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         let handled = surfaceView.toggleKeyboardCopyMode()
         if handled {

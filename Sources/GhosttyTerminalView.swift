@@ -5836,6 +5836,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         return true
     }
     func performBindingAction(_ action: String) -> Bool {
+        guard terminalSurface?.hasShepherdInputReservation != true else { return false }
         if deferRuntimeInputDuringClipboardRead(
             estimatedBytes: action.utf8.count,
             replay: { [weak self] in
@@ -5848,6 +5849,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     private func performBindingActionImmediately(_ action: String) -> Bool {
+        guard terminalSurface?.hasShepherdInputReservation != true else { return false }
         guard let surface = surface else { return false }
         return withPotentialClipboardPasteIntent {
             action.withCString { cString in
@@ -7125,6 +7127,9 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     private func performKeyEquivalent(with event: NSEvent, shouldRetryMainMenu: Bool) -> Bool {
+        let inputSurface = terminalSurface
+        inputSurface?.beginShepherdInputExclusion()
+        defer { inputSurface?.endShepherdInputExclusion() }
 #if DEBUG
         let typingTimingStart = CmuxTypingTiming.start()
         defer {
@@ -7138,6 +7143,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         guard event.type == .keyDown else { return false }
         guard let fr = window?.firstResponder as? NSView,
               fr === self || fr.isDescendant(of: self) else { return false }
+        terminalSurface?.invalidateShepherdInput()
         // A disconnected shared-terminal view keeps app menu shortcuts but
         // never runs terminal bindings such as paste.
         if terminalSurface?.sharingViewDetached == true { return false }
@@ -7328,13 +7334,16 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     override func keyDown(with event: NSEvent) {
+        let inputSurface = terminalSurface
+        inputSurface?.beginShepherdInputExclusion()
+        defer { inputSurface?.endShepherdInputExclusion() }
         // A fresh press invalidates the gesture's alternate-screen answer before
         // any early return, so a later repeat never reuses one from another key.
         if !event.isARepeat { textEditingGestureAlternateScreenAtPress = nil }
         // A disconnected shared-terminal view sends nothing until Reattach.
         if terminalSurface?.sharingViewDetached == true { return }
-        if routeInputDuringClipboardRead(event) { return }
         let cancelledDeferredAdmission = terminalSurface?.didReceiveExplicitInput() == true
+        if routeInputDuringClipboardRead(event) { return }
 #if DEBUG
         let typingTimingStart = CmuxTypingTiming.start()
         let phaseTotalStart = ProcessInfo.processInfo.systemUptime
@@ -14313,6 +14322,9 @@ extension GhosttyNSView: NSTextInputClient {
     /// automation payloads remain byte-for-byte stable.
     fileprivate func sendTextToSurface(_ chars: String, preserveLiteralEscape: Bool) {
         guard !chars.isEmpty else { return }
+        let inputSurface = terminalSurface
+        inputSurface?.beginShepherdInputExclusion()
+        defer { inputSurface?.endShepherdInputExclusion() }
         terminalSurface?.didReceiveExplicitInput()
         recordDirectAgentHibernationTerminalInput()
         sendTextToSurfaceAfterInputNotification(
@@ -14573,6 +14585,10 @@ extension GhosttyNSView: NSTextInputClient {
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let inputSurface = terminalSurface
+        inputSurface?.beginShepherdInputExclusion()
+        defer { inputSurface?.endShepherdInputExclusion() }
+        terminalSurface?.invalidateShepherdInput()
 #if DEBUG
         let typingTimingStart = CmuxTypingTiming.start()
         defer {

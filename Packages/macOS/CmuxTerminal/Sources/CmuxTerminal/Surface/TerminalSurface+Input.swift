@@ -27,6 +27,9 @@ extension TerminalSurface {
     @MainActor
     @discardableResult
     public func didReceiveExplicitInput() -> Bool {
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
+        invalidateShepherdInput()
         startupInputGate.cancel(generation: terminalLifecycleId)
         var cancelledDeferredAdmission = false
         if cancelsStartupRestoreAdmissionOnExplicitInput,
@@ -103,6 +106,9 @@ extension TerminalSurface {
     @discardableResult
     public func sendTextResult(_ text: String) -> TextSendResult {
         guard let data = text.data(using: .utf8), !data.isEmpty else { return .sent }
+        guard !hasShepherdInputReservation else { return .surfaceUnavailable }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         let result = sendTextAfterExplicitInput(data)
         if result.accepted {
@@ -116,6 +122,9 @@ extension TerminalSurface {
 
     @MainActor
     private func sendTextAfterExplicitInput(_ data: Data) -> TextSendResult {
+        guard !hasShepherdInputReservation else { return .surfaceUnavailable }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: data.count,
             replay: { [weak self] in
@@ -149,12 +158,18 @@ extension TerminalSurface {
     @discardableResult
     public func sendKeyText(_ text: String) -> Bool {
         guard !text.isEmpty else { return true }
+        guard !hasShepherdInputReservation else { return false }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         return sendKeyTextAfterExplicitInput(text)
     }
 
     @MainActor
     private func sendKeyTextAfterExplicitInput(_ text: String) -> Bool {
+        guard !hasShepherdInputReservation else { return false }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: text.utf8.count,
             replay: { [weak self] in
@@ -212,6 +227,9 @@ extension TerminalSurface {
     @discardableResult
     public func sendNamedKey(_ keyName: String) -> NamedKeySendResult {
         guard let event = pendingKeyEvent(for: keyName) else { return .unknownKey }
+        guard !hasShepherdInputReservation else { return .surfaceUnavailable }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         let result = sendNamedKeyAfterExplicitInput(event)
         if result.accepted {
@@ -227,6 +245,9 @@ extension TerminalSurface {
     private func sendNamedKeyAfterExplicitInput(
         _ event: PendingKeyEvent
     ) -> NamedKeySendResult {
+        guard !hasShepherdInputReservation else { return .surfaceUnavailable }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: PendingSocketInput.key(event).estimatedBytes,
             replay: { [weak self] in
@@ -292,6 +313,9 @@ extension TerminalSurface {
     @discardableResult
     public func sendInputResult(_ text: String) -> InputSendResult {
         guard !text.isEmpty else { return .sent }
+        guard !hasShepherdInputReservation else { return .surfaceUnavailable }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         let result = sendInputAfterExplicitInput(text)
         if result.accepted {
@@ -305,6 +329,9 @@ extension TerminalSurface {
 
     @MainActor
     func sendInputAfterExplicitInput(_ text: String, recordsExplicitInput: Bool = true) -> InputSendResult {
+        guard !hasShepherdInputReservation else { return .surfaceUnavailable }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: text.utf8.count,
             replay: { [weak self] in

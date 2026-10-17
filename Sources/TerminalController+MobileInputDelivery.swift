@@ -4,6 +4,19 @@ import Foundation
 
 /// RPC glue for exactly-once phone input (``MobileHostTerminalInputApplier``).
 extension TerminalController {
+    func shepherdReservedMobileInputAnswer(
+        _ delivery: MobileTerminalInputDelivery?,
+        surface: TerminalSurface
+    ) -> V2CallResult? {
+        guard surface.hasShepherdInputReservation else { return nil }
+        return mobileInputWriteFailure(
+            code: "surface_unavailable",
+            message: Self.terminalSurfaceUnavailableMessage,
+            surfaceID: surface.id,
+            acknowledgement: MobileHostTerminalInputApplier.shared.complete(delivery, result: .surfaceUnavailable)
+        )
+    }
+
     /// The delivery identity of a phone request, bound to the terminal the
     /// phone stamped (not the canonical surface it resolves to), so the input
     /// lane bound to the same id and the RPCs share one ledger entry.

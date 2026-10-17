@@ -2,6 +2,11 @@ import AppKit
 import CmuxTerminalCore
 
 extension GhosttyNSView {
+    var acceptsGuardedImmediateInput: Bool {
+        !hasClipboardInputDeferral && pendingInputReplayActions.isEmpty
+            && !hasMarkedText() && !isKeyboardCopyModeActive
+    }
+
     enum ClipboardDeferredInput {
         case appKitEvent(NSEvent)
         case runtimeMutation(() -> Void)
@@ -109,7 +114,14 @@ extension GhosttyNSView {
     }
 
     func routeInputDuringClipboardRead(_ event: NSEvent) -> Bool {
-        terminalClipboardInputSequencer.shouldDefer(
+        switch event.type {
+        case .keyDown, .keyUp, .flagsChanged, .leftMouseDown, .rightMouseDown,
+             .otherMouseDown, .scrollWheel:
+            terminalSurface?.invalidateShepherdInput()
+        default:
+            break
+        }
+        return terminalClipboardInputSequencer.shouldDefer(
             .appKitEvent(event),
             epoch: terminalSurface?.runtimeSurfaceGeneration ?? .max,
             discardWhenFull: event.cmuxCanDiscardDuringClipboardRead
