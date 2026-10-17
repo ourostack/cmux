@@ -14,6 +14,9 @@ extension TerminalSurface {
     @MainActor
     public func mobileScroll(deltaLines: Double, col: Int, row: Int) {
         guard deltaLines != 0 else { return }
+        guard !hasShepherdInputReservation else { return }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         mobileScrollAfterInputNotification(
             deltaLines: deltaLines,
@@ -28,6 +31,9 @@ extension TerminalSurface {
         col: Int,
         row: Int
     ) {
+        guard !hasShepherdInputReservation else { return }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: MemoryLayout<Double>.size
                 + (2 * MemoryLayout<Int>.size),
@@ -63,12 +69,18 @@ extension TerminalSurface {
     /// the main actor like the desktop's own click path.
     @MainActor
     public func mobileClick(col: Int, row: Int) {
+        guard !hasShepherdInputReservation else { return }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         didReceiveExplicitInput()
         mobileClickAfterInputNotification(col: col, row: row)
     }
 
     @MainActor
     private func mobileClickAfterInputNotification(col: Int, row: Int) {
+        guard !hasShepherdInputReservation else { return }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: 2 * MemoryLayout<Int>.size,
             replay: { [weak self] in

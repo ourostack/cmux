@@ -3,10 +3,31 @@ public import GhosttyKit
 internal import Carbon.HIToolbox
 
 extension TerminalSurface {
+    /// Excludes guarded admission across a synchronous physical input dispatch.
+    ///
+    /// Balance with ``endShepherdInputExclusion()`` using `defer`.
+    @MainActor
+    public func beginShepherdInputExclusion() {
+        shepherdInputExclusionDepth += 1
+    }
+
+    /// Ends one synchronous input dispatch's guarded-admission exclusion.
+    @MainActor
+    public func endShepherdInputExclusion() {
+        shepherdInputExclusionDepth -= 1
+    }
+
+    /// Invalidates guarded observations and cancels submission before physical input proceeds.
+    @MainActor
+    public func invalidateShepherdInput() {
+        shepherdInputRevision &+= 1
+        shepherdInputReservation = nil
+    }
+
     /// Whether this runtime can accept guarded input without creating or queueing work.
     @MainActor
     public var acceptsShepherdImmediateInput: Bool {
-        guard !ioMode.usesManualIO, !sharingViewDetached,
+        guard shepherdInputExclusionDepth == 0, !ioMode.usesManualIO, !sharingViewDetached,
               pendingSocketInputQueue.isEmpty, pendingSocketInputBytes == 0,
               !runtimeSurfaceSuspendedForAgentHibernation,
               surfaceView.acceptsGuardedImmediateInput,
@@ -56,6 +77,8 @@ extension TerminalSurface {
               }),
               let data = text.data(using: .utf8),
               let live = liveSurfaceForGhosttyAccess(reason: "shepherd.paste") else { return nil }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         shepherdInputReservation = (requestID, expiresAt, runtimeSurfaceGeneration)
         shepherdInputRevision &+= 1
         let admittedRevision = shepherdInputRevision
@@ -77,6 +100,8 @@ extension TerminalSurface {
         guard hasShepherdInputReservation, shepherdInputReservation?.id == requestID,
               acceptsShepherdImmediateInput, !desiredFocusState,
               let live = liveSurfaceForGhosttyAccess(reason: "shepherd.submit") else { return false }
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         shepherdInputReservation = nil
         shepherdInputRevision &+= 1
         let handled = sendKeyEvent(surface: live, keycode: UInt32(kVK_Return))

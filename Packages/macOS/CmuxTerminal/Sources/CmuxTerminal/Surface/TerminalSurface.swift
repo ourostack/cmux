@@ -338,6 +338,7 @@ public final class TerminalSurface: Identifiable, ObservableObject {
     /// Uptime of the latest native focus acquisition, not a wall-clock timestamp.
     @MainActor public internal(set) var shepherdLastFocusedAt: TimeInterval?
     @MainActor var shepherdInputReservation: (id: UUID, deadline: TimeInterval, generation: UInt64)?
+    @MainActor var shepherdInputExclusionDepth = 0
     /// Set while another participant disconnected this pane's view of a
     /// shared terminal (docs/shared-terminal-sizing.md). The pane drops
     /// keyboard and text input until the user reattaches.
