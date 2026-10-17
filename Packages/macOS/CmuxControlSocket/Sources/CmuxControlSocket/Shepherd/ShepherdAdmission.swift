@@ -199,7 +199,8 @@ public final class ShepherdAdmission {
                 submitAdmitted: false
             )
         }
-        guard let reservation = reservations[requestID] else { return request.receipt }
+        guard request.receipt.pasteAdmitted,
+              let reservation = reservations[requestID] else { return request.receipt }
         guard now.isFinite, now >= reservation.pastedAt + 0.15 else { return request.receipt }
         reservations.removeValue(forKey: requestID)
         let before = reservation.observation.snapshot
