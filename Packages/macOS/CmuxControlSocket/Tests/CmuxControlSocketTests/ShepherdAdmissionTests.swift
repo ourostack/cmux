@@ -1,0 +1,209 @@
+import Foundation
+import Testing
+@testable import CmuxControlSocket
+
+@Suite(.serialized)
+@MainActor
+struct ShepherdAdmissionTests {
+    private func idleSnapshot() -> ShepherdAdmissionSnapshot {
+        ShepherdAdmissionSnapshot(
+            surfaceID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            workspaceID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            processInstance: "123:456",
+            surfaceGeneration: 1,
+            screenFingerprint: "screen-before-paste",
+            outsideComposerFingerprint: "transcript-before-paste",
+            inputRevision: 10,
+            focusRevision: 20,
+            focused: false,
+            idle: true,
+            composer: .empty,
+            backgroundWork: false,
+            acceptsImmediateInput: true
+        )
+    }
+
+    @Test
+    func expiredTokenRefusesBeforeInput() throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        var pastes = 0
+        let receipt = gate.paste(
+            requestID: UUID(), token: token.id, text: "[Ouro] Continue authorized work.",
+            snapshot: snapshot, now: 102
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 11)
+        }
+        #expect(receipt.state == .notSent)
+        #expect(pastes == 0)
+    }
+
+    @Test(arguments: ["focus", "input", "screen", "process", "surface", "workspace", "generation", "draft", "working", "background", "deferred"])
+    func changedEvidenceRefusesBeforeInput(change: String) throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        var changed = snapshot
+        switch change {
+        case "focus": changed.focusRevision += 1
+        case "input": changed.inputRevision += 1
+        case "screen": changed.screenFingerprint = "other-screen"
+        case "process": changed.processInstance = "123:999"
+        case "surface": changed.surfaceID = UUID()
+        case "workspace": changed.workspaceID = UUID()
+        case "generation": changed.surfaceGeneration += 1
+        case "draft": changed.composer = .draft("human text")
+        case "working": changed.idle = false
+        case "background": changed.backgroundWork = true
+        default: changed.acceptsImmediateInput = false
+        }
+        var pastes = 0
+        let receipt = gate.paste(
+            requestID: UUID(), token: token.id, text: "[Ouro] Continue authorized work.",
+            snapshot: changed, now: 100.1
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 11)
+        }
+        #expect(receipt.state == .notSent)
+        #expect(pastes == 0)
+    }
+
+    @Test
+    func stableComposerSubmitsExactlyOnce() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        var pastes = 0
+        let pasted = gate.paste(
+            requestID: request, token: token.id, text: "[Ouro] Continue authorized work.",
+            snapshot: before, now: 100.1
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 11)
+        }
+        #expect(pasted.state == .unknown)
+        #expect(pasted.pasteAdmitted)
+        #expect(!pasted.submitAdmitted)
+        var after = before
+        after.screenFingerprint = "screen-with-own-draft"
+        after.composer = .draft("[Ouro] Continue authorized work.")
+        after.inputRevision = 11
+        var submits = 0
+        let sent = gate.submit(requestID: request, snapshot: after, now: 100.3) {
+            submits += 1
+            return true
+        }
+        #expect(sent.state == .accepted)
+        #expect(sent.pasteAdmitted)
+        #expect(sent.submitAdmitted)
+        let duplicate = gate.submit(requestID: request, snapshot: after, now: 100.4) {
+            submits += 1
+            return true
+        }
+        #expect(duplicate == sent)
+        #expect(gate.receipt(requestID: request) == sent)
+        #expect(pastes == 1)
+        #expect(submits == 1)
+    }
+
+    @Test(arguments: ["focus", "input", "process", "transcript", "draft", "deadline", "working", "deferred"])
+    func invalidationAfterPasteNeverSubmitsOrClaimsNotSent(change: String) throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        _ = gate.paste(
+            requestID: request, token: token.id, text: "[Ouro] Continue authorized work.",
+            snapshot: before, now: 100.1
+        ) { .admitted(inputRevision: 11) }
+        var after = before
+        after.screenFingerprint = "screen-with-own-draft"
+        after.composer = .draft("[Ouro] Continue authorized work.")
+        after.inputRevision = 11
+        switch change {
+        case "focus": after.focusRevision += 1
+        case "input": after.inputRevision += 1
+        case "process": after.processInstance = "123:999"
+        case "transcript": after.outsideComposerFingerprint = "new-output"
+        case "draft": after.composer = .draft("[Ouro] Continue authorized work. human edit")
+        case "working": after.idle = false
+        case "deferred": after.acceptsImmediateInput = false
+        default: break
+        }
+        var submits = 0
+        let receipt = gate.submit(
+            requestID: request, snapshot: after, now: change == "deadline" ? 102 : 100.3
+        ) {
+            submits += 1
+            return true
+        }
+        #expect(receipt.state == .unknown)
+        #expect(receipt.pasteAdmitted)
+        #expect(!receipt.submitAdmitted)
+        #expect(submits == 0)
+    }
+
+    @Test
+    func duplicateRequestAndConsumedTokenCannotPasteTwice() throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        let request = UUID()
+        var pastes = 0
+        let first = gate.paste(
+            requestID: request, token: token.id, text: "[Ouro] Continue authorized work.",
+            snapshot: snapshot, now: 100.1
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 11)
+        }
+        let duplicate = gate.paste(
+            requestID: request, token: token.id, text: "[Ouro] Continue authorized work.",
+            snapshot: snapshot, now: 100.2
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 12)
+        }
+        let anotherRequest = gate.paste(
+            requestID: UUID(), token: token.id, text: "[Ouro] Other work.",
+            snapshot: snapshot, now: 100.2
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 12)
+        }
+        #expect(duplicate == first)
+        #expect(anotherRequest.state == .notSent)
+        #expect(pastes == 1)
+    }
+
+    @Test
+    func rejectedPasteIsDefinitelyNotSentButFailedSubmitIsUnknown() throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        let rejected = gate.paste(
+            requestID: UUID(), token: token.id, text: "[Ouro] Continue authorized work.",
+            snapshot: snapshot, now: 100.1
+        ) { .notAdmitted }
+        #expect(rejected.state == .notSent)
+        #expect(!rejected.pasteAdmitted)
+
+        let next = try #require(gate.inspect(snapshot: snapshot, now: 100.2))
+        let request = UUID()
+        _ = gate.paste(
+            requestID: request, token: next.id, text: "[Ouro] Continue authorized work.",
+            snapshot: snapshot, now: 100.3
+        ) { .admitted(inputRevision: 11) }
+        var after = snapshot
+        after.composer = .draft("[Ouro] Continue authorized work.")
+        after.inputRevision = 11
+        let failed = gate.submit(requestID: request, snapshot: after, now: 100.5) { false }
+        #expect(failed.state == .unknown)
+        #expect(failed.pasteAdmitted)
+        #expect(!failed.submitAdmitted)
+    }
+}
