@@ -126,13 +126,16 @@ extension TerminalSurface {
     @MainActor
     @discardableResult
     public func performProgrammaticInputBindingAction(_ action: String) -> Bool {
-        performExplicitInputBindingAction(action)
+        guard !hasShepherdInputReservation else { return false }
+        return performExplicitInputBindingAction(action)
     }
 
     @MainActor
     private func performExplicitBindingActionAfterInputNotification(
         _ action: String
     ) -> Bool {
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: action.utf8.count,
             replay: { [weak self] in
