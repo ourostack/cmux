@@ -232,6 +232,74 @@ struct ShepherdAdmissionTests {
     }
 
     @Test
+    func retryKeepsTheOriginalReceiptWhenOnlyLiveEvidenceChanged() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        let first = gate.paste(
+            requestID: request, token: token.id, text: "continue",
+            snapshot: before, now: 100.1
+        ) { .admitted(inputRevision: 11) }
+        var changed = before
+        changed.processInstance = "999:999"
+        changed.surfaceGeneration += 1
+        changed.inputRevision += 1
+        let duplicate = gate.paste(
+            requestID: request, token: token.id, text: "continue",
+            snapshot: changed, now: 100.2
+        ) {
+            Issue.record("A receipt retry must not admit input.")
+            return .notAdmitted
+        }
+        #expect(duplicate == first)
+        #expect(duplicate.processInstance == before.processInstance)
+    }
+
+    @Test(arguments: ["surface", "workspace"])
+    func conflictingTargetCannotReuseAnAcceptedReceipt(change: String) throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        var pastes = 0
+        _ = gate.paste(
+            requestID: request, token: token.id, text: "continue",
+            snapshot: before, now: 100.1
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 11)
+        }
+        var after = before
+        after.composer = .draft("continue")
+        after.inputRevision = 11
+        var submits = 0
+        let accepted = gate.submit(requestID: request, snapshot: after, now: 100.3) {
+            submits += 1
+            return true
+        }
+        #expect(accepted.state == .accepted)
+        var otherTarget = before
+        if change == "surface" {
+            otherTarget.surfaceID = UUID()
+        } else {
+            otherTarget.workspaceID = UUID()
+        }
+        let conflict = gate.paste(
+            requestID: request, token: token.id, text: "continue",
+            snapshot: otherTarget, now: 100.4
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 12)
+        }
+        #expect(conflict.state == .unknown)
+        #expect(conflict.reason == "request_conflict")
+        #expect(gate.receipt(requestID: request) == accepted)
+        #expect(pastes == 1)
+        #expect(submits == 1)
+    }
+
+    @Test
     func conflictingPayloadCannotChangeTheStoredReceipt() throws {
         let gate = ShepherdAdmission()
         let snapshot = idleSnapshot()
