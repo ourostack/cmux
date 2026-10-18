@@ -37,6 +37,7 @@ struct TerminalSurfaceExplicitInputTests {
         case namedKey
         case parsedInput
         case bindingAction
+        case programmaticBindingAction
         case mobileScroll
         case mobileClick
 
@@ -57,6 +58,8 @@ struct TerminalSurfaceExplicitInputTests {
                 _ = surface.sendInputResult("hello")
             case .bindingAction:
                 _ = surface.performBindingAction("scroll_to_bottom")
+            case .programmaticBindingAction:
+                _ = surface.performProgrammaticInputBindingAction("paste_from_clipboard")
             case .mobileScroll:
                 surface.mobileScroll(deltaLines: 1, col: 0, row: 0)
             case .mobileClick:
@@ -497,6 +500,26 @@ struct TerminalSurfaceExplicitInputTests {
         fixture.surface.surface = runtime
         #expect(!fixture.surface.hasShepherdInputReservation)
         #expect(!fixture.surface.sendShepherdSubmit(requestID: second))
+    }
+
+    @Test
+    func physicalBindingActionCancelsReservationAndStillDispatches() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        let request = UUID()
+        let revision = try #require(fixture.surface.sendShepherdPaste(
+            "continue", requestID: request, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ))
+        #expect(fixture.surface.performExplicitInputBindingAction("paste_from_clipboard"))
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(fixture.surface.shepherdInputRevision == revision + 1)
+        #expect(fixture.paneHost.explicitInputCount == 1)
+        #expect(fixture.nativeView.runtimeInputDeferralCallCount == 1)
+        #expect(!fixture.surface.sendShepherdSubmit(requestID: request))
     }
 
     @Test

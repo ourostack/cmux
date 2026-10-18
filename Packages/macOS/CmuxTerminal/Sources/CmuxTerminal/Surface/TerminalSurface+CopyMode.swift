@@ -117,6 +117,18 @@ extension TerminalSurface {
         return performExplicitBindingActionAfterInputNotification(action)
     }
 
+    /// Performs programmatic input with explicit-input notifications when admitted.
+    ///
+    /// Unlike physical input, automation must not cancel a guarded reservation.
+    ///
+    /// - Parameter action: The Ghostty binding requested by automation.
+    /// - Returns: Whether the runtime performed or queued the action.
+    @MainActor
+    @discardableResult
+    public func performProgrammaticInputBindingAction(_ action: String) -> Bool {
+        performExplicitInputBindingAction(action)
+    }
+
     @MainActor
     private func performExplicitBindingActionAfterInputNotification(
         _ action: String
