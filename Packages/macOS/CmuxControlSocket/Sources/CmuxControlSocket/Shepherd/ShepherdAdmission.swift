@@ -127,7 +127,9 @@ public final class ShepherdAdmission {
     ) -> ShepherdAdmissionReceipt {
         expire(at: now)
         if let prior = requests[requestID] {
-            guard prior.tokenID == token, prior.text == text else {
+            guard prior.tokenID == token, prior.text == text,
+                  prior.receipt.surfaceID == snapshot.surfaceID,
+                  prior.receipt.workspaceID == snapshot.workspaceID else {
                 var conflict = prior.receipt
                 conflict.state = .unknown
                 conflict.reason = "request_conflict"
