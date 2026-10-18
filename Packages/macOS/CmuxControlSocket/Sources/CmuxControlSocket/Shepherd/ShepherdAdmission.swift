@@ -1,85 +1,10 @@
 public import Foundation
 
-public enum ShepherdComposerState: Equatable, Sendable {
-    case unknown
-    case empty
-    case draft(String)
-    case dialog
-}
-
-public struct ShepherdAdmissionSnapshot: Equatable, Sendable {
-    public var surfaceID: UUID
-    public var workspaceID: UUID
-    public var processInstance: String?
-    public var surfaceGeneration: UInt64
-    public var screenFingerprint: String
-    public var outsideComposerFingerprint: String
-    public var inputRevision: UInt64
-    public var focusRevision: UInt64
-    public var focused: Bool
-    public var idle: Bool?
-    public var composer: ShepherdComposerState
-    public var backgroundWork: Bool?
-    public var acceptsImmediateInput: Bool
-
-    public init(
-        surfaceID: UUID,
-        workspaceID: UUID,
-        processInstance: String?,
-        surfaceGeneration: UInt64,
-        screenFingerprint: String,
-        outsideComposerFingerprint: String,
-        inputRevision: UInt64,
-        focusRevision: UInt64,
-        focused: Bool,
-        idle: Bool?,
-        composer: ShepherdComposerState,
-        backgroundWork: Bool?,
-        acceptsImmediateInput: Bool
-    ) {
-        self.surfaceID = surfaceID
-        self.workspaceID = workspaceID
-        self.processInstance = processInstance
-        self.surfaceGeneration = surfaceGeneration
-        self.screenFingerprint = screenFingerprint
-        self.outsideComposerFingerprint = outsideComposerFingerprint
-        self.inputRevision = inputRevision
-        self.focusRevision = focusRevision
-        self.focused = focused
-        self.idle = idle
-        self.composer = composer
-        self.backgroundWork = backgroundWork
-        self.acceptsImmediateInput = acceptsImmediateInput
-    }
-}
-
-public struct ShepherdObservationToken: Equatable, Sendable {
-    public let id: UUID
-    public let expiresAt: TimeInterval
-}
-
-public enum ShepherdAdmissionState: String, Equatable, Sendable {
-    case notSent = "not_sent"
-    case accepted
-    case unknown
-}
-
-public struct ShepherdAdmissionReceipt: Equatable, Sendable {
-    public let requestID: UUID
-    public let surfaceID: UUID
-    public let workspaceID: UUID
-    public let processInstance: String?
-    public var state: ShepherdAdmissionState
-    public var reason: String
-    public var pasteAdmitted: Bool
-    public var submitAdmitted: Bool
-}
-
-public enum ShepherdPasteWriteResult: Equatable, Sendable {
-    case notAdmitted
-    case admitted(inputRevision: UInt64)
-}
-
+/// A bounded native observation and receipt owner that fails closed at capacity.
+///
+/// Keep one owner for a native host lifetime. It refuses new requests rather
+/// than evicting the 1,024 retained replay outcomes or granting input from
+/// unknown readiness. Actual transport and current facts remain host duties.
 @MainActor
 public final class ShepherdAdmission {
     /// Why an unfinished submission is being withheld.
@@ -118,8 +43,15 @@ public final class ShepherdAdmission {
     private var requests: [UUID: Request] = [:]
     private var reservations: [UUID: Reservation] = [:]
 
+    /// Creates an empty boot-local observation and receipt ledger.
     public init() {}
 
+    /// Issues a one-use, two-second token only for a ready, empty target.
+    ///
+    /// - Parameters:
+    ///   - snapshot: Current native evidence, never terminal-provided authority.
+    ///   - now: Current host uptime.
+    /// - Returns: A token, or nil for unknown, busy, focused or capacity-limited state.
     public func inspect(snapshot: ShepherdAdmissionSnapshot, now: TimeInterval) -> ShepherdObservationToken? {
         expire(at: now)
         guard now.isFinite, observations.count < 128,
@@ -132,6 +64,16 @@ public final class ShepherdAdmission {
         return token
     }
 
+    /// Admits one literal paste only when fresh evidence still matches its token.
+    ///
+    /// - Parameters:
+    ///   - requestID: The stable identity for these exact arguments and target.
+    ///   - token: The one-use native observation identity.
+    ///   - text: Exact, bounded, canonical single-line input.
+    ///   - snapshot: Current native evidence for the intended target.
+    ///   - now: Current host uptime.
+    ///   - write: An immediate writer; `.notAdmitted` must prove zero input.
+    /// - Returns: A recorded refusal, partial outcome, replay or conflict.
     public func paste(
         requestID: UUID,
         token: UUID,
@@ -201,6 +143,14 @@ public final class ShepherdAdmission {
         return receipt
     }
 
+    /// Consumes a reservation only after the minimum delay and exact recheck.
+    ///
+    /// - Parameters:
+    ///   - requestID: The request that admitted the paste.
+    ///   - snapshot: Current native facts and the exact inserted composer.
+    ///   - now: Current host uptime.
+    ///   - write: An immediate native Enter writer that never queues input.
+    /// - Returns: The retained outcome; partial or uncertain input stays unknown.
     public func submit(
         requestID: UUID,
         snapshot: ShepherdAdmissionSnapshot,
@@ -250,6 +200,10 @@ public final class ShepherdAdmission {
         return request.receipt
     }
 
+    /// Reads a retained outcome without replaying input.
+    ///
+    /// - Parameter requestID: The exact request identity.
+    /// - Returns: Its recorded receipt, or nil rather than an invented no-send.
     public func receipt(requestID: UUID) -> ShepherdAdmissionReceipt? {
         requests[requestID]?.receipt
     }
