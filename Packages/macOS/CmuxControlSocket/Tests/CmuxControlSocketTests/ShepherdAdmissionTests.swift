@@ -460,6 +460,70 @@ struct ShepherdAdmissionTests {
     }
 
     @Test
+    func canonicallyEquivalentComposerCannotAuthorizeSubmit() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        let text = "caf\u{e9}"
+        let changed = "cafe\u{301}"
+        #expect(!text.utf8.elementsEqual(changed.utf8))
+        _ = gate.paste(
+            requestID: request, token: token.id, text: text,
+            snapshot: before, now: 100.1
+        ) { .admitted(inputRevision: 11) }
+        var after = before
+        after.composer = .draft(changed)
+        after.inputRevision = 11
+        var submits = 0
+        let receipt = gate.submit(requestID: request, snapshot: after, now: 100.3) {
+            submits += 1
+            return true
+        }
+        #expect(receipt.state == .unknown)
+        #expect(receipt.reason == "paste_admitted_submit_withheld")
+        #expect(receipt.pasteAdmitted && !receipt.submitAdmitted)
+        #expect(submits == 0)
+    }
+
+    @Test(arguments: [false, true])
+    func canonicallyEquivalentReplayConflictsWithoutChangingReceipt(accepted: Bool) throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let request = UUID()
+        let text = "caf\u{e9}"
+        let changed = "cafe\u{301}"
+        #expect(!text.utf8.elementsEqual(changed.utf8))
+        var original = gate.paste(
+            requestID: request, token: token.id, text: text,
+            snapshot: before, now: 100.1
+        ) { .admitted(inputRevision: 11) }
+        if accepted {
+            var after = before
+            after.composer = .draft(text)
+            after.inputRevision = 11
+            original = gate.submit(requestID: request, snapshot: after, now: 100.3) { true }
+            #expect(original.state == .accepted)
+        }
+        let replay = gate.replay(
+            ShepherdContinuationRequest(requestID: request, tokenID: token.id, text: changed)
+        )
+        #expect(replay?.reason == "request_conflict")
+        var pastes = 0
+        let conflict = gate.paste(
+            requestID: request, token: token.id, text: changed,
+            snapshot: before, now: 100.4
+        ) {
+            pastes += 1
+            return .admitted(inputRevision: 12)
+        }
+        #expect(conflict.reason == "request_conflict")
+        #expect(gate.receipt(requestID: request) == original)
+        #expect(pastes == 0)
+    }
+
+    @Test
     func earlySubmitPreservesReservationUntilRequiredSeparation() throws {
         let gate = ShepherdAdmission()
         let before = idleSnapshot()
