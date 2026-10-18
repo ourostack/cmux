@@ -82,6 +82,18 @@ public enum ShepherdPasteWriteResult: Equatable, Sendable {
 
 @MainActor
 public final class ShepherdAdmission {
+    /// Why an unfinished submission is being withheld.
+    public enum CancellationReason: String, Sendable {
+        /// The owning operation was cancelled.
+        case cancelled = "request_cancelled"
+        /// The original target is no longer observable.
+        case targetUnavailable = "paste_admitted_target_unavailable"
+        /// The minimum-delay operation failed.
+        case waitFailed = "paste_admitted_wait_failed"
+        /// The delay returned before the required minimum elapsed.
+        case delayNotElapsed = "paste_admitted_minimum_delay_unmet"
+    }
+
     private struct Observation {
         let token: ShepherdObservationToken
         let snapshot: ShepherdAdmissionSnapshot
@@ -229,6 +241,62 @@ public final class ShepherdAdmission {
     }
 
     public func receipt(requestID: UUID) -> ShepherdAdmissionReceipt? {
+        requests[requestID]?.receipt
+    }
+
+    /// Reads original token scope; this historical snapshot never permits input.
+    ///
+    /// - Parameters:
+    ///   - tokenID: An observation token.
+    ///   - now: Current host uptime.
+    /// - Returns: The original binding only while the token is active.
+    public func binding(
+        tokenID: UUID,
+        now: TimeInterval
+    ) -> (token: ShepherdObservationToken, snapshot: ShepherdAdmissionSnapshot)? {
+        nil
+    }
+
+    /// Reconciles an existing request without a fresh write or new target.
+    ///
+    /// - Parameter request: The exact continuation intent.
+    /// - Returns: Its prior result or a conflict, or nil for an unknown request.
+    public func replay(_ request: ShepherdContinuationRequest) -> ShepherdAdmissionReceipt? {
+        nil
+    }
+
+    /// Records a zero-input refusal using an observed target's historical scope.
+    ///
+    /// This must never invoke a real writer or treat the old snapshot as current
+    /// permission. Existing outcomes, including accepted ones, remain unchanged.
+    ///
+    /// - Parameters:
+    ///   - request: The intent being refused before input.
+    ///   - snapshot: The original token-bound target.
+    ///   - now: Current host uptime.
+    /// - Returns: The refusal or an already-recorded outcome.
+    public func refuse(
+        _ request: ShepherdContinuationRequest,
+        snapshot: ShepherdAdmissionSnapshot,
+        now: TimeInterval
+    ) -> ShepherdAdmissionReceipt {
+        ShepherdAdmissionReceipt(
+            requestID: request.requestID, surfaceID: snapshot.surfaceID, workspaceID: snapshot.workspaceID,
+            processInstance: snapshot.processInstance, state: .notSent, reason: "paste_not_admitted",
+            pasteAdmitted: false, submitAdmitted: false
+        )
+    }
+
+    /// Withholds an unfinished submit without rewriting already-known outcomes.
+    ///
+    /// - Parameters:
+    ///   - requestID: The request whose reservation should end.
+    ///   - reason: A bounded, explicit cancellation cause.
+    /// - Returns: The retained outcome, or nil when the request is unknown.
+    public func cancel(
+        requestID: UUID,
+        reason: CancellationReason = .cancelled
+    ) -> ShepherdAdmissionReceipt? {
         requests[requestID]?.receipt
     }
 
