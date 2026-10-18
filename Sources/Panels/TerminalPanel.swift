@@ -788,6 +788,11 @@ final class TerminalPanel: Panel, ObservableObject {
         return surface.performExplicitInputBindingAction(action)
     }
 
+    func performProgrammaticBindingAction(_ action: String) -> Bool {
+        guard !isAgentHibernated else { return false }
+        return surface.performProgrammaticInputBindingAction(action)
+    }
+
     @discardableResult
     func clearScreenKeepingScrollback() -> Bool {
         resumeForExplicitInputIfNeeded()
