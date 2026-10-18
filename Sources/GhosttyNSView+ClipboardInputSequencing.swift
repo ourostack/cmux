@@ -3,7 +3,9 @@ import CmuxTerminalCore
 
 extension GhosttyNSView {
     var acceptsGuardedImmediateInput: Bool {
-        !hasClipboardInputDeferral && pendingInputReplayActions.isEmpty
+        !terminalClipboardInputSequencer.hasPendingInput(
+            for: terminalSurface?.runtimeSurfaceGeneration ?? .max
+        ) && pendingInputReplayActions.isEmpty && !replayingPendingInput
             && !hasMarkedText() && !isKeyboardCopyModeActive
     }
 
@@ -158,6 +160,10 @@ extension GhosttyNSView {
     private func replayClipboardDeferredInput(
         _ deferredInput: ClipboardDeferredInput
     ) {
+        let inputSurface = terminalSurface
+        inputSurface?.beginShepherdInputExclusion()
+        defer { inputSurface?.endShepherdInputExclusion() }
+        inputSurface?.invalidateShepherdInput()
         switch deferredInput {
         case .appKitEvent(let event):
             replayClipboardDeferredEvent(event)

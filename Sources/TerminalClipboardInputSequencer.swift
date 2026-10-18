@@ -18,6 +18,7 @@ final class TerminalClipboardInputSequencer<Event, RequestID: Hashable & Sendabl
     private var buffersByEpoch: [UInt64: EpochBuffer] = [:]
     private var replayingEpochs: Set<UInt64> = []
     private var drainingCompletionEpochs: Set<UInt64> = []
+    private var completingRequestDepthByEpoch: [UInt64: Int] = [:]
     private var overflowCancellationDepthByEpoch: [UInt64: Int] = [:]
     private var deferredOverflowReplays: [(
         epoch: UInt64,
@@ -207,7 +208,12 @@ final class TerminalClipboardInputSequencer<Event, RequestID: Hashable & Sendabl
 
     /// Whether clipboard work still precedes guarded input in this runtime epoch.
     func hasPendingInput(for epoch: UInt64 = 0) -> Bool {
-        hasInputDeferral(for: epoch)
+        hasRequestInFlight(for: epoch)
+            || (buffersByEpoch[epoch]?.pendingCount ?? 0) > 0
+            || replayingEpochs.contains(epoch)
+            || drainingCompletionEpochs.contains(epoch)
+            || (completingRequestDepthByEpoch[epoch] ?? 0) > 0
+            || deferredOverflowReplays.contains(where: { $0.epoch == epoch })
     }
 
     /// Cancels a request whose native surface lifetime ended. Deferred input
@@ -268,6 +274,15 @@ final class TerminalClipboardInputSequencer<Event, RequestID: Hashable & Sendabl
             }
         }
 
+        completingRequestDepthByEpoch[request.epoch, default: 0] += 1
+        defer {
+            let depth = completingRequestDepthByEpoch[request.epoch, default: 0]
+            if depth == 1 {
+                completingRequestDepthByEpoch.removeValue(forKey: request.epoch)
+            } else {
+                completingRequestDepthByEpoch[request.epoch] = depth - 1
+            }
+        }
         _ = removeRequest(id: id)
         onLogicalCompletion()
         replayBufferedEvents(for: request.epoch, replay: replay)
