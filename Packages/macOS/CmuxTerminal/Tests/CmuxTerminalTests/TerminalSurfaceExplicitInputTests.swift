@@ -522,7 +522,7 @@ struct TerminalSurfaceExplicitInputTests {
         fixture.surface.shellDidBecomeReadyForStartupInput()
         #expect(cmuxTestGhosttyInputEventCount() == 2)
         #expect(cmuxTestGhosttyInputEventKind(0) == 1)
-        #expect(cmuxTestGhosttyInputEventKind(1) == 2)
+        #expect(cmuxTestGhosttyInputEventKind(1) == 1)
         #expect(fixture.surface.acceptsShepherdImmediateInput)
     }
 
