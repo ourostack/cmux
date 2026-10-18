@@ -21,6 +21,11 @@ struct TerminalStartupInputGate {
         phase = .consumed
     }
 
+    func hasPendingInput(generation: UUID) -> Bool {
+        guard self.generation == generation, case .awaitingPrompt = phase else { return false }
+        return true
+    }
+
     mutating func takeForPrompt(generation: UUID) -> String? {
         guard self.generation == generation, case .awaitingPrompt(let input) = phase else {
             return nil

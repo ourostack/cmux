@@ -137,12 +137,20 @@ extension GhosttyNSView {
         if TerminalAccessibilityText.containsLineBreak(body),
            let terminalSurface,
            terminalSurface.hasLiveSurface {
+            terminalSurface.beginShepherdInputExclusion()
+            defer { terminalSurface.endShepherdInputExclusion() }
+            terminalSurface.didReceiveExplicitInput()
             unmarkText()
             let payload = TerminalAccessibilityText.pastePayload(
                 Self.sanitizeExternalCommittedText(body)
             )
             if !payload.isEmpty {
-                terminalSurface.sendText(payload)
+                guard terminalSurface.sendText(payload) else {
+#if DEBUG
+                    cmuxDebugLog("ime.ax.insert rejected paste_len=\(payload.count)")
+#endif
+                    return
+                }
             }
             if !lineBreaks.isEmpty {
                 withExternalCommittedText {

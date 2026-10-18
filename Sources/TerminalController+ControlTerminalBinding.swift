@@ -67,9 +67,9 @@ struct ControlTerminalSocketTarget {
             reason: "socket.bindingAction"
         ) != nil else { return false }
         if surface === panel.surface {
-            return panel.performBindingAction(action)
+            return panel.performProgrammaticBindingAction(action)
         }
-        return surface.performExplicitInputBindingAction(action)
+        return surface.performProgrammaticInputBindingAction(action)
     }
 
     /// Performs a read-only/internal binding without emitting explicit-input

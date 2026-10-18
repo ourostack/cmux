@@ -10,10 +10,12 @@ final class FakeTerminalSurfaceNativeView: NSView {
     var attachedSurfaceController: (any TerminalSurfaceControlling)? { attachedController }
     var currentKeyStateIndicatorText: String? { nil }
     var isKeyboardCopyModeActive = false
+    var acceptsGuardedImmediateInput: Bool { !shouldDeferRuntimeInput && !isKeyboardCopyModeActive }
     private(set) var keyboardCopyModeCancellationCount = 0
     var shouldDeferRuntimeInput = false
     var runtimeInputDeferralResponses: [Bool] = []
     var runtimeInputDeferralCallCount = 0
+    var onRuntimeInputDeferralCheck: (() -> Void)?
     var deferredRuntimeInputs: [() -> Void] = []
     var deferredRuntimeInputBytes: [Int] = []
     var mobileMouseButtonEvents: [String] = []
@@ -32,6 +34,7 @@ final class FakeTerminalSurfaceNativeView: NSView {
         replay: @escaping () -> Void
     ) -> Bool {
         runtimeInputDeferralCallCount += 1
+        onRuntimeInputDeferralCheck?()
         let shouldDefer = runtimeInputDeferralResponses.isEmpty
             ? shouldDeferRuntimeInput
             : runtimeInputDeferralResponses.removeFirst()
