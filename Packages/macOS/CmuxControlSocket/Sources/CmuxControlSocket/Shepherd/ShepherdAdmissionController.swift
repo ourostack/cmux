@@ -48,7 +48,11 @@ public final class ShepherdAdmissionController {
     /// - Returns: Current facts and a token only when the kernel finds them ready.
     /// - Throws: ``Error/targetUnavailable`` for missing or mismatched targets.
     public func inspect(workspaceID: UUID, surfaceID: UUID) throws -> ShepherdAdmissionInspection {
-        throw Error.targetUnavailable
+        guard let snapshot = host.snapshot(workspaceID: workspaceID, surfaceID: surfaceID),
+              snapshot.workspaceID == workspaceID, snapshot.surfaceID == surfaceID else {
+            throw Error.targetUnavailable
+        }
+        return ShepherdAdmissionInspection(snapshot: snapshot, token: admission.inspect(snapshot: snapshot, now: now()))
     }
 
     /// Attempts this exact request once and retains any uncertain paste outcome.
@@ -61,7 +65,44 @@ public final class ShepherdAdmissionController {
     /// - Returns: The recorded native-admission receipt, not editor consumption.
     /// - Throws: ``Error`` or cancellation before a paste can be admitted.
     public func continueInput(_ request: ShepherdContinuationRequest) async throws -> ShepherdAdmissionReceipt {
-        throw Error.unknownToken
+        guard request.hasValidText else { throw Error.invalidRequest }
+        try Task.checkCancellation()
+        if let prior = admission.replay(request) { return prior }
+        guard let binding = admission.binding(tokenID: request.tokenID, now: now()) else { throw Error.unknownToken }
+        guard let current = host.snapshot(
+            workspaceID: binding.snapshot.workspaceID, surfaceID: binding.snapshot.surfaceID
+        ) else {
+            return admission.refuse(request, snapshot: binding.snapshot, now: now())
+        }
+        var calledWriter = false
+        let pasted = admission.paste(
+            requestID: request.requestID, token: request.tokenID, text: request.text,
+            snapshot: current, now: now()
+        ) {
+            guard !Task.isCancelled else { return .notAdmitted }
+            calledWriter = true
+            return host.paste(request: request, snapshot: current, expiresAt: binding.token.expiresAt)
+        }
+        guard calledWriter, pasted.pasteAdmitted else { return pasted }
+        defer { host.releaseReservation(requestID: request.requestID, snapshot: binding.snapshot) }
+        do {
+            try Task.checkCancellation()
+            try await wait(0.15)
+            try Task.checkCancellation()
+        } catch is CancellationError {
+            return try cancel(request, reason: .cancelled)
+        } catch {
+            return try cancel(request, reason: .waitFailed)
+        }
+        guard let after = host.snapshot(
+            workspaceID: binding.snapshot.workspaceID, surfaceID: binding.snapshot.surfaceID
+        ) else {
+            return try cancel(request, reason: .targetUnavailable)
+        }
+        let submitted = admission.submit(requestID: request.requestID, snapshot: after, now: now()) {
+            !Task.isCancelled && host.submit(requestID: request.requestID, snapshot: after)
+        }
+        return submitted.state == .unknown ? try cancel(request, reason: .delayNotElapsed) : submitted
     }
 
     /// Reads a retained outcome without retrying input or consulting a new target.
@@ -69,6 +110,16 @@ public final class ShepherdAdmissionController {
     /// - Parameter requestID: The exact request identity.
     /// - Returns: Its receipt, or nil for an unknown request, never `not_sent`.
     public func receipt(requestID: UUID) -> ShepherdAdmissionReceipt? {
-        nil
+        admission.receipt(requestID: requestID)
+    }
+
+    private func cancel(
+        _ request: ShepherdContinuationRequest,
+        reason: ShepherdAdmission.CancellationReason
+    ) throws -> ShepherdAdmissionReceipt {
+        guard let receipt = admission.cancel(requestID: request.requestID, reason: reason) else {
+            throw Error.receiptUnavailable
+        }
+        return receipt
     }
 }

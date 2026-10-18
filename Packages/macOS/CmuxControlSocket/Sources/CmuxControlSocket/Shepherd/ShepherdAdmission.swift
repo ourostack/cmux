@@ -92,6 +92,8 @@ public final class ShepherdAdmission {
         case waitFailed = "paste_admitted_wait_failed"
         /// The delay returned before the required minimum elapsed.
         case delayNotElapsed = "paste_admitted_minimum_delay_unmet"
+        /// The original observation expired before submission.
+        case expired = "paste_admitted_reservation_expired"
     }
 
     private struct Observation {
@@ -109,6 +111,7 @@ public final class ShepherdAdmission {
         let observation: Observation
         let pastedAt: TimeInterval
         let inputRevision: UInt64
+        var cancellationReason: CancellationReason?
     }
 
     private var observations: [UUID: Observation] = [:]
@@ -142,10 +145,7 @@ public final class ShepherdAdmission {
             guard prior.tokenID == token, prior.text == text,
                   prior.receipt.surfaceID == snapshot.surfaceID,
                   prior.receipt.workspaceID == snapshot.workspaceID else {
-                var conflict = prior.receipt
-                conflict.state = .unknown
-                conflict.reason = "request_conflict"
-                return conflict
+                return conflictReceipt(prior.receipt)
             }
             return prior.receipt
         }
@@ -183,9 +183,19 @@ public final class ShepherdAdmission {
             receipt.state = .notSent
             receipt.reason = "paste_not_admitted"
         case .admitted(let inputRevision):
-            reservations[requestID] = Reservation(observation: observation, pastedAt: now, inputRevision: inputRevision)
             receipt.pasteAdmitted = true
-            receipt.reason = "submit_pending"
+            if let pending = reservations.removeValue(forKey: requestID) {
+                if let reason = pending.cancellationReason {
+                    receipt.reason = reason.rawValue
+                } else {
+                    reservations[requestID] = Reservation(
+                        observation: pending.observation, pastedAt: pending.pastedAt, inputRevision: inputRevision
+                    )
+                    receipt.reason = "submit_pending"
+                }
+            } else {
+                receipt.reason = "paste_admitted_reservation_lost"
+            }
         }
         requests[requestID]?.receipt = receipt
         return receipt
@@ -254,7 +264,10 @@ public final class ShepherdAdmission {
         tokenID: UUID,
         now: TimeInterval
     ) -> (token: ShepherdObservationToken, snapshot: ShepherdAdmissionSnapshot)? {
-        nil
+        guard now.isFinite else { return nil }
+        expire(at: now)
+        guard let observation = observations[tokenID] else { return nil }
+        return (observation.token, observation.snapshot)
     }
 
     /// Reconciles an existing request without a fresh write or new target.
@@ -262,7 +275,11 @@ public final class ShepherdAdmission {
     /// - Parameter request: The exact continuation intent.
     /// - Returns: Its prior result or a conflict, or nil for an unknown request.
     public func replay(_ request: ShepherdContinuationRequest) -> ShepherdAdmissionReceipt? {
-        nil
+        guard let prior = requests[request.requestID] else { return nil }
+        guard prior.tokenID == request.tokenID, prior.text == request.text else {
+            return conflictReceipt(prior.receipt)
+        }
+        return prior.receipt
     }
 
     /// Records a zero-input refusal using an observed target's historical scope.
@@ -280,11 +297,10 @@ public final class ShepherdAdmission {
         snapshot: ShepherdAdmissionSnapshot,
         now: TimeInterval
     ) -> ShepherdAdmissionReceipt {
-        ShepherdAdmissionReceipt(
-            requestID: request.requestID, surfaceID: snapshot.surfaceID, workspaceID: snapshot.workspaceID,
-            processInstance: snapshot.processInstance, state: .notSent, reason: "paste_not_admitted",
-            pasteAdmitted: false, submitAdmitted: false
-        )
+        paste(
+            requestID: request.requestID, token: request.tokenID, text: request.text,
+            snapshot: snapshot, now: now
+        ) { .notAdmitted }
     }
 
     /// Withholds an unfinished submit without rewriting already-known outcomes.
@@ -297,7 +313,27 @@ public final class ShepherdAdmission {
         requestID: UUID,
         reason: CancellationReason = .cancelled
     ) -> ShepherdAdmissionReceipt? {
-        requests[requestID]?.receipt
+        guard var request = requests[requestID] else { return nil }
+        guard var reservation = reservations[requestID] else { return request.receipt }
+        let retainedReason = reservation.cancellationReason ?? reason
+        if request.receipt.pasteAdmitted {
+            reservations.removeValue(forKey: requestID)
+        } else {
+            // A reentrant cancel cannot free a writer that has not returned yet.
+            reservation.cancellationReason = retainedReason
+            reservations[requestID] = reservation
+        }
+        request.receipt.state = .unknown
+        request.receipt.reason = retainedReason.rawValue
+        requests[requestID] = request
+        return request.receipt
+    }
+
+    private func conflictReceipt(_ receipt: ShepherdAdmissionReceipt) -> ShepherdAdmissionReceipt {
+        var conflict = receipt
+        conflict.state = .unknown
+        conflict.reason = "request_conflict"
+        return conflict
     }
 
     private static func isReady(_ snapshot: ShepherdAdmissionSnapshot) -> Bool {
@@ -311,8 +347,7 @@ public final class ShepherdAdmission {
         observations = observations.filter { now < $0.value.token.expiresAt }
         let expired = reservations.filter { now >= $0.value.observation.token.expiresAt }.map(\.key)
         for id in expired {
-            reservations.removeValue(forKey: id)
-            requests[id]?.receipt.reason = "paste_admitted_reservation_expired"
+            _ = cancel(requestID: id, reason: .expired)
         }
     }
 }
