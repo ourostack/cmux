@@ -2538,6 +2538,7 @@ struct TextBoxInputContainer: View {
     }
 
     func submit() {
+        surface.didReceiveExplicitInput()
         let textView = textViewReference.textView
         guard TextBoxSubmitAvailability.shouldSubmit(
             hasPendingAttachmentUpload: textView?.hasPendingAttachmentUploadPlaceholder() ?? hasPendingAttachmentUpload,
@@ -2674,11 +2675,13 @@ struct TextBoxInputContainer: View {
     }
 
     private func markContentChanged() {
+        surface.invalidateShepherdInput()
         _ = advanceContentRevision()
     }
 
     private func updateMarkedTextState(_ nextValue: Bool) {
         guard hasMarkedText != nextValue else { return }
+        surface.invalidateShepherdInput()
         hasMarkedText = nextValue
     }
 
@@ -2757,6 +2760,7 @@ struct TextBoxInputContainer: View {
     }
 
     private func forwardText(_ text: String, focusTerminalAfterSend: Bool) {
+        surface.didReceiveExplicitInput()
         surface.sendInput(text)
         if focusTerminalAfterSend {
             focusTerminal()
@@ -2764,10 +2768,12 @@ struct TextBoxInputContainer: View {
     }
 
     private func forwardKey(_ key: TextBoxTerminalKey) {
+        surface.didReceiveExplicitInput()
         _ = surface.sendNamedKey(key.rawValue)
     }
 
     private func forwardControl(_ key: String) {
+        surface.didReceiveExplicitInput()
         _ = surface.sendNamedKey("ctrl-\(key)")
     }
 

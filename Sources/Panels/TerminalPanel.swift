@@ -354,6 +354,7 @@ final class TerminalPanel: Panel, ObservableObject {
     }
 
     func textBoxDidBecomeFocused() {
+        surface.invalidateShepherdInput()
         shouldHideTextBoxOnNextEscape = false
         isTextBoxActive = true
         textBoxInputFocusIntent = .textBox
@@ -370,6 +371,7 @@ final class TerminalPanel: Panel, ObservableObject {
     }
 
     func handleTextBoxEscape() {
+        surface.didReceiveExplicitInput()
         if containerAgentLifecycleStateForTextBoxEscape == .running {
             _ = sendNamedKeyResult(TextBoxTerminalKey.escape.rawValue)
         }
