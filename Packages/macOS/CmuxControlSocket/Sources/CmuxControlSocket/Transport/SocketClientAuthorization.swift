@@ -94,4 +94,24 @@ public struct SocketClientAuthorization {
             return SocketClientCapabilityCommand(command)?.command ?? command
         }
     }
+    /// Whether a peer the socket access mode admitted may call `method`.
+    ///
+    /// The access mode decides who may connect; it does not widen what a
+    /// caller reaches. Native Shepherd methods (``sameUserOnlyMethods``)
+    /// reach the owner's terminal state,
+    /// so a peer of another user is refused in every mode, also `allowAll`,
+    /// which admits other local users to the socket.
+    ///
+    /// - Parameters:
+    ///   - method: The v2 method the request names.
+    ///   - peerHasSameUID: Whether the peer runs as the same user as cmux,
+    ///     or nil for an in-process call that has no socket peer.
+    public func admitsMethod(_ method: String, peerHasSameUID: Bool?) -> Bool {
+        peerHasSameUID != false || !Self.sameUserOnlyMethods.contains(method)
+    }
+
+    /// Methods only a peer of the same user may call, in every access mode.
+    public static let sameUserOnlyMethods: Set<String> = Set(
+        ShepherdControlRequest.Method.allCases.map(\.rawValue)
+    )
 }
