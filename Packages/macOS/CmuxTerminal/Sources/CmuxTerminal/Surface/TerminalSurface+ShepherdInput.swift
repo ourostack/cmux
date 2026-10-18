@@ -29,6 +29,7 @@ extension TerminalSurface {
     public var acceptsShepherdImmediateInput: Bool {
         guard shepherdInputExclusionDepth == 0, !ioMode.usesManualIO, !sharingViewDetached,
               pendingSocketInputQueue.isEmpty, pendingSocketInputBytes == 0,
+              !startupInputGate.hasPendingInput(generation: terminalLifecycleId),
               !runtimeSurfaceSuspendedForAgentHibernation,
               surfaceView.acceptsGuardedImmediateInput,
               let live = liveSurfaceForGhosttyAccess(reason: "shepherd.readiness") else { return false }
