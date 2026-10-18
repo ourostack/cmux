@@ -21,5 +21,11 @@ public struct ShepherdContinuationRequest: Equatable, Sendable {
         self.text = text
     }
 
-    var hasValidText: Bool { true }
+    var hasValidText: Bool {
+        !text.isEmpty && text == text.trimmingCharacters(in: .whitespacesAndNewlines) &&
+            text.count <= 2000 && text.utf8.count <= 4096 &&
+            !text.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0) || $0.value == 0x2028 || $0.value == 0x2029
+            })
+    }
 }
