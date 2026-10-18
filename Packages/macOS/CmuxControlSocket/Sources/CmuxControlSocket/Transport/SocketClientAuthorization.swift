@@ -98,10 +98,10 @@ public struct SocketClientAuthorization {
     /// Whether a peer the socket access mode admitted may call `method`.
     ///
     /// The access mode decides who may connect; it does not widen what a
-    /// caller reaches. The browser REPL methods (``sameUserOnlyMethods``)
-    /// drive the user's browser profile and files, so a peer of another
-    /// user is refused in every mode, also `allowAll`, which admits other
-    /// local users to the socket.
+    /// caller reaches. The browser REPL and native Shepherd methods
+    /// (``sameUserOnlyMethods``) reach the owner's browser or terminal state,
+    /// so a peer of another user is refused in every mode, also `allowAll`,
+    /// which admits other local users to the socket.
     ///
     /// - Parameters:
     ///   - method: The v2 method the request names.
@@ -112,10 +112,9 @@ public struct SocketClientAuthorization {
     }
 
     /// Methods only a peer of the same user may call, in every access mode.
-    public static let sameUserOnlyMethods: Set<String> = [
+    public static let sameUserOnlyMethods: Set<String> = Set([
         "browser.repl.eval",
         "browser.repl.reset",
         "browser.repl.list",
-    ]
+    ]).union(ShepherdControlRequest.Method.allCases.map(\.rawValue))
 }
-
