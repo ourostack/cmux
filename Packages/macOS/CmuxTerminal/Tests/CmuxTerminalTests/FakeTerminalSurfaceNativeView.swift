@@ -15,6 +15,7 @@ final class FakeTerminalSurfaceNativeView: NSView {
     var shouldDeferRuntimeInput = false
     var runtimeInputDeferralResponses: [Bool] = []
     var runtimeInputDeferralCallCount = 0
+    var onRuntimeInputDeferralCheck: (() -> Void)?
     var deferredRuntimeInputs: [() -> Void] = []
     var deferredRuntimeInputBytes: [Int] = []
     var mobileMouseButtonEvents: [String] = []
@@ -33,6 +34,7 @@ final class FakeTerminalSurfaceNativeView: NSView {
         replay: @escaping () -> Void
     ) -> Bool {
         runtimeInputDeferralCallCount += 1
+        onRuntimeInputDeferralCheck?()
         let shouldDefer = runtimeInputDeferralResponses.isEmpty
             ? shouldDeferRuntimeInput
             : runtimeInputDeferralResponses.removeFirst()

@@ -527,6 +527,72 @@ struct TerminalSurfaceExplicitInputTests {
     }
 
     @Test
+    func queuedDrainExcludesReentrantShepherdAndPreservesInputOrder() {
+        let fixture = makeFixture()
+        #expect(fixture.surface.sendTextResult("queued") == .queued)
+        #expect(fixture.surface.sendNamedKey("enter") == .queued)
+        let runtime = allocatedRuntimeSurface()
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.registry.registerRuntimeSurface(runtime, ownerId: fixture.surface.id)
+        fixture.surface.installRuntimeSurfaceForTesting(runtime)
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.nativeView.onRuntimeInputDeferralCheck = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        let revision = fixture.surface.shepherdInputRevision
+        cmuxTestGhosttyInputEventsReset()
+        fixture.surface.flushPendingSocketInputIfNeeded()
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(fixture.surface.shepherdInputRevision > revision)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(cmuxTestGhosttyInputEventCount() == 2)
+        #expect(cmuxTestGhosttyInputEventKind(0) == 1)
+        #expect(cmuxTestGhosttyInputEventKind(1) == 2)
+    }
+
+    @Test
+    func deferredQueueReplayExcludesReentrantShepherdAndAdvancesInputRevision() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.nativeView.runtimeInputDeferralResponses = [false, true]
+        #expect(fixture.surface.sendInputResult("queued") == .queued)
+        let replay = try #require(fixture.nativeView.deferredRuntimeInputs.first)
+        fixture.nativeView.deferredRuntimeInputs.removeFirst()
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.nativeView.onRuntimeInputDeferralCheck = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        let revision = fixture.surface.shepherdInputRevision
+        cmuxTestGhosttyInputEventsReset()
+        replay()
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(fixture.surface.shepherdInputRevision > revision)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(cmuxTestGhosttyInputEventCount() == 1)
+        #expect(cmuxTestGhosttyInputEventKind(0) == 1)
+        #expect(fixture.nativeView.deferredRuntimeInputs.isEmpty)
+    }
+
+    @Test
     func reentrantAttentionCallbackCannotReserveDuringAnOrdinaryWrite() {
         let runtime = allocatedRuntimeSurface()
         let fixture = makeFixture(runtimeSurface: runtime)
