@@ -17,12 +17,18 @@ extension TerminalController {
             ]
         }
         var methods = capabilities["methods"] as? [String] ?? []
-        for method in ["browser.design_mode.set", "browser.design_mode.status"]
+        for method in ShepherdControlRequest.Method.allCases.map(\.rawValue)
+            + ["browser.design_mode.set", "browser.design_mode.status"]
             where !methods.contains(method)
         {
             methods.append(method)
         }
         capabilities["methods"] = methods.sorted()
+        capabilities["shepherd_guarded_input"] = [
+            "protocol_version": 1,
+            "state": "unqualified",
+            "agents": [String]()
+        ]
         return capabilities
     }
 

@@ -3,6 +3,10 @@ public import GhosttyKit
 internal import Carbon.HIToolbox
 
 extension TerminalSurface {
+    /// Actual runtime focus, without requesting focus or consulting a debug mirror.
+    @MainActor
+    public var isShepherdFocused: Bool { desiredFocusState }
+
     /// Excludes guarded admission across a synchronous physical input dispatch.
     ///
     /// Balance with ``endShepherdInputExclusion()`` using `defer`.

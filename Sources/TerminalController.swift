@@ -209,6 +209,8 @@ class TerminalController {
     // The package-owned listener: path/bind/lock lifecycle, accept source,
     // backoff/rearm recovery, and the generation-counted state machine.
     nonisolated let socketServer: SocketControlServer
+    /// One boot identity and admission owner shared by all local socket clients.
+    lazy var shepherdControlBoundary = makeShepherdControlBoundary()
     /// App-owned discovery marker store injected into the listener event seam.
     nonisolated let socketPathMarkerStore: SocketPathMarkerStore
     // Accepted-connection consumer; runs until process exit (singleton).
@@ -2639,12 +2641,28 @@ class TerminalController {
                 )
                 return
             }
-            let result = await CmuxAutomationInvocationContext.$eventOrigin.withValue(commandOrigin) {
-                await processSocketLineAsync(
-                    trimmed,
-                    passwordAuthorization: passwordAuthorization,
-                    rateLimiter: rateLimiter
-                )
+            let result: (response: String?, passwordAuthorization: SocketPasswordAuthorization)
+            if Self.isShepherdSocketCommand(trimmed) {
+                result = await lineReader.performWhileConnected { [passwordAuthorization] in
+                    await CmuxAutomationInvocationContext.$eventOrigin.withValue(commandOrigin) {
+                        await self.processSocketLineAsync(
+                            trimmed,
+                            passwordAuthorization: passwordAuthorization,
+                            rateLimiter: rateLimiter,
+                            shepherdPeer: ShepherdControlPeer(
+                                peerHasSameUID: peerHasSameUID, isRemoteRelay: false
+                            )
+                        )
+                    }
+                }
+            } else {
+                result = await CmuxAutomationInvocationContext.$eventOrigin.withValue(commandOrigin) {
+                    await processSocketLineAsync(
+                        trimmed,
+                        passwordAuthorization: passwordAuthorization,
+                        rateLimiter: rateLimiter
+                    )
+                }
             }
             passwordAuthorization = result.passwordAuthorization
             if let response = result.response {
@@ -3406,6 +3424,9 @@ class TerminalController {
         params: [String: Any],
         diffViewerRegistration: DiffViewerSessionPreparation = .notNeeded
     ) -> V2MainHopOutcome {
+        if ShepherdControlRequest.Method(rawValue: request.method) != nil {
+            return .callResult(shepherdControlBoundary.handleSynchronously(request, peer: nil))
+        }
         v2RefreshKnownRefs()
 
         // Domains migrated into CmuxControlSocket's ControlCommandCoordinator

@@ -12,7 +12,8 @@ extension TerminalController {
     nonisolated func processSocketLineAsync(
         _ command: String,
         passwordAuthorization: SocketPasswordAuthorization,
-        rateLimiter: ControlClientRateLimiter
+        rateLimiter: ControlClientRateLimiter,
+        shepherdPeer: ShepherdControlPeer? = nil
     ) async -> (response: String?, passwordAuthorization: SocketPasswordAuthorization) {
         var nextPasswordAuthorization = passwordAuthorization
         if let response = authResponseIfNeeded(
@@ -33,7 +34,7 @@ extension TerminalController {
             )
         }
 
-        let response = await processCommandUsingSocketExecutionPolicyAsync(command)
+        let response = await processCommandUsingSocketExecutionPolicyAsync(command, shepherdPeer: shepherdPeer)
         return (response, nextPasswordAuthorization)
     }
 
@@ -43,7 +44,8 @@ extension TerminalController {
     /// stalled main thread answers with a structured `timeout` error instead
     /// of holding the connection (and its pool slot) forever (#13369).
     nonisolated func processCommandUsingSocketExecutionPolicyAsync(
-        _ command: String
+        _ command: String,
+        shepherdPeer: ShepherdControlPeer? = nil
     ) async -> String? {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{") {
@@ -55,7 +57,7 @@ extension TerminalController {
                 request = parsed
             }
             do {
-                return try await processV2CommandUsingSocketExecutionPolicyAsync(request)
+                return try await processV2CommandUsingSocketExecutionPolicyAsync(request, shepherdPeer: shepherdPeer)
             } catch let timeout as SocketMainActorHopTimeout {
                 return await socketMainHopTimeoutResponse(
                     id: request.id,
@@ -103,8 +105,18 @@ extension TerminalController {
     }
 
     private nonisolated func processV2CommandUsingSocketExecutionPolicyAsync(
-        _ request: ControlRequest
+        _ request: ControlRequest,
+        shepherdPeer: ShepherdControlPeer?
     ) async throws -> String? {
+        if ShepherdControlRequest.Method(rawValue: request.method) != nil {
+            return await withSocketCommandPolicyAsync(
+                commandKey: request.method, isV2: true, params: request.params
+            ) {
+                Self.v2Encoder.response(
+                    id: request.id, await self.handleShepherdRequestAsync(request, peer: shepherdPeer)
+                )
+            }
+        }
         let relayAuthorization = try await authorizeRemoteRelayRequestAsync(request)
         if let errorResponse = relayAuthorization.errorResponse {
             return errorResponse
