@@ -5,6 +5,7 @@ public import Foundation
 /// The injected wait is a real minimum editor-processing delay, not polling.
 /// Host facts are reread after it. This owns no duplicate receipt cache and
 /// cannot make an unqualified host implementation safe by itself.
+/// Share one controller across the native host's socket clients for its lifetime.
 @MainActor
 public final class ShepherdAdmissionController {
     /// Explicit failures before an input outcome can be returned.
