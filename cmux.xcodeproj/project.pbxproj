@@ -3815,6 +3815,7 @@
 		E4D1768B7041CDE4F9A084A4 /* TerminalClearScreenKeepScrollbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2B7555E04A04849992547A2 /* TerminalClearScreenKeepScrollbackTests.swift */; };
 		B8835A000000000000000001 /* TerminalClipboardInputSequencer+State.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8835A000000000000000002 /* TerminalClipboardInputSequencer+State.swift */; };
 		B88357000000000000000005 /* TerminalClipboardInputSequencer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B88357000000000000000006 /* TerminalClipboardInputSequencer.swift */; };
+		166AA5DB87030FDD827AE1D2 /* TerminalClipboardInputSequencerShepherdTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32D365F577CF1CC1E652684E /* TerminalClipboardInputSequencerShepherdTests.swift */; };
 		B8835A000000000000000003 /* TerminalClipboardInputSequencerTests+Replay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8835A000000000000000004 /* TerminalClipboardInputSequencerTests+Replay.swift */; };
 		B8835700000000000000000D /* TerminalClipboardInputSequencerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8835700000000000000000E /* TerminalClipboardInputSequencerTests.swift */; };
 		B88357000000000000000013 /* TerminalClipboardRequestSurfaceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = B88357000000000000000014 /* TerminalClipboardRequestSurfaceIdentity.swift */; };
@@ -8369,6 +8370,7 @@
 		F2B7555E04A04849992547A2 /* TerminalClearScreenKeepScrollbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalClearScreenKeepScrollbackTests.swift; sourceTree = "<group>"; };
 		B8835A000000000000000002 /* TerminalClipboardInputSequencer+State.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalClipboardInputSequencer+State.swift"; sourceTree = "<group>"; };
 		B88357000000000000000006 /* TerminalClipboardInputSequencer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalClipboardInputSequencer.swift; sourceTree = "<group>"; };
+		32D365F577CF1CC1E652684E /* TerminalClipboardInputSequencerShepherdTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalClipboardInputSequencerShepherdTests.swift"; sourceTree = "<group>"; };
 		B8835A000000000000000004 /* TerminalClipboardInputSequencerTests+Replay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalClipboardInputSequencerTests+Replay.swift"; sourceTree = "<group>"; };
 		B8835700000000000000000E /* TerminalClipboardInputSequencerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalClipboardInputSequencerTests.swift; sourceTree = "<group>"; };
 		B88357000000000000000014 /* TerminalClipboardRequestSurfaceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalClipboardRequestSurfaceIdentity.swift; sourceTree = "<group>"; };
@@ -13937,6 +13939,7 @@
 				62038FEBE991E6F6022BD52F /* SSHTuiAttachRetryTests.swift */,
 				FBA69A8DB9EBB531DD11DFE5 /* AccountUpgradeOfferTests.swift */,
 				A1CE8E303102A963A8DE21E7 /* BrowserAutomationRestoredPanelTests.swift */,
+				32D365F577CF1CC1E652684E /* TerminalClipboardInputSequencerShepherdTests.swift */,
 			);
 			path = cmuxTests;
 			sourceTree = "<group>";
@@ -18999,6 +19002,7 @@
 				46F6AC15863EC84DCD3770A2 /* TerminalAndGhosttyTests.swift in Sources */,
 				8362B0010000000000000001 /* TerminalCallerTTYResolverTests.swift in Sources */,
 				E4D1768B7041CDE4F9A084A4 /* TerminalClearScreenKeepScrollbackTests.swift in Sources */,
+				166AA5DB87030FDD827AE1D2 /* TerminalClipboardInputSequencerShepherdTests.swift in Sources */,
 				B8835A000000000000000003 /* TerminalClipboardInputSequencerTests+Replay.swift in Sources */,
 				B8835700000000000000000D /* TerminalClipboardInputSequencerTests.swift in Sources */,
 				A10557080000000000000001 /* TerminalConfigurationPresentationMetricsTests.swift in Sources */,

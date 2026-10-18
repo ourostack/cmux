@@ -205,6 +205,11 @@ final class TerminalClipboardInputSequencer<Event, RequestID: Hashable & Sendabl
         hasRequestInFlight(for: epoch)
     }
 
+    /// Whether clipboard work still precedes guarded input in this runtime epoch.
+    func hasPendingInput(for epoch: UInt64 = 0) -> Bool {
+        hasInputDeferral(for: epoch)
+    }
+
     /// Cancels a request whose native surface lifetime ended. Deferred input
     /// from that epoch is discarded without touching replacement-surface input.
     func cancelRequest(
