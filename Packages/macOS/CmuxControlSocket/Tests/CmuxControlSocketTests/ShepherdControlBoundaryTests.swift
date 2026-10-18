@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 @testable import CmuxControlSocket
 
@@ -9,7 +10,7 @@ struct ShepherdControlBoundaryTests {
     private let owner = ShepherdControlPeer(peerHasSameUID: true, isRemoteRelay: false)
     private let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
-    private func setup() -> (
+    private func setup(hostInstance: UUID? = nil) -> (
         ShepherdControlBoundary, ShepherdAdmissionHostProbe, ShepherdAdmissionClockProbe, ScreenProbe
     ) {
         let host = ShepherdAdmissionHostProbe()
@@ -17,7 +18,7 @@ struct ShepherdControlBoundaryTests {
         let clock = ShepherdAdmissionClockProbe()
         let screen = ScreenProbe()
         let boundary = ShepherdControlBoundary(
-            host: host, hostInstance: boot, now: { clock.now },
+            host: host, hostInstance: hostInstance ?? boot, now: { clock.now },
             unixMilliseconds: { 1_792_345_678_901 },
             readVisibleScreen: { workspace, surface in
                 screen.targets.append([workspace, surface])
@@ -47,13 +48,13 @@ struct ShepherdControlBoundaryTests {
         return value
     }
 
-    private func errorCode(_ result: ControlCallResult) throws -> String {
+    private func errorCode(_ result: ControlCallResult, expectedBoot: UUID? = nil) throws -> String {
         guard case .err(let code, _, .object(let value)) = result else {
             Issue.record("Expected an explicit wire error, got \(result)")
             throw ProbeFailure.unexpectedResult
         }
         #expect(value["protocol_version"] == .int(1))
-        #expect(value["host_instance"] == .string(boot.uuidString))
+        #expect(value["host_instance"] == .string((expectedBoot ?? boot).uuidString))
         return code
     }
 
@@ -273,13 +274,65 @@ struct ShepherdControlBoundaryTests {
         let (first, host, _, _) = setup()
         let observation = try payload(await first.handle(inspect(host), peer: owner))
         let intent = try continuation(observation["token"])
-        let (second, nextHost, _, _) = setup()
-        #expect(try errorCode(await second.handle(intent, peer: owner)) == "unknown_token")
+        let nextBoot = UUID()
+        let (second, nextHost, _, _) = setup(hostInstance: nextBoot)
+        #expect(try errorCode(await second.handle(intent, peer: owner), expectedBoot: nextBoot) == "unknown_token")
         let lookup = ControlRequest(id: nil, method: "surface.shepherd.receipt", params: [
             "request_id": try #require(intent.params["request_id"])
         ])
-        #expect(try errorCode(await second.handle(lookup, peer: owner)) == "not_found")
+        #expect(try errorCode(await second.handle(lookup, peer: owner), expectedBoot: nextBoot) == "not_found")
         #expect(nextHost.events.isEmpty && nextHost.pasteCalls == 0)
+    }
+
+    @Test(arguments: [false, true])
+    func realConnectionTerminationAfterPasteRetainsUnknownReceiptWithoutSubmitting(revoked: Bool) async throws {
+        let (boundary, host, clock, _) = setup()
+        let observation = try payload(await boundary.handle(inspect(host), peer: owner))
+        let id = UUID()
+        let intent = try continuation(observation["token"], requestID: id)
+        let pair = try UnixSocketFixture.makeSocketPair()
+        defer {
+            close(pair.reader)
+            close(pair.writer)
+        }
+        let signal = SocketAuthorizationRevocationSignal()
+        let reader = ControlClientAsyncLineReader(
+            socket: pair.reader, authorizationRevocationSignal: signal
+        )
+        let pasted = AsyncStream<Void>.makeStream()
+        clock.action = { _ in
+            pasted.continuation.yield(())
+            pasted.continuation.finish()
+            try await Task.sleep(for: .seconds(5))
+        }
+        let peer = owner
+        let operation = Task {
+            await reader.performWhileConnected { await boundary.handle(intent, peer: peer) }
+        }
+        for await _ in pasted.stream { break }
+        #expect(host.pasteCalls == 1 && host.submitCalls == 0)
+        if revoked {
+            signal.revoke()
+        } else {
+            #expect(shutdown(pair.writer, SHUT_WR) == 0)
+        }
+        let outcome = await operation.value
+        let value = try payload(outcome)
+        #expect(value["request_id"] == .string(id.uuidString))
+        #expect(value["state"] == .string("unknown") && value["reason"] == .string("request_cancelled"))
+        #expect(value["paste_admitted"] == .bool(true) && value["submit_admitted"] == .bool(false))
+        let lookup = ControlRequest(id: .int(11), method: "surface.shepherd.receipt", params: [
+            "request_id": .string(id.uuidString)
+        ])
+        #expect(try payload(await boundary.handle(lookup, peer: owner)) == value)
+        #expect(host.pasteCalls == 1 && host.submitCalls == 0 && host.released == [id])
+        let wire = ControlResponseEncoder().response(id: lookup.id, outcome)
+        let envelope = try #require(
+            JSONSerialization.jsonObject(with: Data(wire.utf8)) as? [String: Any]
+        )
+        #expect(envelope["id"] as? Int == 11 && envelope["ok"] as? Bool == true)
+        #expect((envelope["result"] as? [String: Any])?["state"] as? String == "unknown")
+        await reader.cancelAndWait()
     }
 
     private enum ProbeFailure: Error { case unexpectedResult }

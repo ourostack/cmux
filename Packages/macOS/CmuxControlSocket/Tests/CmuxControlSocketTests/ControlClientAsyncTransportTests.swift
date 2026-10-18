@@ -68,6 +68,82 @@ struct ControlClientAsyncTransportTests {
         #expect(await pending.value == nil)
     }
 
+    @Test(arguments: [false, true])
+    func connectionTerminationCancelsAnActiveRequestWithoutAnotherRead(revoked: Bool) async throws {
+        let pair = try UnixSocketFixture.makeSocketPair()
+        defer {
+            close(pair.reader)
+            close(pair.writer)
+        }
+        let signal = SocketAuthorizationRevocationSignal()
+        let reader = ControlClientAsyncLineReader(
+            socket: pair.reader, authorizationRevocationSignal: signal
+        )
+        let started = AsyncStream<Void>.makeStream()
+        let operation = Task {
+            await reader.performWhileConnected {
+                started.continuation.yield(())
+                started.continuation.finish()
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                    return "not_cancelled"
+                } catch is CancellationError {
+                    return "cancelled"
+                } catch {
+                    return "unexpected_error"
+                }
+            }
+        }
+        for await _ in started.stream { break }
+        if revoked {
+            signal.revoke()
+        } else {
+            #expect(shutdown(pair.writer, SHUT_WR) == 0)
+        }
+        #expect(await operation.value == "cancelled")
+        await reader.cancelAndWait()
+    }
+
+    @Test func connectionClosedBeforeRegistrationCannotStartUncancelledInput() async throws {
+        let pair = try UnixSocketFixture.makeSocketPair()
+        defer {
+            close(pair.reader)
+            close(pair.writer)
+        }
+        let reader = ControlClientAsyncLineReader(socket: pair.reader)
+        #expect(shutdown(pair.writer, SHUT_WR) == 0)
+        #expect(await reader.nextLine(shouldContinueReading: { true }) == nil)
+        #expect(await reader.performWhileConnected { Task.isCancelled })
+        await reader.cancelAndWait()
+    }
+
+    @Test func parentCancellationPropagatesIntoTheActiveConnectionRequest() async throws {
+        let pair = try UnixSocketFixture.makeSocketPair()
+        defer {
+            close(pair.reader)
+            close(pair.writer)
+        }
+        let reader = ControlClientAsyncLineReader(socket: pair.reader)
+        let operation = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await reader.performWhileConnected { Task.isCancelled }
+        }
+        #expect(await operation.value)
+        await reader.cancelAndWait()
+    }
+
+    @Test func completedRequestDoesNotCancelTheNextLiveRequest() async throws {
+        let pair = try UnixSocketFixture.makeSocketPair()
+        defer {
+            close(pair.reader)
+            close(pair.writer)
+        }
+        let reader = ControlClientAsyncLineReader(socket: pair.reader)
+        #expect(await reader.performWhileConnected { Task.isCancelled } == false)
+        #expect(await reader.performWhileConnected { Task.isCancelled } == false)
+        await reader.cancelAndWait()
+    }
+
     @Test func socketReceiveTimeoutFinishesAnIdleAsyncReader() async throws {
         let pair = try UnixSocketFixture.makeSocketPair()
         defer {
