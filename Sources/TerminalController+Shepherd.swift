@@ -45,24 +45,24 @@ extension TerminalController {
 @MainActor
 final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
     private weak var owner: TerminalController?
+    private let processEvidenceReader: ShepherdProcessEvidenceReader
 
-    init(owner: TerminalController) { self.owner = owner }
+    init(owner: TerminalController, processEvidenceReader: ShepherdProcessEvidenceReader? = nil) {
+        self.owner = owner
+        self.processEvidenceReader = processEvidenceReader ?? ShepherdProcessEvidenceReader(
+            processStart: { [weak owner] pid in owner?.transport.processStartTime(of: pid)?.absoluteTime }
+        )
+    }
 
     func readVisibleScreen(workspaceID: UUID, surfaceID: UUID) -> String? {
         surface(workspaceID: workspaceID, surfaceID: surfaceID)?.readText(region: .screen)
     }
 
     func snapshot(workspaceID: UUID, surfaceID: UUID) -> ShepherdAdmissionSnapshot? {
-        guard let owner, let surface = surface(workspaceID: workspaceID, surfaceID: surfaceID) else {
+        guard owner != nil, let surface = surface(workspaceID: workspaceID, surfaceID: surfaceID) else {
             return nil
         }
-        let processInstance: String?
-        if let processID = surface.foregroundProcessID(), let pid = Int32(exactly: processID),
-           let start = owner.transport.processStartTime(of: pid) {
-            processInstance = "\(pid):\(start.absoluteTime)"
-        } else {
-            processInstance = nil
-        }
+        let initialProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
         let screen = surface.readText(region: .screen)
         let composer: ShepherdComposerState
         switch TerminalController.agentPromptInputState(of: surface) {
@@ -71,9 +71,11 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
         case .draft(let text): composer = .draft(text)
         case .dialog: composer = .dialog
         }
+        let finalProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
+        let process = initialProcess == finalProcess ? finalProcess : nil
         return ShepherdAdmissionSnapshot(
             surfaceID: surfaceID, workspaceID: workspaceID,
-            processInstance: processInstance,
+            processInstance: process?.processInstance,
             surfaceGeneration: surface.runtimeSurfaceGeneration,
             screenFingerprint: screen.map {
                 SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
@@ -83,7 +85,8 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
             focusRevision: surface.shepherdFocusRevision,
             focused: surface.isShepherdFocused,
             idle: nil, composer: composer, backgroundWork: nil,
-            acceptsImmediateInput: surface.acceptsShepherdImmediateInput
+            acceptsImmediateInput: surface.acceptsShepherdImmediateInput,
+            agent: process?.agent, workingDirectory: process?.workingDirectory, tty: process?.tty
         )
     }
 
@@ -111,6 +114,19 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
     func releaseReservation(requestID: UUID, snapshot: ShepherdAdmissionSnapshot) {
         surface(workspaceID: snapshot.workspaceID, surfaceID: snapshot.surfaceID)?
             .finishShepherdInputReservation(requestID: requestID)
+    }
+
+    private func processEvidence(workspaceID: UUID, surfaceID: UUID) -> ShepherdProcessEvidence? {
+        processEvidenceReader.read {
+            guard let surface = surface(workspaceID: workspaceID, surfaceID: surfaceID),
+                  let foregroundPID = surface.foregroundProcessID(),
+                  let pid = Int32(exactly: foregroundPID),
+                  let tty = surface.controllingTTYName(),
+                  let device = surface.controllingTTYDeviceIdentifier else { return nil }
+            return ShepherdProcessSurface(
+                pid: pid, generation: surface.runtimeSurfaceGeneration, tty: tty, ttyDevice: device
+            )
+        }
     }
 
     private func surface(workspaceID: UUID, surfaceID: UUID) -> TerminalSurface? {

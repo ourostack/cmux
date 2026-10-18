@@ -2,6 +2,8 @@ import CmuxControlSocket
 import CmuxTerminal
 import Foundation
 
+func agentLiveProcessIdentity(pid: Int32) -> (ttyDevice: Int64?, scopeCacheKey: Int)? { nil }
+
 @MainActor final class TerminalPanel {
     let id = UUID()
     let surface: TerminalSurface

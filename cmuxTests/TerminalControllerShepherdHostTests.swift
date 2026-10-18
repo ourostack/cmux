@@ -194,5 +194,59 @@ struct TerminalControllerShepherdHostTests {
         host.releaseReservation(requestID: UUID(), snapshot: value)
         #expect(panel.surface.releases.isEmpty)
     }
+
+    @Test func boundNativeProcessFactsReachInspectionWithoutInventingReadiness() throws {
+        let owner = TerminalController()
+        let workspace = Workspace()
+        let panel = TerminalPanel(workspaceID: workspace.id)
+        workspace.panels[panel.id] = panel
+        panel.surface.foregroundPID = 42
+        AppDelegate.shared = AppDelegate(workspace: workspace)
+        let fixture = ProcessFixture()
+        let host = TerminalControllerShepherdHost(owner: owner, processEvidenceReader: fixture.reader)
+        let value = try #require(host.snapshot(workspaceID: workspace.id, surfaceID: panel.id))
+        #expect(value.processInstance == "42:123456")
+        #expect(value.agent == "claude")
+        #expect(value.workingDirectory == "/private/tmp")
+        #expect(value.tty == "/dev/ttys123")
+        #expect(value.idle == nil)
+        #expect(value.backgroundWork == nil)
+        #expect(value.outsideComposerFingerprint.isEmpty)
+    }
+
+    @Test func processChangedWhileReadingScreenCannotRetainOldProcessProof() throws {
+        let owner = TerminalController()
+        let workspace = Workspace()
+        let panel = TerminalPanel(workspaceID: workspace.id)
+        workspace.panels[panel.id] = panel
+        panel.surface.foregroundPID = 42
+        AppDelegate.shared = AppDelegate(workspace: workspace)
+        let fixture = ProcessFixture()
+        let host = TerminalControllerShepherdHost(owner: owner, processEvidenceReader: fixture.reader)
+        panel.surface.onReadScreen = { fixture.executable = "/opt/bin/codex" }
+        let value = try #require(host.snapshot(workspaceID: workspace.id, surfaceID: panel.id))
+        #expect(value.processInstance == nil)
+        #expect(value.agent == nil)
+        #expect(value.workingDirectory == nil)
+        #expect(value.tty == nil)
+    }
+
+    @Test func changedProcessProofWithholdsPasteAndSubmit() throws {
+        let owner = TerminalController()
+        let workspace = Workspace()
+        let panel = TerminalPanel(workspaceID: workspace.id)
+        workspace.panels[panel.id] = panel
+        panel.surface.foregroundPID = 42
+        AppDelegate.shared = AppDelegate(workspace: workspace)
+        let fixture = ProcessFixture()
+        let host = TerminalControllerShepherdHost(owner: owner, processEvidenceReader: fixture.reader)
+        let value = try #require(host.snapshot(workspaceID: workspace.id, surfaceID: panel.id))
+        fixture.executable = "/opt/bin/codex"
+        let request = ShepherdContinuationRequest(requestID: UUID(), tokenID: UUID(), text: "Continue.")
+        #expect(!host.submit(requestID: request.requestID, snapshot: value))
+        #expect(host.paste(request: request, snapshot: value, expiresAt: 2) == .notAdmitted)
+        #expect(panel.surface.pastes.isEmpty)
+        #expect(panel.surface.submits.isEmpty)
+    }
 }
 #endif

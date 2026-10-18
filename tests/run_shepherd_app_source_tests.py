@@ -16,22 +16,29 @@ adapter = ROOT / "Sources/TerminalController+Shepherd.swift"
 if adapter.exists():
     shutil.copy2(adapter, PACKAGE / "Sources/cmux")
 for name in ("TerminalController+Capabilities.swift", "CmuxSocketEventMapper.swift",
-             "WorkspaceRemoteRelayCommandRewriter.swift", "Workspace+RemoteRelayCommandRewrite.swift"):
+             "WorkspaceRemoteRelayCommandRewriter.swift", "Workspace+RemoteRelayCommandRewrite.swift",
+             "ShepherdProcessEvidence.swift", "TerminalWorkingDirectoryResolver.swift"):
+    if not (ROOT / "Sources" / name).exists():
+        continue
     shutil.copy2(ROOT / "Sources" / name, PACKAGE / "Sources/cmux")
 shutil.copy2(ROOT / "cmuxTests/TerminalControllerShepherdHostTests.swift", PACKAGE / "Tests/AdapterTests")
+shutil.copy2(ROOT / "cmuxTests/ShepherdProcessEvidenceTests.swift", PACKAGE / "Tests/AdapterTests")
 (PACKAGE / "Package.swift").write_text(f'''// swift-tools-version: 6.0
 import PackageDescription
 let package = Package(name: "ShepherdAppSourceTests", platforms: [.macOS(.v14)],
     dependencies: [
         .package(path: "{ROOT / 'Packages/macOS/CmuxControlSocket'}"),
+        .package(path: "{ROOT / 'Packages/macOS/CmuxFoundation'}"),
         .package(path: "{ROOT / 'Packages/macOS/CmuxRemoteWorkspace'}")
     ],
     targets: [
         .target(name: "CmuxTerminal"),
         .target(name: "cmux", dependencies: ["CmuxTerminal",
+            .product(name: "CmuxFoundation", package: "CmuxFoundation"),
             .product(name: "CmuxControlSocket", package: "CmuxControlSocket"),
             .product(name: "CmuxRemoteWorkspace", package: "CmuxRemoteWorkspace")]),
         .testTarget(name: "AdapterTests", dependencies: ["cmux", "CmuxTerminal",
+            .product(name: "CmuxFoundation", package: "CmuxFoundation"),
             .product(name: "CmuxControlSocket", package: "CmuxControlSocket")],
             swiftSettings: [.define("SHEPHERD_SOURCE_TEST")])
     ], swiftLanguageModes: [.v5])
