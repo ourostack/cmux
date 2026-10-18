@@ -118,6 +118,29 @@ struct ShepherdAdmissionTests {
     }
 
     @Test
+    func expiryDuringPasteCannotReopenThePendingWriter() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        var otherPastes = 0
+        let first = gate.paste(requestID: UUID(), token: token.id, text: "continue", snapshot: before, now: 100.1) {
+            let reopened = gate.inspect(snapshot: before, now: 103)
+            #expect(reopened == nil)
+            if let reopened {
+                _ = gate.paste(
+                    requestID: UUID(), token: reopened.id, text: "other", snapshot: before, now: 103.1
+                ) {
+                    otherPastes += 1
+                    return .admitted(inputRevision: 11)
+                }
+            }
+            return .admitted(inputRevision: 11)
+        }
+        #expect(first.state == .unknown && first.pasteAdmitted && !first.submitAdmitted)
+        #expect(otherPastes == 0)
+    }
+
+    @Test
     func unverifiablePaddingIsRefusedBeforePaste() throws {
         for text in [" ", " leading", "trailing "] {
             let gate = ShepherdAdmission()
