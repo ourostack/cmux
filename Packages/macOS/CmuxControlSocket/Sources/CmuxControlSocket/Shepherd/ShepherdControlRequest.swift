@@ -44,6 +44,38 @@ public enum ShepherdControlRequest: Equatable, Sendable {
     /// - Parameter request: The decoded v2 envelope.
     /// - Throws: ``Error`` when the method or arguments are invalid.
     public init(request: ControlRequest) throws {
-        throw Error.unsupportedMethod
+        guard let method = Method(rawValue: request.method) else { throw Error.unsupportedMethod }
+        let params = request.params
+        switch method {
+        case .inspect:
+            try Self.requireKeys(["workspace_id", "surface_id"], in: params)
+            self = .inspect(
+                workspaceID: try Self.uuid("workspace_id", in: params),
+                surfaceID: try Self.uuid("surface_id", in: params)
+            )
+        case .continueInput:
+            try Self.requireKeys(["request_id", "token", "text"], in: params)
+            guard case .string(let text)? = params["text"] else { throw Error.invalidParameters }
+            let continuation = ShepherdContinuationRequest(
+                requestID: try Self.uuid("request_id", in: params),
+                tokenID: try Self.uuid("token", in: params),
+                text: text
+            )
+            guard continuation.hasValidText else { throw Error.invalidParameters }
+            self = .continueInput(continuation)
+        case .receipt:
+            try Self.requireKeys(["request_id"], in: params)
+            self = .receipt(requestID: try Self.uuid("request_id", in: params))
+        }
+    }
+
+    private static func requireKeys(_ keys: Set<String>, in params: [String: JSONValue]) throws {
+        guard Set(params.keys) == keys else { throw Error.invalidParameters }
+    }
+
+    private static func uuid(_ key: String, in params: [String: JSONValue]) throws -> UUID {
+        guard case .string(let raw)? = params[key], raw.utf8.count == 36,
+              let value = UUID(uuidString: raw) else { throw Error.invalidParameters }
+        return value
     }
 }

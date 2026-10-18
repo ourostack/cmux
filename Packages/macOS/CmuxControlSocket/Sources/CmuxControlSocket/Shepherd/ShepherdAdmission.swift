@@ -156,10 +156,7 @@ public final class ShepherdAdmission {
         guard let observation, now.isFinite, now < observation.token.expiresAt,
               observation.snapshot == snapshot, Self.isReady(snapshot), snapshot.composer == .empty,
               !reservations.values.contains(where: { $0.observation.snapshot.surfaceID == snapshot.surfaceID }),
-              !text.isEmpty, text.count <= 2000, text.utf8.count <= 4096,
-              !text.unicodeScalars.contains(where: {
-                  CharacterSet.controlCharacters.contains($0) || $0.value == 0x2028 || $0.value == 0x2029
-              }) else {
+              ShepherdContinuationRequest(requestID: requestID, tokenID: token, text: text).hasValidText else {
             return receipt
         }
 
