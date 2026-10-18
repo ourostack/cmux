@@ -24,6 +24,25 @@ struct ShepherdAdmissionTests {
     }
 
     @Test
+    func unverifiablePaddingIsRefusedBeforePaste() throws {
+        for text in [" ", " leading", "trailing "] {
+            let gate = ShepherdAdmission()
+            let snapshot = idleSnapshot()
+            let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+            var pastes = 0
+            let receipt = gate.paste(
+                requestID: UUID(), token: token.id, text: text,
+                snapshot: snapshot, now: 100.1
+            ) {
+                pastes += 1
+                return .admitted(inputRevision: 11)
+            }
+            #expect(receipt.state == .notSent)
+            #expect(pastes == 0)
+        }
+    }
+
+    @Test
     func expiredTokenRefusesBeforeInput() throws {
         let gate = ShepherdAdmission()
         let snapshot = idleSnapshot()
