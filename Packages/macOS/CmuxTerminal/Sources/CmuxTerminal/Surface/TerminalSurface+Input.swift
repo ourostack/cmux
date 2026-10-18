@@ -1009,6 +1009,8 @@ extension TerminalSurface {
 
     @MainActor
     func flushPendingSocketInputIfNeeded() {
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         guard let liveSurface = liveSurfaceForSocketWrite(
             reason: "socket.flushPendingInput"
         ) else {
@@ -1060,6 +1062,8 @@ extension TerminalSurface {
         validatedSurface: inout ghostty_surface_t?,
         validatedGeneration: inout UInt64?
     ) -> Bool {
+        beginShepherdInputExclusion()
+        defer { endShepherdInputExclusion() }
         if deferInputDuringRuntimeClipboardRead(
             estimatedBytes: input.estimatedBytes,
             replay: { [weak self] in
@@ -1086,6 +1090,7 @@ extension TerminalSurface {
             validatedSurface = currentSurface
             validatedGeneration = runtimeSurfaceGeneration
         }
+        invalidateShepherdInput()
         switch input {
         case .pasteText(let chunk):
             writeTextData(chunk, to: surface)
