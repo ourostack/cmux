@@ -500,6 +500,33 @@ struct TerminalSurfaceExplicitInputTests {
     }
 
     @Test
+    func stagedStartupInputRefusesShepherdAndIsDeliveredOnce() {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.surface.startupInputGate.stage(
+            "echo startup\r", generation: fixture.surface.terminalLifecycleId
+        )
+        cmuxTestGhosttyInputEventsReset()
+        #expect(!fixture.surface.acceptsShepherdImmediateInput)
+        let request = UUID()
+        #expect(fixture.surface.sendShepherdPaste(
+            "continue", requestID: request, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ) == nil)
+        #expect(cmuxTestGhosttyInputEventCount() == 0)
+        fixture.surface.shellDidBecomeReadyForStartupInput()
+        fixture.surface.finishShepherdInputReservation(requestID: request)
+        fixture.surface.shellDidBecomeReadyForStartupInput()
+        #expect(cmuxTestGhosttyInputEventCount() == 2)
+        #expect(cmuxTestGhosttyInputEventKind(0) == 1)
+        #expect(cmuxTestGhosttyInputEventKind(1) == 2)
+        #expect(fixture.surface.acceptsShepherdImmediateInput)
+    }
+
+    @Test
     func reentrantAttentionCallbackCannotReserveDuringAnOrdinaryWrite() {
         let runtime = allocatedRuntimeSurface()
         let fixture = makeFixture(runtimeSurface: runtime)
