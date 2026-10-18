@@ -523,6 +523,37 @@ struct TerminalSurfaceExplicitInputTests {
     }
 
     @Test
+    func deferredBindingReplayExcludesReentrantShepherd() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.nativeView.shouldDeferRuntimeInput = true
+        #expect(fixture.surface.performExplicitInputBindingAction("paste_from_clipboard"))
+        let replay = try #require(fixture.nativeView.deferredRuntimeInputs.first)
+        fixture.nativeView.deferredRuntimeInputs.removeFirst()
+        fixture.nativeView.shouldDeferRuntimeInput = false
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.nativeView.onRuntimeInputDeferralCheck = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        replay()
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(fixture.paneHost.explicitInputCount == 1)
+        #expect(fixture.nativeView.runtimeInputDeferralCallCount == 2)
+        #expect(fixture.nativeView.deferredRuntimeInputs.isEmpty)
+    }
+
+    @Test
     func stagedStartupInputRefusesShepherdAndIsDeliveredOnce() {
         let runtime = allocatedRuntimeSurface()
         let fixture = makeFixture(runtimeSurface: runtime)
