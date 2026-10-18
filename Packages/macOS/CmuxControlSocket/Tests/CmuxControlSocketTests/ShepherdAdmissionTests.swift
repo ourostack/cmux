@@ -24,6 +24,100 @@ struct ShepherdAdmissionTests {
     }
 
     @Test
+    func bindingExpiresAndReplayDoesNotNeedNewLiveEvidence() throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        #expect(gate.binding(tokenID: token.id, now: 100.1)?.snapshot == snapshot)
+        let intent = ShepherdContinuationRequest(requestID: UUID(), tokenID: token.id, text: "continue")
+        let first = gate.paste(
+            requestID: intent.requestID, token: intent.tokenID, text: intent.text,
+            snapshot: snapshot, now: 100.2
+        ) { .admitted(inputRevision: 11) }
+        #expect(gate.replay(intent) == first)
+        #expect(gate.binding(tokenID: token.id, now: 100.3) == nil)
+        let changed = ShepherdContinuationRequest(requestID: intent.requestID, tokenID: UUID(), text: intent.text)
+        #expect(gate.replay(changed)?.reason == "request_conflict")
+        #expect(gate.receipt(requestID: intent.requestID) == first)
+        let expiryGate = ShepherdAdmission()
+        let fresh = try #require(expiryGate.inspect(snapshot: snapshot, now: 100))
+        #expect(expiryGate.binding(tokenID: fresh.id, now: 101)?.token == fresh)
+        #expect(expiryGate.binding(tokenID: fresh.id, now: 102) == nil)
+    }
+
+    @Test
+    func zeroInputRefusalIsRetainedAndCannotLaterPaste() throws {
+        let gate = ShepherdAdmission()
+        let snapshot = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: snapshot, now: 100))
+        let intent = ShepherdContinuationRequest(requestID: UUID(), tokenID: token.id, text: "continue")
+        let refused = gate.refuse(intent, snapshot: snapshot, now: 100.1)
+        #expect(refused.state == .notSent && !refused.pasteAdmitted)
+        #expect(gate.receipt(requestID: intent.requestID) == refused)
+        let retry = gate.paste(
+            requestID: intent.requestID, token: intent.tokenID, text: intent.text,
+            snapshot: snapshot, now: 100.2
+        ) {
+            Issue.record("A recorded zero-input refusal must not turn into a later paste.")
+            return .admitted(inputRevision: 11)
+        }
+        #expect(retry == refused)
+    }
+
+    @Test
+    func cancellationConsumesTheSubmitReservation() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let id = UUID()
+        _ = gate.paste(requestID: id, token: token.id, text: "continue", snapshot: before, now: 100.1) {
+            .admitted(inputRevision: 11)
+        }
+        #expect(gate.cancel(requestID: id)?.reason == ShepherdAdmission.CancellationReason.cancelled.rawValue)
+        var after = before
+        after.composer = .draft("continue")
+        after.inputRevision = 11
+        var submits = 0
+        let final = gate.submit(requestID: id, snapshot: after, now: 100.3) {
+            submits += 1
+            return true
+        }
+        #expect(final.state == .unknown && final.pasteAdmitted && !final.submitAdmitted)
+        #expect(submits == 0)
+    }
+
+    @Test
+    func reentrantCancellationCannotReopenThePendingWriterOrResurrectSubmit() throws {
+        let gate = ShepherdAdmission()
+        let before = idleSnapshot()
+        let token = try #require(gate.inspect(snapshot: before, now: 100))
+        let other = try #require(gate.inspect(snapshot: before, now: 100))
+        let id = UUID()
+        var otherPastes = 0
+        let first = gate.paste(requestID: id, token: token.id, text: "continue", snapshot: before, now: 100.1) {
+            _ = gate.cancel(requestID: id)
+            let nested = gate.paste(
+                requestID: UUID(), token: other.id, text: "other", snapshot: before, now: 100.1
+            ) {
+                otherPastes += 1
+                return .admitted(inputRevision: 11)
+            }
+            #expect(nested.state == .notSent)
+            return .admitted(inputRevision: 11)
+        }
+        #expect(first.reason == ShepherdAdmission.CancellationReason.cancelled.rawValue)
+        var after = before
+        after.composer = .draft("continue")
+        after.inputRevision = 11
+        var submits = 0
+        _ = gate.submit(requestID: id, snapshot: after, now: 100.3) {
+            submits += 1
+            return true
+        }
+        #expect(otherPastes == 0 && submits == 0)
+    }
+
+    @Test
     func unverifiablePaddingIsRefusedBeforePaste() throws {
         for text in [" ", " leading", "trailing "] {
             let gate = ShepherdAdmission()
