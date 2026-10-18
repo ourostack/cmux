@@ -4242,7 +4242,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     private static let maximumPendingInputReplayActions =
         maximumPendingExplicitKeyDownEvents + maximumPendingPasteActions
     private static let maximumPendingPastePayloadBytes = 4 * 1_048_576
-    private var replayingPendingInput = false
+    private(set) var replayingPendingInput = false
     private var keyboardCopyModeInputState = TerminalKeyboardCopyModeInputState()
     private var keyboardCopyModeCursor: TerminalKeyboardCopyModeCursor?
     private var keyboardCopyModeRenderedFrameDemandRelease: (() -> Void)?
