@@ -84,7 +84,7 @@ public final class ShepherdAdmission {
     ) -> ShepherdAdmissionReceipt {
         expire(at: now)
         if let prior = requests[requestID] {
-            guard prior.tokenID == token, prior.text == text,
+            guard prior.tokenID == token, prior.text.utf8.elementsEqual(text.utf8),
                   prior.receipt.surfaceID == snapshot.surfaceID,
                   prior.receipt.workspaceID == snapshot.workspaceID else {
                 return conflictReceipt(prior.receipt)
@@ -183,7 +183,8 @@ public final class ShepherdAdmission {
               snapshot.focusRevision == before.focusRevision,
               snapshot.inputRevision == reservation.inputRevision,
               snapshot.outsideComposerFingerprint == before.outsideComposerFingerprint,
-              snapshot.composer == .draft(request.text) else {
+              case .draft(let text) = snapshot.composer,
+              text.utf8.elementsEqual(request.text.utf8) else {
             request.receipt.reason = "paste_admitted_submit_withheld"
             requests[requestID] = request
             return request.receipt
@@ -230,7 +231,7 @@ public final class ShepherdAdmission {
     /// - Returns: Its prior result or a conflict, or nil for an unknown request.
     public func replay(_ request: ShepherdContinuationRequest) -> ShepherdAdmissionReceipt? {
         guard let prior = requests[request.requestID] else { return nil }
-        guard prior.tokenID == request.tokenID, prior.text == request.text else {
+        guard prior.tokenID == request.tokenID, prior.text.utf8.elementsEqual(request.text.utf8) else {
             return conflictReceipt(prior.receipt)
         }
         return prior.receipt
