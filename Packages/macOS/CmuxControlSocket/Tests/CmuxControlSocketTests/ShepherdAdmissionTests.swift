@@ -19,7 +19,8 @@ struct ShepherdAdmissionTests {
             idle: true,
             composer: .empty,
             backgroundWork: false,
-            acceptsImmediateInput: true
+            acceptsImmediateInput: true,
+            agent: "Copilot", workingDirectory: "/synthetic/project", tty: "/dev/ttys007"
         )
     }
 

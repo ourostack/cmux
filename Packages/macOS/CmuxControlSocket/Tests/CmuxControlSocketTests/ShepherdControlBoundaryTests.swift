@@ -113,6 +113,7 @@ struct ShepherdControlBoundaryTests {
             "workspace_id": .string(before.workspaceID.uuidString),
             "surface_id": .string(before.surfaceID.uuidString),
             "process_instance": .string("123:456"), "surface_generation": .int(1),
+            "agent": .string("Copilot"), "cwd": .string("/synthetic/project"), "tty": .string("/dev/ttys007"),
             "screen_fingerprint": .string(digest),
             "outside_composer_fingerprint": .string("outside-before"),
             "input_revision": .int(10), "focus_revision": .int(20),
@@ -144,12 +145,16 @@ struct ShepherdControlBoundaryTests {
         host.current?.idle = nil
         host.current?.backgroundWork = nil
         host.current?.processInstance = nil
+        host.current?.agent = nil
+        host.current?.workingDirectory = nil
+        host.current?.tty = nil
         host.current?.composer = .unknown
         let value = try payload(await boundary.handle(inspect(host), peer: owner))
         #expect(value["screen"] == .string("abc") && value["token"] == .null)
         guard case .object(let fields) = value["snapshot"] else { throw ProbeFailure.unexpectedResult }
         #expect(fields["idle"] == .null && fields["background_work"] == .null)
         #expect(fields["process_instance"] == .null)
+        #expect(fields["agent"] == .null && fields["cwd"] == .null && fields["tty"] == .null)
         #expect(fields["composer"] == .object(["state": .string("unknown"), "draft_length": .null]))
     }
 

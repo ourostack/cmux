@@ -65,6 +65,36 @@ struct ShepherdAdmissionControllerTests {
         #expect(host.pasteCalls == 0)
     }
 
+    @Test(arguments: ["agent", "cwd", "tty"])
+    func unknownNativeProcessScopeNeverIssuesAToken(field: String) throws {
+        let (controller, host, _) = setup()
+        let target = try #require(host.current)
+        for missing: String? in [nil, ""] {
+            switch field {
+            case "agent": host.current?.agent = missing
+            case "cwd": host.current?.workingDirectory = missing
+            default: host.current?.tty = missing
+            }
+            #expect(try controller.inspect(workspaceID: target.workspaceID, surfaceID: target.surfaceID).token == nil)
+        }
+        #expect(host.pasteCalls == 0)
+    }
+
+    @Test(arguments: ["agent", "cwd", "tty"])
+    func sameProcessScopeChangingBeforePasteAdmitsZeroInput(field: String) async throws {
+        let (controller, host, _) = setup()
+        let observed = try token(controller, host)
+        switch field {
+        case "agent": host.current?.agent = "Codex"
+        case "cwd": host.current?.workingDirectory = "/other/project"
+        default: host.current?.tty = "/dev/ttys009"
+        }
+        let result = try await controller.continueInput(request(observed.id))
+        #expect(result.state == .notSent)
+        #expect(!result.pasteAdmitted && !result.submitAdmitted)
+        #expect(host.pasteCalls == 0 && host.submitCalls == 0)
+    }
+
     @Test
     func refusesMissingOrMismatchedInspectionTargets() throws {
         let (controller, host, _) = setup()
@@ -105,7 +135,7 @@ struct ShepherdAdmissionControllerTests {
         #expect(clock.waits.isEmpty)
     }
 
-    @Test(arguments: ["focus", "input", "process", "background", "outside", "target", "scope"])
+    @Test(arguments: ["focus", "input", "process", "background", "outside", "target", "scope", "agent", "cwd", "tty"])
     func postPasteChangesWithholdSubmitAndKeepPartialInput(change: String) async throws {
         let (controller, host, clock) = setup()
         let observed = try token(controller, host)
@@ -119,6 +149,9 @@ struct ShepherdAdmissionControllerTests {
             case "background": host.current?.backgroundWork = true
             case "outside": host.current?.outsideComposerFingerprint = "new-output"
             case "scope": host.current?.workspaceID = UUID()
+            case "agent": host.current?.agent = "Codex"
+            case "cwd": host.current?.workingDirectory = "/other/project"
+            case "tty": host.current?.tty = "/dev/ttys009"
             default: host.current = nil
             }
         }

@@ -9,7 +9,8 @@ final class ShepherdAdmissionHostProbe: ShepherdAdmissionHost {
         processInstance: "123:456", surfaceGeneration: 1,
         screenFingerprint: "screen-before", outsideComposerFingerprint: "outside-before",
         inputRevision: 10, focusRevision: 20, focused: false, idle: true,
-        composer: .empty, backgroundWork: false, acceptsImmediateInput: true
+        composer: .empty, backgroundWork: false, acceptsImmediateInput: true,
+        agent: "Copilot", workingDirectory: "/synthetic/project", tty: "/dev/ttys007"
     )
     var pasteCalls = 0
     var submitCalls = 0

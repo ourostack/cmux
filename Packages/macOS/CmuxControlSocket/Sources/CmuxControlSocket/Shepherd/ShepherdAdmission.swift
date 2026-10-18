@@ -179,6 +179,9 @@ public final class ShepherdAdmission {
               snapshot.surfaceID == before.surfaceID,
               snapshot.workspaceID == before.workspaceID,
               snapshot.processInstance == before.processInstance,
+              snapshot.agent == before.agent,
+              snapshot.workingDirectory == before.workingDirectory,
+              snapshot.tty == before.tty,
               snapshot.surfaceGeneration == before.surfaceGeneration,
               snapshot.focusRevision == before.focusRevision,
               snapshot.inputRevision == reservation.inputRevision,
@@ -293,6 +296,8 @@ public final class ShepherdAdmission {
 
     private static func isReady(_ snapshot: ShepherdAdmissionSnapshot) -> Bool {
         snapshot.processInstance?.isEmpty == false &&
+            snapshot.agent?.isEmpty == false && snapshot.workingDirectory?.isEmpty == false &&
+            snapshot.tty?.isEmpty == false &&
             !snapshot.screenFingerprint.isEmpty && !snapshot.outsideComposerFingerprint.isEmpty &&
             !snapshot.focused && snapshot.idle == true && snapshot.backgroundWork == false &&
             snapshot.acceptsImmediateInput

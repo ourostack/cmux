@@ -11,6 +11,12 @@ public struct ShepherdAdmissionSnapshot: Equatable, Sendable {
     public var workspaceID: UUID
     /// The native foreground-process identity, or nil when unverified.
     public var processInstance: String?
+    /// The agent verified in this native process scope, not a hook or PS hint.
+    public var agent: String?
+    /// This process's verified current directory, or nil when unverified.
+    public var workingDirectory: String?
+    /// The terminal bound to this process observation, or nil when unverified.
+    public var tty: String?
     /// The native runtime generation that must not change during admission.
     public var surfaceGeneration: UInt64
     /// The current screen fingerprint, empty when unavailable.
@@ -48,6 +54,9 @@ public struct ShepherdAdmissionSnapshot: Equatable, Sendable {
     ///   - composer: The recognized input area's actual state.
     ///   - backgroundWork: Known work status; absence must remain nil.
     ///   - acceptsImmediateInput: Known zero-queue readiness.
+    ///   - agent: The natively verified agent, never an independent client guess.
+    ///   - workingDirectory: The directory bound to this same native process.
+    ///   - tty: The terminal bound to this same native process.
     public init(
         surfaceID: UUID,
         workspaceID: UUID,
@@ -61,11 +70,17 @@ public struct ShepherdAdmissionSnapshot: Equatable, Sendable {
         idle: Bool?,
         composer: ShepherdComposerState,
         backgroundWork: Bool?,
-        acceptsImmediateInput: Bool
+        acceptsImmediateInput: Bool,
+        agent: String? = nil,
+        workingDirectory: String? = nil,
+        tty: String? = nil
     ) {
         self.surfaceID = surfaceID
         self.workspaceID = workspaceID
         self.processInstance = processInstance
+        self.agent = agent
+        self.workingDirectory = workingDirectory
+        self.tty = tty
         self.surfaceGeneration = surfaceGeneration
         self.screenFingerprint = screenFingerprint
         self.outsideComposerFingerprint = outsideComposerFingerprint
