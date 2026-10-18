@@ -7,6 +7,14 @@ import Testing
 struct SocketClientAuthorizationTests {
     private let authorization = SocketClientAuthorization()
 
+    @Test(arguments: ["surface.shepherd.inspect", "surface.shepherd.continue", "surface.shepherd.receipt"])
+    func nativeShepherdMethodsRequireTheSameUserInEverySocketMode(method: String) {
+        let otherUserAllowed = authorization.admitsMethod(method, peerHasSameUID: false)
+        #expect(otherUserAllowed == false)
+        #expect(authorization.admitsMethod(method, peerHasSameUID: true))
+        #expect(authorization.admitsMethod(method, peerHasSameUID: nil))
+    }
+
     @Test func cmuxOnlyFailsClosedWhenPeerPidIsUnavailable() {
         #expect(!authorization.isCmuxOnlyClientAllowed(
             peerProcessID: nil,

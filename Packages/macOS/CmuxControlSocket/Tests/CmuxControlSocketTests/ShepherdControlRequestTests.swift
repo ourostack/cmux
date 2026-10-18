@@ -16,6 +16,28 @@ struct ShepherdControlRequestTests {
     }
 
     @Test
+    func decodesTheSpecifiedWireNamesThroughTheEnvelopeParser() throws {
+        let fixtures: [(String, ShepherdControlRequest)] = [
+            (
+                #"{"id":1,"method":"surface.shepherd.inspect","params":{"workspace_id":"00000000-0000-0000-0000-000000000001","surface_id":"00000000-0000-0000-0000-000000000002"}}"#,
+                .inspect(workspaceID: workspace, surfaceID: surface)
+            ),
+            (
+                #"{"id":2,"method":"surface.shepherd.continue","params":{"request_id":"00000000-0000-0000-0000-000000000003","token":"00000000-0000-0000-0000-000000000004","text":"Continue."}}"#,
+                .continueInput(ShepherdContinuationRequest(requestID: requestID, tokenID: token, text: "Continue."))
+            ),
+            (
+                #"{"id":3,"method":"surface.shepherd.receipt","params":{"request_id":"00000000-0000-0000-0000-000000000003"}}"#,
+                .receipt(requestID: requestID)
+            )
+        ]
+        for (line, expected) in fixtures {
+            let envelope = try ControlRequestParser().request(fromLine: line).get()
+            #expect(try ShepherdControlRequest(request: envelope) == expected)
+        }
+    }
+
+    @Test
     func inspectRequiresExactTargetsAndDoesNotInferFocus() throws {
         let decoded = try ShepherdControlRequest(request: request(.inspect, [
             "workspace_id": .string(workspace.uuidString),
