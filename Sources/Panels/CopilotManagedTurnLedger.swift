@@ -1,5 +1,4 @@
 import CmuxControlSocket
-import CoreFoundation
 import Foundation
 
 /// Provider event attribution and positive work evidence, never profile qualification or input admission.
@@ -89,8 +88,7 @@ final class CopilotManagedTurnLedger {
         let event: [String: Any]
         do {
             guard let decoded = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-                  let idText = decoded["id"] as? String, let id = UUID(uuidString: idText),
-                  decoded["type"] is String, decoded["data"] is [String: Any] else {
+                  let id = CopilotManagedEventMetadata.eventID(decoded) else {
                 fail("invalidEvent")
                 return
             }
@@ -192,7 +190,7 @@ final class CopilotManagedTurnLedger {
             turns[turn] = eventID
             candidate = nil
         case "assistant.message_start":
-            guard Self.boolean(event["ephemeral"]) == true,
+            guard CopilotManagedEventMetadata.boolean(event["ephemeral"]) == true,
                   let message = identifier(data["messageId"]),
                   data["phase"] == nil || data["phase"] is String else {
                 fail("invalidStreamingEvent")
@@ -208,7 +206,7 @@ final class CopilotManagedTurnLedger {
             }
             messageStreams[message] = turn
         case "assistant.message_delta":
-            guard Self.boolean(event["ephemeral"]) == true,
+            guard CopilotManagedEventMetadata.boolean(event["ephemeral"]) == true,
                   let message = identifier(data["messageId"]), data["deltaContent"] is String else {
                 fail("invalidStreamingEvent")
                 return
@@ -218,7 +216,7 @@ final class CopilotManagedTurnLedger {
                 return
             }
         case "assistant.reasoning_delta":
-            guard Self.boolean(event["ephemeral"]) == true,
+            guard CopilotManagedEventMetadata.boolean(event["ephemeral"]) == true,
                   let reasoning = identifier(data["reasoningId"]), data["deltaContent"] is String else {
                 fail("invalidStreamingEvent")
                 return
@@ -235,7 +233,7 @@ final class CopilotManagedTurnLedger {
             reasoningStreams[reasoning] = turn
         case "assistant.reasoning":
             guard let reasoning = identifier(data["reasoningId"]), data["content"] is String,
-                  data["rte"] == nil || Self.boolean(data["rte"]) != nil else {
+                  data["rte"] == nil || CopilotManagedEventMetadata.boolean(data["rte"]) != nil else {
                 fail("invalidStreamingEvent")
                 return
             }
@@ -288,7 +286,7 @@ final class CopilotManagedTurnLedger {
             if candidate?.turnID == turn { candidate?.ended = true }
         case "session.idle":
             guard data["mode"] == nil || data["mode"] as? String == "interactive",
-                  data["aborted"] == nil || Self.boolean(data["aborted"]) == false else {
+                  data["aborted"] == nil || CopilotManagedEventMetadata.boolean(data["aborted"]) == false else {
                 fail("rootNotSuccessful")
                 return
             }
@@ -320,11 +318,6 @@ final class CopilotManagedTurnLedger {
     private func identifier(_ value: Any?) -> String? {
         guard let value = value as? String, ShepherdManagedSessionIdentity.validIdentifier(value) else { return nil }
         return value
-    }
-
-    private static func boolean(_ value: Any?) -> Bool? {
-        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
-        return number.boolValue
     }
 
     @discardableResult

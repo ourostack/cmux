@@ -357,6 +357,26 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
         self.assertEqual(result["reason"], "replayedEvent")
         self.assertFalse(result["workEvidence"])
 
+    def test_owner_root_metadata_must_be_valid_before_any_work_observation(self):
+        for scenario in (
+            "owner-root-missing-timestamp", "owner-root-wrong-parent", "owner-root-v5-id",
+            "owner-root-numeric-ephemeral", "owner-root-missing-ephemeral",
+        ):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertTrue(result["inputAccepted"])
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "invalidEvent")
+                self.assertFalse(result["workEvidence"])
+                self.assertEqual(result["boundSessionID"], "")
+
+    def test_owner_streaming_uses_real_native_event_metadata_and_exact_final_root(self):
+        result = self.startup("owner-streaming")
+        self.assertTrue(result["inputAccepted"])
+        self.assertTrue(result["ackMatchesHost"])
+        self.assertTrue(result["workEvidence"])
+        self.assertEqual(result["reason"], "")
+
 
 if __name__ == "__main__":
     parser = bootstrap.argparse.ArgumentParser(add_help=False)

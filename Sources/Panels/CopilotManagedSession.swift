@@ -230,7 +230,7 @@ final class CopilotManagedSession {
                 receiveConfigurationEvent(event, body: body, kind: kind)
                 return
             }
-            if let id = Self.uuidV4(event["id"]), startupEventIDs.contains(id) {
+            if let id = CopilotManagedEventMetadata.uuidV4(event["id"]), startupEventIDs.contains(id) {
                 hold("replayedEvent")
                 return
             }
@@ -262,7 +262,7 @@ final class CopilotManagedSession {
             hold("duplicateStartupEvent")
             return
         }
-        guard let id = Self.uuidV4(event["id"]) else {
+        guard let id = CopilotManagedEventMetadata.uuidV4(event["id"]) else {
             hold("invalidStartupEvent")
             return
         }
@@ -297,10 +297,7 @@ final class CopilotManagedSession {
             return
         }
         guard Set(event.keys) == ["id", "type", "data", "parentId", "timestamp", "ephemeral"],
-              let id = Self.uuidV4(event["id"]),
-              event["parentId"] is NSNull || Self.uuidV4(event["parentId"]) != nil,
-              let timestamp = event["timestamp"] as? String, Self.isTimestamp(timestamp),
-              Self.isTrue(event["ephemeral"]), let data = event["data"] as? [String: Any] else {
+              let id = CopilotManagedEventMetadata.eventID(event), let data = event["data"] as? [String: Any] else {
             hold("invalidConfigurationEvent")
             return
         }
@@ -328,13 +325,12 @@ final class CopilotManagedSession {
     }
 
     private func validateStartupEvent(_ event: [String: Any]) -> Bool {
-        guard Self.uuidV4(event["id"]) != nil,
+        guard CopilotManagedEventMetadata.eventID(event) != nil,
               event["parentId"] is NSNull,
-              let timestamp = event["timestamp"] as? String, Self.isTimestamp(timestamp),
               let data = event["data"] as? [String: Any],
               data["copilotVersion"] as? String == "1.0.98",
               let producer = data["producer"] as? String, !producer.isEmpty,
-              let started = data["startTime"] as? String, Self.isTimestamp(started),
+              let started = data["startTime"] as? String, CopilotManagedEventMetadata.isTimestamp(started),
               let version = data["version"] as? NSNumber,
               CFGetTypeID(version) != CFBooleanGetTypeID(),
               version.doubleValue.isFinite, version.doubleValue > 0,
@@ -361,20 +357,6 @@ final class CopilotManagedSession {
             return false
         }
         return true
-    }
-
-    private static func uuidV4(_ value: Any?) -> UUID? {
-        guard let text = value as? String, let id = UUID(uuidString: text),
-              id.uuid.6 & 0xf0 == 0x40, id.uuid.8 & 0xc0 == 0x80 else { return nil }
-        return id
-    }
-
-    private static func isTimestamp(_ value: String) -> Bool {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if formatter.date(from: value) != nil { return true }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value) != nil
     }
 
     private func receiveResponse(_ envelope: [String: Any]) {
@@ -412,7 +394,7 @@ final class CopilotManagedSession {
         timeoutTask?.cancel()
         switch registered.method {
         case .connect:
-            guard Self.isTrue(response["ok"]),
+            guard CopilotManagedEventMetadata.boolean(response["ok"]) == true,
                   response["protocolVersion"] as? Int == 3,
                   response["version"] as? String == "1.0.98" else {
                 hold("incompatiblePeer")
@@ -434,7 +416,8 @@ final class CopilotManagedSession {
             phase = .configuring
             request(.options, params: CopilotManagedConfiguration.optionParameters(sessionID: sessionID))
         case .options:
-            guard Self.isTrue(response["success"]), response["pluginHookCount"] as? Int == 0 else {
+            guard CopilotManagedEventMetadata.boolean(response["success"]) == true,
+                  response["pluginHookCount"] as? Int == 0 else {
                 hold("configurationRefused")
                 return
             }
@@ -508,12 +491,6 @@ final class CopilotManagedSession {
         var params: [String: Any] = ["sessionId": sessionID]
         if readback == .agents { params["includeBuiltInAgents"] = true }
         request(.readback(readback), params: params)
-    }
-
-    private static func isTrue(_ value: Any?) -> Bool {
-        guard let number = value as? NSNumber,
-              CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
-        return number.boolValue
     }
 
     private func hold(_ reason: String) {

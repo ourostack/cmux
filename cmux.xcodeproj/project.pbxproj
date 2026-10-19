@@ -1865,6 +1865,7 @@
 		C0A0B0060000000000000001 /* ConversationSidebarSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0A0B0050000000000000001 /* ConversationSidebarSupport.swift */; };
 		C0A0B0020000000000000001 /* ConversationSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0A0B0010000000000000001 /* ConversationSidebarView.swift */; };
 		B11371000000000000000025 /* CopilotManagedConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11371000000000000000026 /* CopilotManagedConfiguration.swift */; };
+		B11381000000000000000001 /* CopilotManagedEventMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11381000000000000000002 /* CopilotManagedEventMetadata.swift */; };
 		B11371000000000000000027 /* CopilotManagedSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11371000000000000000028 /* CopilotManagedSession.swift */; };
 		B11371000000000000000029 /* CopilotManagedTurnLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1137100000000000000002A /* CopilotManagedTurnLedger.swift */; };
 		C11538000000000000000003 /* CopyOnlyTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C11538000000000000000004 /* CopyOnlyTextSelection.swift */; };
@@ -6458,6 +6459,7 @@
 		C0A0B0050000000000000001 /* ConversationSidebarSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSidebarSupport.swift; sourceTree = "<group>"; };
 		C0A0B0010000000000000001 /* ConversationSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSidebarView.swift; sourceTree = "<group>"; };
 		B11371000000000000000026 /* CopilotManagedConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CopilotManagedConfiguration.swift; sourceTree = "<group>"; };
+		B11381000000000000000002 /* CopilotManagedEventMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CopilotManagedEventMetadata.swift; sourceTree = "<group>"; };
 		B11371000000000000000028 /* CopilotManagedSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CopilotManagedSession.swift; sourceTree = "<group>"; };
 		B1137100000000000000002A /* CopilotManagedTurnLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CopilotManagedTurnLedger.swift; sourceTree = "<group>"; };
 		C11538000000000000000004 /* CopyOnlyTextSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyOnlyTextSelection.swift; sourceTree = "<group>"; };
@@ -11676,6 +11678,7 @@
 				A9E01000000000000000000A /* AgentSessionStreamAccumulators.swift */,
 				A9E01000000000000000000E /* CodexAppServerSession.swift */,
 				B11371000000000000000026 /* CopilotManagedConfiguration.swift */,
+				B11381000000000000000002 /* CopilotManagedEventMetadata.swift */,
 				B11371000000000000000028 /* CopilotManagedSession.swift */,
 				B1137100000000000000002A /* CopilotManagedTurnLedger.swift */,
 				A9E010000000000000000003 /* AgentSessionWebRenderer.swift */,
@@ -15629,6 +15632,7 @@
 				C0A0B0060000000000000001 /* ConversationSidebarSupport.swift in Sources */,
 				C0A0B0020000000000000001 /* ConversationSidebarView.swift in Sources */,
 				B11371000000000000000025 /* CopilotManagedConfiguration.swift in Sources */,
+				B11381000000000000000001 /* CopilotManagedEventMetadata.swift in Sources */,
 				B11371000000000000000027 /* CopilotManagedSession.swift in Sources */,
 				B11371000000000000000029 /* CopilotManagedTurnLedger.swift in Sources */,
 				C11538000000000000000003 /* CopyOnlyTextSelection.swift in Sources */,

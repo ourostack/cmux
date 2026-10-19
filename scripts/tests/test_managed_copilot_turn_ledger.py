@@ -24,6 +24,9 @@ def ack(provider_id="server-message-A", input_id=INPUT):
 
 
 def event(kind, data, **extra):
+    if kind in ("session.idle", "assistant.idle", "assistant.intent", "assistant.message_start",
+                "assistant.message_delta", "assistant.reasoning_delta"):
+        extra.setdefault("ephemeral", True)
     return {"op": "event", "event": {
         "id": str(uuid.uuid4()), "parentId": None, "timestamp": "2026-10-19T13:00:00.000Z",
         "type": kind, "data": data, **extra,
@@ -66,6 +69,7 @@ class ManagedCopilotTurnLedgerTests(unittest.TestCase):
                      "-o", str(cls.build / "libCmuxControlSocket.dylib")],
             flags + ["-parse-as-library", "-I", str(cls.build), "-L", str(cls.build), "-lCmuxControlSocket",
                      "-Xlinker", "-rpath", "-Xlinker", str(cls.build),
+                     str(ROOT / "Sources/Panels/CopilotManagedEventMetadata.swift"),
                      str(ROOT / "Sources/Panels/CopilotManagedTurnLedger.swift"),
                      str(ROOT / "scripts/tests/fixtures/managed_copilot_turn_ledger_main.swift"),
                      "-o", str(cls.build / "ledger")],
@@ -293,11 +297,13 @@ class ManagedCopilotTurnLedgerTests(unittest.TestCase):
                 self.assertFalse(rows[-1]["complete"])
 
     def test_streaming_requires_a_live_single_root_turn_and_true_transient_metadata(self):
+        missing_transient = event("assistant.message_start", {"messageId": "assistant-A"})
+        missing_transient["event"].pop("ephemeral")
         for actions, reason in (
             ([event("assistant.message_start", {"messageId": "assistant-A"}, ephemeral=True)], "unmatchedStream"),
-            ([root()[0], event("assistant.message_start", {"messageId": "assistant-A"})], "invalidStreamingEvent"),
+            ([root()[0], missing_transient], "invalidEvent"),
             ([root()[0], event("assistant.reasoning_delta", {"reasoningId": "reason-A", "deltaContent": "x"},
-                              ephemeral=1)], "invalidStreamingEvent"),
+                              ephemeral=1)], "invalidEvent"),
         ):
             with self.subTest(reason=reason, actions=actions):
                 rows = self.run_ledger([begin(), ack(), *actions])
@@ -314,6 +320,86 @@ class ManagedCopilotTurnLedgerTests(unittest.TestCase):
             *events[2:], *clean_work(),
         ])
         self.assertEqual(rows[-1]["failure"], "replayedStream")
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_metadata_requires_real_uuid_v4_timestamp_and_parent_fields(self):
+        for key, value in (
+            ("id", "11111111-1111-5111-8111-111111111111"),
+            ("timestamp", "not-an-iso-timestamp"), ("timestamp", None),
+            ("parentId", "not-a-uuid"), ("parentId", {}),
+            ("ephemeral", 1), ("unexpected", "not-in-the-pinned-envelope"),
+        ):
+            with self.subTest(key=key, value=value):
+                events = root()
+                events[1]["event"][key] = value
+                rows = self.run_ledger([begin(), ack(), *events, *clean_work()])
+                self.assertEqual(rows[-1]["failure"], "invalidEvent")
+                self.assertFalse(rows[-1]["complete"])
+        for key in ("id", "type", "data", "timestamp", "parentId"):
+            with self.subTest(missing=key):
+                events = root()
+                events[1]["event"].pop(key)
+                rows = self.run_ledger([begin(), ack(), *events, *clean_work()])
+                self.assertEqual(rows[-1]["failure"], "invalidEvent")
+                self.assertFalse(rows[-1]["complete"])
+
+    def test_metadata_transient_root_events_require_true_boolean_ephemeral(self):
+        for kind, data in (
+            ("session.idle", {}),
+            ("assistant.idle", {"aborted": False}),
+            ("assistant.intent", {"intent": "working"}),
+        ):
+            for flag in (False, None, 1, "missing"):
+                with self.subTest(kind=kind, flag=flag):
+                    probe = event(kind, data, ephemeral=flag)
+                    if flag == "missing":
+                        probe["event"].pop("ephemeral")
+                    events = root()
+                    if kind == "session.idle":
+                        events[-1] = probe
+                    else:
+                        events.insert(1, probe)
+                    rows = self.run_ledger([begin(), ack(), *events, *clean_work()])
+                    self.assertEqual(rows[-1]["failure"], "invalidEvent")
+                    self.assertFalse(rows[-1]["complete"])
+
+    def test_metadata_durable_events_preserve_optional_boolean_ephemeral(self):
+        for flag in ("missing", True, False):
+            with self.subTest(flag=flag):
+                events = root()
+                for action in events[:-1]:
+                    if flag != "missing":
+                        action["event"]["ephemeral"] = flag
+                rows = self.run_ledger([begin(), ack(), *events, *clean_work()])
+                self.assertTrue(rows[-1]["complete"], rows)
+
+    def test_metadata_predecessor_uuid_is_not_confused_with_root_input_identity(self):
+        events = root()
+        for action in events:
+            action["event"]["parentId"] = "33333333-3333-4333-8333-333333333333"
+        rows = self.run_ledger([begin(), ack(), *events, *clean_work()])
+        self.assertTrue(rows[-1]["complete"], rows)
+        events[1]["event"]["data"]["originatingMessageId"] = "foreign-input"
+        rows = self.run_ledger([begin(), ack(), *events, *clean_work()])
+        self.assertEqual(rows[-1]["failure"], "foreignRoot")
+        self.assertFalse(rows[-1]["complete"])
+
+    def test_metadata_optional_agent_identity_cannot_be_null_or_non_string(self):
+        for value in (None, 1, []):
+            with self.subTest(value=value):
+                events = root()
+                events[1]["event"]["agentId"] = value
+                rows = self.run_ledger([begin(), ack(), *events, *clean_work()])
+                self.assertEqual(rows[-1]["failure"], "invalidEvent")
+                self.assertFalse(rows[-1]["complete"])
+
+    def test_metadata_invalid_early_event_is_rejected_before_the_send_ack(self):
+        probe = root()[0]
+        probe["event"].pop("timestamp")
+        rows = self.run_ledger([begin(), probe, ack()])
+        self.assertFalse(rows[1]["accepted"])
+        self.assertEqual(rows[1]["failure"], "invalidEvent")
+        self.assertFalse(rows[-1]["accepted"])
         self.assertFalse(rows[-1]["complete"])
 
 

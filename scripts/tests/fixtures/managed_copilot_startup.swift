@@ -414,20 +414,55 @@ enum ManagedCopilotStartupFixture {
                 payload["originatingMessageId"] = "someone-else"
             }
             if scenario == "owner-aborted" && type == "session.idle" { payload["aborted"] = true }
+            if scenario == "owner-streaming" && type == "assistant.message" {
+                try sendEvent(sessionID: sessionID, type: "assistant.message_start", data: ["messageId": "assistant-one"])
+                try sendEvent(
+                    sessionID: sessionID, type: "assistant.message_delta",
+                    data: ["messageId": "assistant-one", "deltaContent": "Done"]
+                )
+                try sendEvent(
+                    sessionID: sessionID, type: "assistant.reasoning_delta",
+                    data: ["reasoningId": "reason-one", "deltaContent": "Thinking"]
+                )
+                try sendEvent(
+                    sessionID: sessionID, type: "assistant.reasoning",
+                    data: ["reasoningId": "reason-one", "content": "Thinking complete"]
+                )
+            }
             try sendEvent(
                 sessionID: sessionID, type: type, data: payload,
-                eventID: type == "assistant.turn_start" ? replayEventID : nil
+                eventID: type == "assistant.turn_start" ? replayEventID : nil, metadataScenario: scenario
             )
         }
     }
 
-    static func sendEvent(sessionID: String, type: String, data: [String: Any], eventID: String? = nil) throws {
+    static func sendEvent(
+        sessionID: String, type: String, data: [String: Any],
+        eventID: String? = nil, metadataScenario: String? = nil
+    ) throws {
+        var event: [String: Any] = [
+            "id": eventID ?? UUID().uuidString, "timestamp": "2026-10-19T13:00:00.000Z",
+            "parentId": NSNull(), "type": type, "data": data,
+        ]
+        if [
+            "session.idle", "assistant.idle", "assistant.intent", "assistant.message_start",
+            "assistant.message_delta", "assistant.reasoning_delta",
+        ].contains(type) { event["ephemeral"] = true }
+        if type == "assistant.turn_start" {
+            switch metadataScenario {
+            case "owner-root-missing-timestamp": event.removeValue(forKey: "timestamp")
+            case "owner-root-wrong-parent": event["parentId"] = "foreign"
+            case "owner-root-v5-id": event["id"] = "11111111-1111-5111-8111-111111111111"
+            default: break
+            }
+        }
+        if type == "session.idle" {
+            if metadataScenario == "owner-root-numeric-ephemeral" { event["ephemeral"] = 1 }
+            if metadataScenario == "owner-root-missing-ephemeral" { event.removeValue(forKey: "ephemeral") }
+        }
         try send([
             "jsonrpc": "2.0", "method": "session.event",
-            "params": ["sessionId": sessionID, "event": [
-                "id": eventID ?? UUID().uuidString, "timestamp": "2026-10-19T13:00:00.000Z",
-                "parentId": NSNull(), "type": type, "data": data,
-            ]],
+            "params": ["sessionId": sessionID, "event": event],
         ])
     }
 
