@@ -7,6 +7,30 @@ import Foundation
 struct ManagedProcessSupervisorFixture {
     @MainActor static func main() async {
         let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.count == 2, arguments.first == "--fixture-foreground-census" {
+            let accepted = OwnedProcessSupervisor.foregroundGroupIsComplete(
+                backend: AgentPIDProcessIdentity(pid: 12345, startSeconds: 98765, startMicroseconds: 4321),
+                listing: ManagedProcessListingFixture.make(arguments[1])
+            )
+            try? FileHandle.standardOutput.write(contentsOf: Data(accepted ? "true".utf8 : "false".utf8))
+            exit(0)
+        }
+        if arguments.count == 2, arguments.first == "--fixture-command-service" {
+            do {
+                let result = try await ManagedCommandServiceFixture.run(arguments[1])
+                try FileHandle.standardOutput.write(contentsOf: JSONSerialization.data(withJSONObject: result))
+                exit(0)
+            } catch {
+                try? FileHandle.standardError.write(contentsOf: Data("\(error)\n".utf8))
+                exit(1)
+            }
+        }
+        if arguments.count == 2, arguments.first == "--fixture-command-marker" {
+            guard FileManager.default.createFile(atPath: arguments[1], contents: Data("executed".utf8)) else {
+                exit(1)
+            }
+            exit(0)
+        }
         if arguments.count == 2, arguments.first == "--fixture-copilot-startup" {
             do {
                 let result = try await ManagedCopilotStartupFixture.run(arguments[1])
@@ -42,16 +66,18 @@ struct ManagedProcessSupervisorFixture {
                 exit(0)
             } catch { exit(1) }
         }
-        if arguments.first == "--fixture-prepare-managed", arguments.count == 4 {
+        if ["--fixture-prepare-managed", "--fixture-prepare-foreground"].contains(arguments.first),
+           arguments.count == 4 {
             do {
                 guard let nonce = UUID(uuidString: arguments[1]) else { exit(1) }
                 let launcher = AgentSessionOwnedProcessLauncher(
                     supervisorExecutableURL: URL(fileURLWithPath: CommandLine.arguments[0])
                 )
-                let process = try launcher.prepareManaged(
-                    nonce: nonce, executableURL: URL(fileURLWithPath: arguments[2]),
-                    arguments: ["--fixture-child", "literal argument"],
-                    workingDirectory: arguments[3], environment: ["FIXTURE": "controlled"]
+                let prepare = arguments.first == "--fixture-prepare-foreground"
+                    ? launcher.prepareForeground : launcher.prepareManaged
+                let process = try prepare(
+                    nonce, URL(fileURLWithPath: arguments[2]),
+                    ["--fixture-child", "literal argument"], arguments[3], ["FIXTURE": "controlled"]
                 )
                 let result: [String: Any] = [
                     "executable": process.executableURL?.path ?? "",

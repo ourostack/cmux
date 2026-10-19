@@ -14,9 +14,11 @@ struct OwnedProcessSupervisor {
     private let arguments: [String]
     private let usesParentLifetime: Bool
     private let managedNonce: UUID?
+    private let awaitsForegroundReady: Bool
 
     init?(command: String, arguments: [String]) throws {
-        let managed = command == "__managed-agent-process-supervisor"
+        awaitsForegroundReady = command == "__managed-foreground-command-supervisor"
+        let managed = command == "__managed-agent-process-supervisor" || awaitsForegroundReady
         guard managed || command == "__owned-process-supervisor"
                 || command == "__codex-teams-app-server-supervisor" else {
             return nil
@@ -80,10 +82,15 @@ struct OwnedProcessSupervisor {
             // If the owner died before registration, never resume the target.
             // Parentage is kernel-owned and cannot be forged by inherited env.
             guard ownerPID == nil || getppid() == ownerPID else { throw POSIXError(.ESRCH) }
+            var foregroundBackend: AgentPIDProcessIdentity?
             if let managedNonce, let managedOwner {
-                try Self.writeManagedBootstrap(
+                let backend = try Self.writeManagedBootstrap(
                     nonce: managedNonce, owner: managedOwner, backendPID: processIdentifier
                 )
+                if awaitsForegroundReady {
+                    try Self.awaitForegroundReady(nonce: managedNonce, owner: managedOwner, queue: queue)
+                    foregroundBackend = backend
+                }
                 guard getppid() == managedOwner.pid,
                       AgentPIDProcessIdentity(pid: managedOwner.pid) == managedOwner else {
                     throw POSIXError(.ESRCH)
@@ -93,7 +100,7 @@ struct OwnedProcessSupervisor {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
             return Self.decodedTerminationStatus(try Self.observe(
-                processIdentifier: processIdentifier, queue: queue
+                processIdentifier: processIdentifier, queue: queue, foregroundBackend: foregroundBackend
             ))
         } catch {
             Self.forceTerminateAndReap(processIdentifier)
@@ -103,7 +110,7 @@ struct OwnedProcessSupervisor {
 
     private static func writeManagedBootstrap(
         nonce: UUID, owner: AgentPIDProcessIdentity, backendPID: pid_t
-    ) throws {
+    ) throws -> AgentPIDProcessIdentity {
         guard getppid() == owner.pid, AgentPIDProcessIdentity(pid: owner.pid) == owner,
               let supervisor = AgentPIDProcessIdentity.processSnapshot(pid: getpid()),
               supervisor.parentPID == owner.pid,
@@ -139,6 +146,76 @@ struct OwnedProcessSupervisor {
               fcntl(STDERR_FILENO, F_SETNOSIGPIPE, noSIGPIPE) == 0 else {
             throw CodexTeamsPOSIXSupport.error(operation: "restore provider pipe", code: errno)
         }
+        return backend.identity
+    }
+
+    private static func awaitForegroundReady(
+        nonce: UUID, owner: AgentPIDProcessIdentity, queue: Int32
+    ) throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var metadata = stat()
+        guard fstat(STDIN_FILENO, &metadata) == 0 else { throw POSIXError(.EBADF) }
+        guard metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFIFO) else { throw POSIXError(.EINVAL) }
+        let flags = fcntl(STDIN_FILENO, F_GETFL, 0)
+        guard flags >= 0, fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw CodexTeamsPOSIXSupport.error(operation: "configure foreground ready pipe", code: errno)
+        }
+        try registerLifetime(fileDescriptor: STDIN_FILENO, queue: queue)
+        defer { close(STDIN_FILENO) }
+        var nonceBytes = nonce.uuid
+        let expected = Array("CMXGO001".utf8) + withUnsafeBytes(of: &nonceBytes) { Array($0) }
+        var received: [UInt8] = []
+        while true {
+            guard ContinuousClock.now < deadline else { throw POSIXError(.ETIMEDOUT) }
+            guard getppid() == owner.pid, AgentPIDProcessIdentity(pid: owner.pid) == owner else {
+                throw POSIXError(.ESRCH)
+            }
+            var bytes = [UInt8](repeating: 0, count: expected.count + 1 - received.count)
+            let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
+            if count > 0 {
+                received.append(contentsOf: bytes.prefix(count))
+                guard received.count <= expected.count,
+                      received.elementsEqual(expected.prefix(received.count)) else {
+                    throw POSIXError(.EPROTO)
+                }
+                continue
+            }
+            if count == 0 {
+                guard received == expected else { throw POSIXError(.EPROTO) }
+                var removal = kevent(ident: UInt(STDIN_FILENO), filter: Int16(EVFILT_READ),
+                                    flags: UInt16(EV_DELETE), fflags: 0, data: 0, udata: nil)
+                try register(event: &removal, queue: queue, operation: "finish foreground ready pipe")
+                // EOF cannot outrun an already-observed owner exit, child exit or signal.
+                var pending = kevent()
+                var immediate = timespec(tv_sec: 0, tv_nsec: 0)
+                guard kevent(queue, nil, 0, &pending, 1, &immediate) == 0 else {
+                    throw POSIXError(.EINTR)
+                }
+                guard ContinuousClock.now < deadline else { throw POSIXError(.ETIMEDOUT) }
+                return
+            }
+            if errno == EINTR { continue }
+            guard errno == EAGAIN || errno == EWOULDBLOCK else {
+                throw CodexTeamsPOSIXSupport.error(operation: "read foreground ready pipe", code: errno)
+            }
+            let duration = ContinuousClock.now.duration(to: deadline)
+            guard duration > .zero else { throw POSIXError(.ETIMEDOUT) }
+            let remaining = duration.components
+            var timeout = timespec(
+                tv_sec: Int(remaining.seconds), tv_nsec: Int(remaining.attoseconds / 1_000_000_000)
+            )
+            var event = kevent()
+            let observed = kevent(queue, nil, 0, &event, 1, &timeout)
+            if observed < 0, errno == EINTR { continue }
+            guard observed > 0 else {
+                if observed == 0 { throw POSIXError(.ETIMEDOUT) }
+                throw CodexTeamsPOSIXSupport.error(operation: "wait for foreground ready", code: errno)
+            }
+            guard (event.flags & UInt16(EV_ERROR)) == 0,
+                  Int32(event.filter) == EVFILT_READ, event.ident == UInt(STDIN_FILENO) else {
+                throw POSIXError(.EINTR)
+            }
+        }
     }
 
     private func spawnTarget() throws -> pid_t {
@@ -148,7 +225,7 @@ struct OwnedProcessSupervisor {
             operation: "initialize target file actions"
         )
         defer { posix_spawn_file_actions_destroy(&fileActions) }
-        if usesParentLifetime {
+        if usesParentLifetime && !awaitsForegroundReady {
             try CodexTeamsPOSIXSupport.require(
                 posix_spawn_file_actions_addinherit_np(&fileActions, STDIN_FILENO),
                 operation: "inherit target stdin"
@@ -251,11 +328,22 @@ struct OwnedProcessSupervisor {
 
     private static func observe(
         processIdentifier: pid_t,
-        queue: Int32
+        queue: Int32,
+        foregroundBackend: AgentPIDProcessIdentity? = nil
     ) throws -> Int32 {
         var terminationStarted = false
         var exitObserved = false
         var forceKillSent = false
+        var foregroundHeld = false
+
+        func finish() -> Int32 {
+            let status = reap(processIdentifier)
+            guard foregroundHeld else { return status }
+            let diagnostic = Data("cmux: foreground ownership uncertain; command held\n".utf8)
+            _ = diagnostic.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count) }
+            // Status 254 is authoritative; the shared stderr text is not a receipt.
+            return 254 << 8
+        }
 
         while true {
             var event = kevent()
@@ -286,7 +374,16 @@ struct OwnedProcessSupervisor {
                 }
             case EVFILT_PROC, EVFILT_SIGNAL:
                 if Int32(event.filter) == EVFILT_PROC, event.ident == UInt(processIdentifier) {
+                    if let foregroundBackend {
+                        let listing = DarwinProcessEnumerator().capture()
+                        if event.fflags & UInt32(NOTE_EXIT) == 0
+                            || !foregroundGroupIsComplete(backend: foregroundBackend, listing: listing) {
+                            foregroundHeld = true
+                        }
+                    }
                     exitObserved = true
+                } else if foregroundBackend != nil {
+                    foregroundHeld = true
                 }
                 if !terminationStarted {
                     terminationStarted = true
@@ -305,12 +402,29 @@ struct OwnedProcessSupervisor {
             if exitObserved, !forceKillSent,
                Darwin.kill(-processIdentifier, 0) != 0,
                errno == ESRCH {
-                return reap(processIdentifier)
+                return finish()
             }
             if exitObserved, forceKillSent {
-                return reap(processIdentifier)
+                return finish()
             }
         }
+    }
+
+    static func foregroundGroupIsComplete(
+        backend: AgentPIDProcessIdentity, listing: DarwinProcessListing
+    ) -> Bool {
+        guard backend.pid > 1, backend.startSeconds > 0,
+              (0..<1_000_000).contains(backend.startMicroseconds),
+              listing.isComplete, !listing.isTruncated, listing.missingProcessCount == 0 else {
+            return false
+        }
+        let pid = UInt32(backend.pid)
+        // The waitable zombie leader must remain visible until cleanup reserves its group.
+        guard let leader = listing.processes.first(where: { $0.pbi_pid == pid }),
+              leader.pbi_pgid == pid,
+              leader.pbi_start_tvsec == UInt64(backend.startSeconds),
+              leader.pbi_start_tvusec == UInt64(backend.startMicroseconds) else { return false }
+        return !listing.processes.contains { $0.pbi_pgid == pid && $0.pbi_pid != pid }
     }
 
     private static func registerLifetime(

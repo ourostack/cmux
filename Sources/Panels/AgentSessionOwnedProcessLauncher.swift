@@ -8,8 +8,30 @@ struct AgentSessionOwnedProcessLauncher {
         self.supervisorExecutableURL = supervisorExecutableURL
     }
 
+    func prepareForeground(
+        nonce: UUID, executableURL: URL, arguments: [String],
+        workingDirectory: String, environment: [String: String]
+    ) throws -> Process {
+        try prepareManagedProcess(
+            command: "__managed-foreground-command-supervisor",
+            nonce: nonce, executableURL: executableURL, arguments: arguments,
+            workingDirectory: workingDirectory, environment: environment
+        )
+    }
+
     func prepareManaged(
         nonce: UUID, executableURL: URL, arguments: [String],
+        workingDirectory: String, environment: [String: String]
+    ) throws -> Process {
+        try prepareManagedProcess(
+            command: "__managed-agent-process-supervisor",
+            nonce: nonce, executableURL: executableURL, arguments: arguments,
+            workingDirectory: workingDirectory, environment: environment
+        )
+    }
+
+    private func prepareManagedProcess(
+        command: String, nonce: UUID, executableURL: URL, arguments: [String],
         workingDirectory: String, environment: [String: String]
     ) throws -> Process {
         guard executableURL.isFileURL, executableURL.path.hasPrefix("/"),
@@ -22,7 +44,7 @@ struct AgentSessionOwnedProcessLauncher {
             throw CocoaError(.fileReadInvalidFileName)
         }
         return try prepareProcess(
-            arguments: ["__managed-agent-process-supervisor", nonce.uuidString, executableURL.path] + arguments,
+            arguments: [command, nonce.uuidString, executableURL.path] + arguments,
             directory: URL(fileURLWithPath: workingDirectory, isDirectory: true)
                 .resolvingSymlinksInPath().standardizedFileURL,
             environment: environment, unavailableProvider: "managed"
