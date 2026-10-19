@@ -2,11 +2,12 @@ import CmuxControlSocket
 import CoreFoundation
 import Foundation
 
-/// Private protocol startup only. No automatic input is admitted before effective readbacks.
+/// Private owner-input transport and work evidence. Automatic input is not exposed.
 @MainActor
 final class CopilotManagedSession {
     enum Phase: String {
         case idle, connecting, creating, configuring, awaitingReadback, configurationObserved, held
+        case sending, awaitingRoot, inspectingWork, workObserved
     }
 
     let sessionID = UUID().uuidString.lowercased()
@@ -16,9 +17,39 @@ final class CopilotManagedSession {
     private(set) var diagnostics = Data()
     private(set) var closeFailures: [String] = []
 
+    var hasCompleteWorkEvidence: Bool {
+        phase == .workObserved && lifetime.transportIsLive(launchID: lifetime.launchID)
+            && turnLedger?.hasCompleteWorkEvidence == true
+    }
+    var inputState: ShepherdManagedSessionState? { turnLedger?.state }
+
+    func submitOwnerInput(_ inputID: UUID, prompt: String, launchID: UUID) -> Bool {
+        guard launchID == lifetime.launchID,
+              phase == .configurationObserved || phase == .workObserved,
+              pending.isEmpty,
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard lifetime.transportIsLive(launchID: launchID), let identity = lifetime.identity,
+              let turnLedger, turnLedger.state.identity == identity else {
+            hold("transportUnavailable")
+            return false
+        }
+        guard turnLedger.beginInput(inputID, origin: .owner) else {
+            hold("inputLedgerConflict")
+            return false
+        }
+        phase = .sending
+        request(.send(inputID), params: [
+            "sessionId": sessionID, "prompt": prompt, "source": "user",
+            "agentMode": "interactive", "mode": "enqueue",
+        ])
+        return phase != .held
+    }
+
     private enum Method {
         case connect, create, options
         case readback(CopilotManagedConfiguration.Readback)
+        case send(UUID)
+        case work(CopilotManagedTurnLedger.WorkReadback, UUID)
 
         var name: String {
             switch self {
@@ -26,6 +57,14 @@ final class CopilotManagedSession {
             case .create: "session.create"
             case .options: "session.options.update"
             case .readback(let readback): readback.method
+            case .send: "session.send"
+            case .work(let readback, _):
+                switch readback {
+                case .refresh: "session.tasks.refresh"
+                case .tasks: "session.tasks.list"
+                case .schedules: "session.schedule.list"
+                case .pendingTools: "session.tools.listPendingRequests"
+                }
             }
         }
     }
@@ -46,6 +85,7 @@ final class CopilotManagedSession {
     private var bufferedEventBytes = 0
     private var startupEventID: UUID?
     private var verifiedReadbacks: Set<CopilotManagedConfiguration.Readback> = []
+    private var turnLedger: CopilotManagedTurnLedger?
 
     init(
         lifetime: AgentSessionManagedSession, takingOwnershipOf input: FileHandle,
@@ -166,14 +206,35 @@ final class CopilotManagedSession {
         guard Set(envelope.keys) == ["jsonrpc", "method", "params"],
               envelope["method"] as? String == "session.event",
               let params = envelope["params"] as? [String: Any],
-              let event = params["event"] as? [String: Any],
-              event["type"] as? String == "session.start" else {
+              let event = params["event"] as? [String: Any] else {
             hold("unsupportedNotification")
             return
         }
-        guard params["sessionId"] as? String == sessionID,
-              phase == .creating || phase == .configuring || phase == .awaitingReadback
-                || phase == .configurationObserved else {
+        guard params["sessionId"] as? String == sessionID else {
+            hold("sessionMismatch")
+            return
+        }
+        if event["type"] as? String != "session.start" {
+            guard let turnLedger else {
+                hold("unsupportedNotification")
+                return
+            }
+            do {
+                turnLedger.receive(try JSONSerialization.data(withJSONObject: event))
+            } catch {
+                hold("invalidEnvelope")
+                return
+            }
+            if let reason = turnLedger.failureReason {
+                hold(reason)
+                return
+            }
+            if phase == .workObserved { phase = .awaitingRoot }
+            inspectWorkIfReady()
+            return
+        }
+        guard phase == .creating || phase == .configuring || phase == .awaitingReadback
+                || phase == .configurationObserved || startupEventID != nil else {
             hold("sessionMismatch")
             return
         }
@@ -313,9 +374,54 @@ final class CopilotManagedSession {
             if let next = steps.first(where: { !verifiedReadbacks.contains($0) }) {
                 requestReadback(next)
             } else {
+                guard let identity = lifetime.identity else {
+                    hold("transportUnavailable")
+                    return
+                }
+                turnLedger = CopilotManagedTurnLedger(identity: identity)
                 phase = .configurationObserved
             }
+        case .send(let inputID):
+            guard phase == .sending, Set(response.keys) == ["messageId"],
+                  let messageID = response["messageId"] as? String,
+                  ShepherdManagedSessionIdentity.validIdentifier(messageID) else {
+                hold("invalidSendAcknowledgement")
+                return
+            }
+            guard let turnLedger, turnLedger.acknowledgeInput(inputID, providerInputID: messageID) else {
+                hold(turnLedger?.failureReason ?? "inputLedgerConflict")
+                return
+            }
+            phase = .awaitingRoot
+            inspectWorkIfReady()
+        case .work(let readback, let token):
+            guard phase == .inspectingWork, let turnLedger,
+                  turnLedger.acceptWorkReadback(readback, token: token, result: response) else {
+                hold(turnLedger?.failureReason ?? "workReadbackMismatch")
+                return
+            }
+            let steps = CopilotManagedTurnLedger.WorkReadback.allCases
+            guard let index = steps.firstIndex(of: readback) else {
+                hold("workReadbackMismatch")
+                return
+            }
+            if index + 1 < steps.count {
+                request(.work(steps[index + 1], token), params: ["sessionId": sessionID])
+            } else {
+                guard turnLedger.hasCompleteWorkEvidence else {
+                    hold("workReadbackMismatch")
+                    return
+                }
+                phase = .workObserved
+            }
         }
+    }
+
+    private func inspectWorkIfReady() {
+        guard phase == .awaitingRoot, pending.isEmpty,
+              let token = turnLedger?.beginWorkReadback() else { return }
+        phase = .inspectingWork
+        request(.work(.refresh, token), params: ["sessionId": sessionID])
     }
 
     private func requestReadback(_ readback: CopilotManagedConfiguration.Readback) {

@@ -57,6 +57,14 @@ enum ManagedCopilotStartupFixture {
             }
         }
         let beforeStart = ManagedSessionLifetimeFixture.phase(lifetime)
+        let hostInputID = UUID()
+        let nextHostInputID = UUID()
+        var inputAccepted = false
+        var secondAccepted = false
+        var nextAccepted = false
+        if scenario == "owner-before-start" {
+            inputAccepted = adapter.submitOwnerInput(hostInputID, prompt: "Owner input: 雪 🐈", launchID: lifetime.launchID)
+        }
         adapter.start(launchID: scenario == "stale-start" ? UUID() : lifetime.launchID)
         if scenario == "stale-start" {
             try await Task.sleep(for: .milliseconds(100))
@@ -69,6 +77,31 @@ enum ManagedCopilotStartupFixture {
             // A duplicate response must still invalidate a completed startup.
             try await Task.sleep(for: .milliseconds(80))
         }
+        if scenario.hasPrefix("owner-") && scenario != "owner-before-start" {
+            inputAccepted = adapter.submitOwnerInput(
+                hostInputID, prompt: scenario == "owner-whitespace" ? " \n\t" : "Owner input: 雪 🐈",
+                launchID: scenario == "owner-stale-launch" ? UUID() : lifetime.launchID
+            )
+            if scenario != "owner-stale-launch" && scenario != "owner-whitespace" {
+                secondAccepted = adapter.submitOwnerInput(UUID(), prompt: "must not queue", launchID: lifetime.launchID)
+            }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while adapter.phase != .held && !adapter.hasCompleteWorkEvidence && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            if ["owner-next-input", "owner-reused-host", "owner-reused-provider", "owner-late-prior-root"]
+                .contains(scenario), adapter.hasCompleteWorkEvidence {
+                nextAccepted = adapter.submitOwnerInput(
+                    scenario == "owner-reused-host" ? hostInputID : nextHostInputID,
+                    prompt: "Owner input: 雪 🐈", launchID: lifetime.launchID
+                )
+                let nextDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+                while adapter.phase != .held && !adapter.hasCompleteWorkEvidence
+                        && ContinuousClock.now < nextDeadline {
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            }
+        }
         return [
             "phase": adapter.phase.rawValue, "reason": adapter.holdReason ?? "",
             "nativePhase": ManagedSessionLifetimeFixture.phase(lifetime),
@@ -76,6 +109,11 @@ enum ManagedCopilotStartupFixture {
             "boundSessionID": lifetime.identity?.providerSessionID ?? "",
             "bufferedEvents": adapter.bufferedEvents.count,
             "nativeBeforeStart": beforeStart,
+            "inputAccepted": inputAccepted, "secondAccepted": secondAccepted,
+            "workEvidence": adapter.hasCompleteWorkEvidence,
+            "ackMatchesHost": adapter.inputState?.inputID(matchingProviderInputID: "server-input-one") == hostInputID,
+            "nextAccepted": nextAccepted,
+            "nextAckMatchesHost": adapter.inputState?.inputID(matchingProviderInputID: "server-input-two") == nextHostInputID,
         ]
     }
 
@@ -84,6 +122,8 @@ enum ManagedCopilotStartupFixture {
         var bytes = [UInt8](repeating: 0, count: 4096)
         var plannedID: String?
         var requestedNoBuiltinAgents = false
+        var sentInputs = 0
+        var workStep = 0
         while true {
             let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
             if count == 0 { return }
@@ -239,6 +279,63 @@ enum ManagedCopilotStartupFixture {
                 case "session.tools.getCurrentMetadata":
                     result = ["tools": scenario == "null-tools" ? NSNull()
                               : scenario == "unaccounted-tool" ? [["name": "unexpected"]] : []]
+                case "session.send":
+                    guard scenario.hasPrefix("owner-"), sentInputs == 0 || (
+                            sentInputs == 1 && ["owner-next-input", "owner-reused-provider", "owner-late-prior-root"]
+                                .contains(scenario)
+                          ),
+                          Set(params.keys) == ["sessionId", "prompt", "source", "agentMode", "mode"],
+                          params["sessionId"] as? String == plannedID,
+                          params["prompt"] as? String == "Owner input: 雪 🐈",
+                          params["source"] as? String == "user",
+                          params["agentMode"] as? String == "interactive",
+                          params["mode"] as? String == "enqueue",
+                          let plannedID else { throw POSIXError(.EPROTO) }
+                    sentInputs += 1
+                    workStep = 0
+                    if scenario == "owner-early-root" { try sendRoot(sessionID: plannedID, scenario: scenario) }
+                    var ack: [String: Any] = ["messageId": "server-input-one"]
+                    if sentInputs == 2 && scenario != "owner-reused-provider" {
+                        ack["messageId"] = "server-input-two"
+                    }
+                    if scenario == "owner-missing-ack-id" { ack = [:] }
+                    if scenario == "owner-empty-ack-id" { ack["messageId"] = "" }
+                    if scenario == "owner-null-ack-id" { ack["messageId"] = NSNull() }
+                    let response: [String: Any] = [
+                        "jsonrpc": "2.0", "id": scenario == "owner-foreign-ack" ? "foreign" : id, "result": ack,
+                    ]
+                    try send(response)
+                    if scenario == "owner-duplicate-ack" { try send(response) }
+                    if scenario != "owner-early-root" && scenario != "owner-ack-only" {
+                        try sendRoot(
+                            sessionID: plannedID, scenario: scenario,
+                            input: scenario == "owner-late-prior-root" ? 1 : sentInputs
+                        )
+                    }
+                    continue
+                case "session.tasks.refresh", "session.tasks.list", "session.schedule.list",
+                     "session.tools.listPendingRequests":
+                    let methods = ["session.tasks.refresh", "session.tasks.list", "session.schedule.list",
+                                   "session.tools.listPendingRequests"]
+                    guard sentInputs > 0, workStep < methods.count, methods[workStep] == method,
+                          params as? [String: String] == ["sessionId": plannedID!] else {
+                        throw POSIXError(.EPROTO)
+                    }
+                    workStep += 1
+                    if scenario == "owner-work-activity" && workStep == 2 {
+                        try sendEvent(sessionID: plannedID!, type: "assistant.intent", data: ["intent": "still active"])
+                    }
+                    switch method {
+                    case "session.tasks.refresh": result = [:]
+                    case "session.tasks.list":
+                        result = scenario == "owner-missing-tasks" ? [:] : [
+                            "tasks": scenario == "owner-background-task" ? [["id": "background"]] : [],
+                        ]
+                    case "session.schedule.list":
+                        result = ["entries": scenario == "owner-scheduled" ? [["id": "wakeup"]] : []]
+                    default:
+                        result = ["items": scenario == "owner-pending-tool" ? [["requestId": "pending"]] : []]
+                    }
                 default:
                     throw POSIXError(.EPROTO)
                 }
@@ -247,6 +344,36 @@ enum ManagedCopilotStartupFixture {
                 if scenario == "duplicate" { try send(response) }
             }
         }
+    }
+
+    static func sendRoot(sessionID: String, scenario: String, input: Int = 1) throws {
+        let suffix = input == 1 ? "one" : "two"
+        for (type, data) in [
+            ("assistant.turn_start", ["turnId": "turn-\(suffix)"] as [String: Any]),
+            ("assistant.message", ["turnId": "turn-\(suffix)", "originatingMessageId": "server-input-\(suffix)",
+                                   "messageId": "assistant-\(suffix)", "content": "Done"]),
+            ("assistant.turn_end", ["turnId": "turn-\(suffix)"]),
+            ("session.idle", [:]),
+        ] {
+            if scenario == "owner-idle-without-root" && type != "session.idle" { continue }
+            if scenario == "owner-no-idle" && type == "session.idle" { continue }
+            var payload = data
+            if scenario == "owner-foreign-root" && type == "assistant.message" {
+                payload["originatingMessageId"] = "someone-else"
+            }
+            if scenario == "owner-aborted" && type == "session.idle" { payload["aborted"] = true }
+            try sendEvent(sessionID: sessionID, type: type, data: payload)
+        }
+    }
+
+    static func sendEvent(sessionID: String, type: String, data: [String: Any]) throws {
+        try send([
+            "jsonrpc": "2.0", "method": "session.event",
+            "params": ["sessionId": sessionID, "event": [
+                "id": UUID().uuidString, "timestamp": "2026-10-19T13:00:00.000Z",
+                "parentId": NSNull(), "type": type, "data": data,
+            ]],
+        ])
     }
 
     static func send(_ value: [String: Any]) throws {

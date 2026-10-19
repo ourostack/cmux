@@ -150,6 +150,127 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
         self.assertEqual(result["phase"], "configurationObserved")
         self.assertEqual(result["boundSessionID"], result["sessionID"])
 
+    def test_owner_send_joins_exact_server_ack_then_reads_all_work_inventories(self):
+        result = self.startup("owner-send")
+        self.assertTrue(result["inputAccepted"])
+        self.assertFalse(result["secondAccepted"])
+        self.assertTrue(result["ackMatchesHost"])
+        self.assertTrue(result["workEvidence"])
+        self.assertEqual(result["reason"], "")
+
+    def test_root_events_before_send_ack_are_retained_under_the_preregistered_host_input(self):
+        result = self.startup("owner-early-root")
+        self.assertTrue(result["inputAccepted"])
+        self.assertTrue(result["ackMatchesHost"])
+        self.assertTrue(result["workEvidence"])
+
+    def test_ack_and_root_idle_cannot_hide_a_nonempty_work_inventory(self):
+        result = self.startup("owner-background-task")
+        self.assertTrue(result["inputAccepted"])
+        self.assertFalse(result["workEvidence"])
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "workInventoryUnavailable")
+        self.assertEqual(result["boundSessionID"], "")
+
+    def test_send_ack_requires_a_valid_server_owned_message_id(self):
+        for scenario in ("owner-missing-ack-id", "owner-empty-ack-id", "owner-null-ack-id"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertTrue(result["inputAccepted"])
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "invalidSendAcknowledgement")
+                self.assertFalse(result["workEvidence"])
+                self.assertEqual(result["boundSessionID"], "")
+
+    def test_unregistered_or_duplicate_send_ack_never_binds_to_the_current_input(self):
+        for scenario in ("owner-foreign-ack", "owner-duplicate-ack"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "unregisteredResponse")
+                self.assertFalse(result["workEvidence"])
+
+    def test_foreign_root_and_idle_without_a_root_are_not_success(self):
+        for scenario, reason in (("owner-foreign-root", "foreignRoot"),
+                                 ("owner-idle-without-root", "rootAttributionUnavailable"),
+                                 ("owner-aborted", "rootNotSuccessful")):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], reason)
+                self.assertFalse(result["workEvidence"])
+
+    def test_send_ack_or_ended_turn_without_session_idle_is_not_work_evidence(self):
+        for scenario in ("owner-ack-only", "owner-no-idle"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertTrue(result["inputAccepted"])
+                self.assertTrue(result["ackMatchesHost"])
+                self.assertFalse(result["workEvidence"])
+                self.assertEqual(result["phase"], "awaitingRoot")
+
+    def test_each_work_inventory_must_be_explicit_and_empty(self):
+        for scenario in ("owner-scheduled", "owner-pending-tool", "owner-missing-tasks"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "workInventoryUnavailable")
+                self.assertFalse(result["workEvidence"])
+
+    def test_new_provider_activity_invalidates_inflight_work_readbacks(self):
+        result = self.startup("owner-work-activity")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "workReadbackMismatch")
+        self.assertFalse(result["workEvidence"])
+
+    def test_stale_launch_cannot_submit_input_on_the_current_pipe(self):
+        result = self.startup("owner-stale-launch")
+        self.assertFalse(result["inputAccepted"])
+        self.assertFalse(result["ackMatchesHost"])
+        self.assertEqual(result["phase"], "configurationObserved")
+
+    def test_second_input_is_not_queued_while_a_root_is_inflight(self):
+        result = self.startup("owner-ack-only")
+        self.assertTrue(result["inputAccepted"])
+        self.assertFalse(result["secondAccepted"])
+        self.assertEqual(result["phase"], "awaitingRoot")
+
+    def test_owner_input_before_configuration_or_with_blank_prompt_writes_nothing(self):
+        for scenario in ("owner-before-start", "owner-whitespace"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertFalse(result["inputAccepted"])
+                self.assertFalse(result["ackMatchesHost"])
+                self.assertFalse(result["workEvidence"])
+                self.assertEqual(result["phase"], "configurationObserved")
+
+    def test_completed_owner_turn_can_be_followed_by_a_new_exact_acknowledged_turn(self):
+        result = self.startup("owner-next-input")
+        self.assertTrue(result["nextAccepted"])
+        self.assertTrue(result["nextAckMatchesHost"])
+        self.assertTrue(result["workEvidence"])
+        self.assertEqual(result["reason"], "")
+
+    def test_reused_host_input_id_does_not_enqueue_another_provider_request(self):
+        result = self.startup("owner-reused-host")
+        self.assertFalse(result["nextAccepted"])
+        self.assertEqual(result["reason"], "inputLedgerConflict")
+        self.assertFalse(result["workEvidence"])
+
+    def test_reused_provider_message_id_cannot_bind_a_different_host_input(self):
+        result = self.startup("owner-reused-provider")
+        self.assertTrue(result["nextAccepted"])
+        self.assertFalse(result["nextAckMatchesHost"])
+        self.assertEqual(result["reason"], "inputMismatch")
+        self.assertFalse(result["workEvidence"])
+
+    def test_late_root_for_previous_input_cannot_complete_the_next_owner_input(self):
+        result = self.startup("owner-late-prior-root")
+        self.assertTrue(result["nextAccepted"])
+        self.assertTrue(result["nextAckMatchesHost"])
+        self.assertEqual(result["reason"], "foreignRoot")
+        self.assertFalse(result["workEvidence"])
+
 
 if __name__ == "__main__":
     parser = bootstrap.argparse.ArgumentParser(add_help=False)
