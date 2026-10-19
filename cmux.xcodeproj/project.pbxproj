@@ -645,6 +645,7 @@
 		5F0C70BF9BF7328093200E72 /* ClaudeHookSessionLivenessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C51DB22258B5393E2AB9104C /* ClaudeHookSessionLivenessTests.swift */; };
 		D3AD00000000000000000002 /* ClaudeHookSessionStore+CodexTurnAdmission.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3AD00000000000000000001 /* ClaudeHookSessionStore+CodexTurnAdmission.swift */; };
 		A5E0D100000000000000000E /* ClaudeHookSessionStore+Shepherd.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D100000000000000000D /* ClaudeHookSessionStore+Shepherd.swift */; };
+		A5E0D2000000000000000002 /* ClaudeHookSessionStore+ShepherdProducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D2000000000000000001 /* ClaudeHookSessionStore+ShepherdProducer.swift */; };
 		89930005AABBCCDDEEFF0001 /* ClaudeHookSessionStore+SupersededCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89930005AABBCCDDEEFF0002 /* ClaudeHookSessionStore+SupersededCleanup.swift */; };
 		89930004AABBCCDDEEFF0001 /* ClaudeHookSessionStoreFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89930004AABBCCDDEEFF0002 /* ClaudeHookSessionStoreFile.swift */; };
 		C117570000000000000000C1 /* ClaudeHookSessionStoreRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C117570000000000000000C0 /* ClaudeHookSessionStoreRecoveryTests.swift */; };
@@ -1352,6 +1353,7 @@
 		C0DE64950000000000000007 /* CMUXCLI+SessionsListForkDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE64950000000000000008 /* CMUXCLI+SessionsListForkDiagnostics.swift */; };
 		C0DE64960000000000000003 /* CMUXCLI+SessionsListForkStartupInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE64960000000000000004 /* CMUXCLI+SessionsListForkStartupInput.swift */; };
 		C0DE64960000000000000001 /* CMUXCLI+SessionsListProcessArguments.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE64960000000000000002 /* CMUXCLI+SessionsListProcessArguments.swift */; };
+		A5E0D2000000000000000008 /* CMUXCLI+ShepherdHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D2000000000000000007 /* CMUXCLI+ShepherdHooks.swift */; };
 		C12984000000000000000002 /* CMUXCLI+SIGPIPEProbes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C12984000000000000000001 /* CMUXCLI+SIGPIPEProbes.swift */; };
 		C51A73000000000000000001 /* CMUXCLI+Simulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C51A73000000000000000002 /* CMUXCLI+Simulator.swift */; };
 		C51A73000000000000000005 /* CMUXCLI+SimulatorAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = C51A73000000000000000006 /* CMUXCLI+SimulatorAgent.swift */; };
@@ -3329,7 +3331,10 @@
 		EE45396CAC0142289F52DCA0 /* ShellIntegrationSendTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831E0F65E3D945CE8970852E /* ShellIntegrationSendTransportTests.swift */; };
 		C0F16A000000000000000001 /* ShellStartupMatrixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16A000000000000000002 /* ShellStartupMatrixTests.swift */; };
 		C0F16C000000000000000001 /* ShellStartupMissingBundleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16C000000000000000002 /* ShellStartupMissingBundleTests.swift */; };
+		A5E0D2000000000000000004 /* ShepherdHookExecutableVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D2000000000000000003 /* ShepherdHookExecutableVerifier.swift */; };
 		A5E0D1000000000000000012 /* ShepherdHookProducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000011 /* ShepherdHookProducerTests.swift */; };
+		A5E0D2000000000000000006 /* ShepherdHookSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D2000000000000000005 /* ShepherdHookSettings.swift */; };
+		1E05BB048B88FDD5048A1851 /* ShepherdHookSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73F92127B73F31E031B17A90 /* ShepherdHookSettingsTests.swift */; };
 		A5E0D1000000000000000010 /* ShepherdInputReservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D100000000000000000F /* ShepherdInputReservationTests.swift */; };
 		A5E0D1000000000000000006 /* ShepherdProcessEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000005 /* ShepherdProcessEvidence.swift */; };
 		A5E0D1000000000000000008 /* ShepherdProcessEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */; };
@@ -5379,6 +5384,7 @@
 		C51DB22258B5393E2AB9104C /* ClaudeHookSessionLivenessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionLivenessTests.swift"; sourceTree = "<group>"; };
 		D3AD00000000000000000001 /* ClaudeHookSessionStore+CodexTurnAdmission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionStore+CodexTurnAdmission.swift"; sourceTree = "<group>"; };
 		A5E0D100000000000000000D /* ClaudeHookSessionStore+Shepherd.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionStore+Shepherd.swift"; sourceTree = "<group>"; };
+		A5E0D2000000000000000001 /* ClaudeHookSessionStore+ShepherdProducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionStore+ShepherdProducer.swift"; sourceTree = "<group>"; };
 		89930005AABBCCDDEEFF0002 /* ClaudeHookSessionStore+SupersededCleanup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionStore+SupersededCleanup.swift"; sourceTree = "<group>"; };
 		89930004AABBCCDDEEFF0002 /* ClaudeHookSessionStoreFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHookSessionStoreFile.swift; sourceTree = "<group>"; };
 		C117570000000000000000C0 /* ClaudeHookSessionStoreRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHookSessionStoreRecoveryTests.swift; sourceTree = "<group>"; };
@@ -6050,6 +6056,7 @@
 		C0DE64950000000000000008 /* CMUXCLI+SessionsListForkDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+SessionsListForkDiagnostics.swift"; sourceTree = "<group>"; };
 		C0DE64960000000000000004 /* CMUXCLI+SessionsListForkStartupInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+SessionsListForkStartupInput.swift"; sourceTree = "<group>"; };
 		C0DE64960000000000000002 /* CMUXCLI+SessionsListProcessArguments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+SessionsListProcessArguments.swift"; sourceTree = "<group>"; };
+		A5E0D2000000000000000007 /* CMUXCLI+ShepherdHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+ShepherdHooks.swift"; sourceTree = "<group>"; };
 		C12984000000000000000001 /* CMUXCLI+SIGPIPEProbes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+SIGPIPEProbes.swift"; sourceTree = "<group>"; };
 		C51A73000000000000000002 /* CMUXCLI+Simulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+Simulator.swift"; sourceTree = "<group>"; };
 		C51A73000000000000000006 /* CMUXCLI+SimulatorAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+SimulatorAgent.swift"; sourceTree = "<group>"; };
@@ -7895,7 +7902,10 @@
 		831E0F65E3D945CE8970852E /* ShellIntegrationSendTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellIntegrationSendTransportTests.swift; sourceTree = "<group>"; };
 		C0F16A000000000000000002 /* ShellStartupMatrixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellStartupMatrixTests.swift; sourceTree = "<group>"; };
 		C0F16C000000000000000002 /* ShellStartupMissingBundleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellStartupMissingBundleTests.swift; sourceTree = "<group>"; };
+		A5E0D2000000000000000003 /* ShepherdHookExecutableVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdHookExecutableVerifier.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000011 /* ShepherdHookProducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdHookProducerTests.swift; sourceTree = "<group>"; };
+		A5E0D2000000000000000005 /* ShepherdHookSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdHookSettings.swift; sourceTree = "<group>"; };
+		73F92127B73F31E031B17A90 /* ShepherdHookSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ShepherdHookSettingsTests.swift"; sourceTree = "<group>"; };
 		A5E0D100000000000000000F /* ShepherdInputReservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdInputReservationTests.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000005 /* ShepherdProcessEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdProcessEvidence.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdProcessEvidenceTests.swift; sourceTree = "<group>"; };
@@ -12503,6 +12513,10 @@
 				89930007AABBCCDDEEFF0002 /* CMUXCLI+AgentHookProcessBindingSource.swift */,
 				89930005AABBCCDDEEFF0002 /* ClaudeHookSessionStore+SupersededCleanup.swift */,
 				A5E0D100000000000000000D /* ClaudeHookSessionStore+Shepherd.swift */,
+				A5E0D2000000000000000001 /* ClaudeHookSessionStore+ShepherdProducer.swift */,
+				A5E0D2000000000000000003 /* ShepherdHookExecutableVerifier.swift */,
+				A5E0D2000000000000000005 /* ShepherdHookSettings.swift */,
+				A5E0D2000000000000000007 /* CMUXCLI+ShepherdHooks.swift */,
 				89930004AABBCCDDEEFF0002 /* ClaudeHookSessionStoreFile.swift */,
 				61AD48A9E6C3F1BE2B547FFE /* CMUXCLI+AgentHookCatalog.swift */,
 				E1FF1D48B584498AB7FD6B9E /* CMUXCLI+CloudFeature.swift */,
@@ -13945,6 +13959,7 @@
 				A5E0D100000000000000000B /* ShepherdRenderEvidenceTests.swift */,
 				A5E0D100000000000000000F /* ShepherdInputReservationTests.swift */,
 				A5E0D1000000000000000011 /* ShepherdHookProducerTests.swift */,
+				73F92127B73F31E031B17A90 /* ShepherdHookSettingsTests.swift */,
 			);
 			path = cmuxTests;
 			sourceTree = "<group>";
@@ -17512,6 +17527,7 @@
 				805500000000000000000004 /* BrowserValueTextFormatter.swift in Sources */,
 				D3AD00000000000000000002 /* ClaudeHookSessionStore+CodexTurnAdmission.swift in Sources */,
 				A5E0D100000000000000000E /* ClaudeHookSessionStore+Shepherd.swift in Sources */,
+				A5E0D2000000000000000002 /* ClaudeHookSessionStore+ShepherdProducer.swift in Sources */,
 				89930005AABBCCDDEEFF0001 /* ClaudeHookSessionStore+SupersededCleanup.swift in Sources */,
 				89930004AABBCCDDEEFF0001 /* ClaudeHookSessionStoreFile.swift in Sources */,
 				C11218000000000000000052 /* CLIError.swift in Sources */,
@@ -17647,6 +17663,7 @@
 					C0DE64950000000000000007 /* CMUXCLI+SessionsListForkDiagnostics.swift in Sources */,
 					C0DE64960000000000000003 /* CMUXCLI+SessionsListForkStartupInput.swift in Sources */,
 					C0DE64960000000000000001 /* CMUXCLI+SessionsListProcessArguments.swift in Sources */,
+				A5E0D2000000000000000008 /* CMUXCLI+ShepherdHooks.swift in Sources */,
 					C12984000000000000000002 /* CMUXCLI+SIGPIPEProbes.swift in Sources */,
 				C51A73000000000000000001 /* CMUXCLI+Simulator.swift in Sources */,
 				C51A73000000000000000005 /* CMUXCLI+SimulatorAgent.swift in Sources */,
@@ -17742,6 +17759,8 @@
 					C15873000000000000000004 /* RemotesArgumentParser.swift in Sources */,
 				B9000029A1B2C3D4E5F60719 /* RemoteSessionBundledResourceLoader.swift in Sources */,
 				C0DE18477000000000000001 /* RemoteTmuxInvocation.swift in Sources */,
+				A5E0D2000000000000000004 /* ShepherdHookExecutableVerifier.swift in Sources */,
+				A5E0D2000000000000000006 /* ShepherdHookSettings.swift in Sources */,
 				A10052000000000000000002 /* SocketClient+StartupWait.swift in Sources */,
 				D1275700D1275700D1275701 /* SocketClient+V2.swift in Sources */,
 				C510C1E00000000000000002 /* SocketOperationTelemetry.swift in Sources */,
@@ -18869,6 +18888,7 @@
 				C0F16A000000000000000001 /* ShellStartupMatrixTests.swift in Sources */,
 				C0F16C000000000000000001 /* ShellStartupMissingBundleTests.swift in Sources */,
 				A5E0D1000000000000000012 /* ShepherdHookProducerTests.swift in Sources */,
+				1E05BB048B88FDD5048A1851 /* ShepherdHookSettingsTests.swift in Sources */,
 				A5E0D1000000000000000010 /* ShepherdInputReservationTests.swift in Sources */,
 				A5E0D1000000000000000008 /* ShepherdProcessEvidenceTests.swift in Sources */,
 				A5E0D100000000000000000C /* ShepherdRenderEvidenceTests.swift in Sources */,

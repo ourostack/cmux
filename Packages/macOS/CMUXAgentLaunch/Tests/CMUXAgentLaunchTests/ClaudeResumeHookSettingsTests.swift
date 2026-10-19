@@ -113,6 +113,37 @@ struct ClaudeResumeHookSettingsTests {
         #expect(argv == ["claude", "--resume", "s", "--settings", userSettings])
     }
 
+    @Test("Owned receipt metadata alone is not replayed on resume")
+    func ownedReceiptMetadataAloneIsNotReplayed() throws {
+        let settings = #"{"effortLevel":"high","__cmux":{"managed":"claude-hooks","shepherdLaunch":"old-receipt","hookFingerprints":["old-command"]}}"#
+        let argv = try #require(AgentResumeArgv().builtInKind(
+            kind: "claude", sessionId: "s", executablePath: "/opt/bin/claude",
+            arguments: ["/opt/bin/claude", "--settings", settings]
+        ))
+        let index = try #require(argv.firstIndex(of: "--settings"))
+        let object = try #require(JSONSerialization.jsonObject(
+            with: Data(argv[index + 1].utf8)
+        ) as? [String: Any])
+        #expect(object["effortLevel"] as? String == "high")
+        #expect(object["__cmux"] == nil)
+    }
+
+    @Test("Unowned metadata is preserved while managed hooks are stripped")
+    func unownedMetadataIsPreserved() throws {
+        let settings = #"{"effortLevel":"high","preferredNotifChannel":"notifications_disabled","hooks":{},"__cmux":{"managed":"user-notes","note":"keep"}}"#
+        let argv = try #require(AgentResumeArgv().builtInKind(
+            kind: "claude", sessionId: "s", executablePath: "/opt/bin/claude",
+            arguments: ["/opt/bin/claude", "--settings", settings]
+        ))
+        let index = try #require(argv.firstIndex(of: "--settings"))
+        let object = try #require(JSONSerialization.jsonObject(
+            with: Data(argv[index + 1].utf8)
+        ) as? [String: Any])
+        let metadata = try #require(object["__cmux"] as? [String: String])
+        #expect(metadata == ["managed": "user-notes", "note": "keep"])
+        #expect(object["hooks"] == nil)
+    }
+
     private func assertUserSettingsJSON(_ settingsJSON: String) throws {
         let settingsData = try #require(settingsJSON.data(using: .utf8))
         let settingsObject = try #require(JSONSerialization.jsonObject(with: settingsData) as? [String: Any])

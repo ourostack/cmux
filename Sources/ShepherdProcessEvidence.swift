@@ -1,4 +1,5 @@
 import CmuxFoundation
+import CmuxControlSocket
 import Darwin
 import Foundation
 
@@ -16,6 +17,7 @@ struct ShepherdProcessEvidence: Equatable {
     let workingDirectory: String
     let tty: String
     let birth: AgentPIDProcessIdentity
+    let executablePath: String
 }
 
 struct ShepherdProcessEvidenceReader {
@@ -26,6 +28,7 @@ struct ShepherdProcessEvidenceReader {
         TerminalWorkingDirectoryResolver.rawProcessCurrentWorkingDirectory(pid: $0)
     }
     var executablePath: (pid_t) -> String? = Self.kernelExecutablePath
+    var registeredClaudeRoot: ((pid_t, String, AgentPIDProcessIdentity) -> Bool)?
 
     func read(surface: () -> ShepherdProcessSurface?) -> ShepherdProcessEvidence? {
         guard let target = surface(), target.pid > 0, target.generation > 0,
@@ -34,7 +37,7 @@ struct ShepherdProcessEvidenceReader {
               let birth = processIdentity(target.pid), birth.pid == target.pid,
               let device = processTTY(target.pid), device == target.ttyDevice,
               let executable = executablePath(target.pid),
-              let agent = Self.directAgent(executable: executable),
+              let agent = identifiedAgent(pid: target.pid, executable: executable, birth: birth),
               let rawDirectory = workingDirectory(target.pid),
               let directory = Self.canonicalDirectory(rawDirectory) else { return nil }
 
@@ -44,21 +47,25 @@ struct ShepherdProcessEvidenceReader {
               Self.canonicalDirectory(finalDirectory) == directory,
               executablePath(target.pid) == executable,
               processTTY(target.pid) == device,
+              identifiedAgent(pid: target.pid, executable: executable, birth: birth) == agent,
               processIdentity(target.pid) == birth,
               processStart(target.pid) == start,
               surface() == target else { return nil }
         return ShepherdProcessEvidence(
             surface: target, processInstance: "\(target.pid):\(start)", agent: agent,
-            workingDirectory: directory, tty: target.tty, birth: birth
+            workingDirectory: directory, tty: target.tty, birth: birth, executablePath: executable
         )
     }
 
     static func kernelExecutablePath(pid: pid_t) -> String? {
-        guard pid > 0 else { return nil }
-        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-        let count = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-        guard count > 0 else { return nil }
-        return String(cString: buffer)
+        ShepherdHookExecutableIdentity.kernelExecutablePath(pid: pid)
+    }
+
+    private func identifiedAgent(
+        pid: pid_t, executable: String, birth: AgentPIDProcessIdentity
+    ) -> String? {
+        Self.directAgent(executable: executable)
+            ?? (registeredClaudeRoot?(pid, executable, birth) == true ? "claude" : nil)
     }
 
     private static func directAgent(executable: String) -> String? {

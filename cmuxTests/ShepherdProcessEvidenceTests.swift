@@ -10,6 +10,35 @@ import Testing
 #endif
 
 @Suite struct ShepherdProcessEvidenceTests {
+    @Test func versionedNativeNamesRequireTheExactRegisteredKernelRoot() throws {
+        let fixture = ProcessFixture()
+        let path = "/opt/claude/versions/2.1.295"
+        fixture.executable = path
+        #expect(fixture.reader.read(surface: { fixture.target }) == nil)
+        var reader = fixture.reader
+        reader.registeredClaudeRoot = { pid, executable, birth in
+            pid == 42 && executable == path && birth == fixture.birth
+        }
+        let evidence = try #require(reader.read(surface: { fixture.target }))
+        #expect(evidence.agent == "claude")
+        #expect(evidence.executablePath == path)
+        reader.registeredClaudeRoot = { _, _, _ in false }
+        #expect(reader.read(surface: { fixture.target }) == nil)
+    }
+
+    @Test func aRegisteredRootRevokedDuringCaptureCannotDonateIdentity() {
+        let fixture = ProcessFixture()
+        fixture.executable = "/opt/claude/versions/2.1.295"
+        var reader = fixture.reader
+        var reads = 0
+        reader.registeredClaudeRoot = { _, _, _ in
+            reads += 1
+            return reads == 1
+        }
+        #expect(reader.read(surface: { fixture.target }) == nil)
+        #expect(reads == 2)
+    }
+
     @Test(arguments: [
         ("/opt/bin/claude", "claude"),
         ("/opt/bin/claude-code", "claude"),

@@ -51,16 +51,19 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
     private let hostInstance: UUID
     private let readinessStoreData: () throws -> Data?
     private let qualifiedAgents: Set<String>
+    private let qualifiedBinaries: [String: Set<String>]
 
     init(
         owner: TerminalController, processEvidenceReader: ShepherdProcessEvidenceReader? = nil,
         hostInstance: UUID = UUID(), readinessStoreData: (() throws -> Data?)? = nil,
-        qualifiedAgents: Set<String> = []
+        qualifiedAgents: Set<String> = ShepherdHookLaunchPolicy.qualifiedAgents,
+        qualifiedBinaries: [String: Set<String>] = ShepherdHookLaunchPolicy.qualifiedBinaries
     ) {
         self.owner = owner
         self.hostInstance = hostInstance
         self.readinessStoreData = readinessStoreData ?? { try ShepherdHookReadinessProof.loadStoreData() }
         self.qualifiedAgents = qualifiedAgents
+        self.qualifiedBinaries = qualifiedBinaries
         self.processEvidenceReader = processEvidenceReader ?? ShepherdProcessEvidenceReader(
             processStart: { [weak owner] pid in owner?.transport.processStartTime(of: pid)?.absoluteTime }
         )
@@ -75,16 +78,22 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
             return nil
         }
         let initialStore = readReadinessStore()
-        let initialProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
+        let initialProcess = processEvidence(
+            workspaceID: workspaceID, surfaceID: surfaceID, storeData: initialStore
+        )
+        let initialBinary = binaryIdentity(initialProcess)
         let initialRevision = surface.shepherdInputRevision
         let readinessRevision = surface.shepherdReadinessObservationRevision
         let initialScreen = surface.readText(region: .screen)
         let render = ShepherdRenderEvidence.capture(surface: surface, surfaceID: surfaceID, agent: initialProcess?.agent)
         let screen = surface.readText(region: .screen)
-        let finalProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
+        let finalProcess = processEvidence(
+            workspaceID: workspaceID, surfaceID: surfaceID, storeData: initialStore
+        )
+        let finalBinary = binaryIdentity(finalProcess)
         let finalStore = readReadinessStore()
         let stable = initialScreen == screen && initialProcess == finalProcess
-        let readiness: ShepherdHookReadinessProof?
+        let readiness: ShepherdHookProducerProof?
         if stable, initialRevision == surface.shepherdInputRevision,
            readinessRevision == surface.shepherdReadinessObservationRevision,
            let process = finalProcess, process.agent == "claude",
@@ -96,9 +105,19 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
                 surfaceGeneration: process.surface.generation, inputRevision: readinessRevision
             )
             do {
-                readiness = try ShepherdHookReadinessProof.readStore(data, matching: scope)
+                if let state = try ShepherdHookProducerState.readStore(
+                    data, matching: scope, qualifiedBinaries: qualifiedBinaries
+                ), state.launch.executablePath == process.executablePath,
+                   let initialBinary, let finalBinary {
+                    let before = try initialBinary.get()
+                    let after = try finalBinary.get()
+                    readiness = before == after && state.launch.executableIdentity == after
+                        ? state.proof(matching: scope, qualifiedBinaries: qualifiedBinaries) : nil
+                } else {
+                    readiness = nil
+                }
             } catch {
-                NSLog("Shepherd readiness unavailable: malformed hook session store.")
+                NSLog("Shepherd readiness unavailable: hook session or executable evidence could not be verified.")
                 readiness = nil
             }
         } else {
@@ -107,7 +126,7 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
         var outside = stable ? render.outsideComposerFingerprint : ""
         if !outside.isEmpty, let readiness {
             outside = SHA256.hash(data: Data(
-                "cmux.shepherd.readiness.v1\u{0}\(outside)\u{0}\(readiness.nonce.uuidString)".utf8
+                "cmux.shepherd.readiness.v2\u{0}\(outside)\u{0}\(readiness.nonce.uuidString)".utf8
             )).map { String(format: "%02x", $0) }.joined()
         }
         let composer: ShepherdComposerState
@@ -174,8 +193,44 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
             .finishShepherdInputReservation(requestID: requestID)
     }
 
-    private func processEvidence(workspaceID: UUID, surfaceID: UUID) -> ShepherdProcessEvidence? {
-        processEvidenceReader.read {
+    private func binaryIdentity(
+        _ process: ShepherdProcessEvidence?
+    ) -> Result<ShepherdHookExecutableIdentity, Error>? {
+        guard !qualifiedBinaries.isEmpty, let process else { return nil }
+        return Result { try ShepherdHookExecutableIdentity.capture(path: process.executablePath) }
+    }
+
+    private func processEvidence(
+        workspaceID: UUID, surfaceID: UUID, storeData: Data?
+    ) -> ShepherdProcessEvidence? {
+        let launch: ShepherdHookLaunchReceipt?
+        do {
+            if let storeData, !qualifiedBinaries.isEmpty {
+                launch = try ShepherdHookProducerState.readRegisteredLaunch(
+                    storeData, hostInstance: hostInstance, workspaceID: workspaceID, surfaceID: surfaceID,
+                    qualifiedBinaries: qualifiedBinaries
+                )
+            } else {
+                launch = nil
+            }
+        } catch {
+            NSLog("Shepherd root unavailable: launch registration could not be decoded safely.")
+            launch = nil
+        }
+        var reader = processEvidenceReader
+        reader.registeredClaudeRoot = { pid, path, birth in
+            guard let launch, launch.pid == pid, launch.executablePath == path,
+                  launch.pidStartSeconds == birth.startSeconds,
+                  launch.pidStartMicroseconds == birth.startMicroseconds,
+                  let identity = launch.executableIdentity else { return false }
+            do {
+                return try ShepherdHookExecutableIdentity.capture(path: path) == identity
+            } catch {
+                NSLog("Shepherd root unavailable: registered executable identity could not be verified.")
+                return false
+            }
+        }
+        return reader.read {
             guard let surface = surface(workspaceID: workspaceID, surfaceID: surfaceID),
                   let foregroundPID = surface.foregroundProcessID(),
                   let pid = Int32(exactly: foregroundPID),

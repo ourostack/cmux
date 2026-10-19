@@ -287,6 +287,7 @@ struct ClaudeHookSessionRecord: Codable {
     var hadPendingBackgroundWorkAtStop: Bool?
     var shepherdReadiness: ShepherdHookReadinessProof? = nil
     var shepherdWorkRevision: UUID? = nil
+    var shepherdProducer: ShepherdHookProducerState? = nil
     /// Unsandboxed Cursor shell calls that cmux asked Cursor to gate. The
     /// after/failure hooks do not carry a native approval decision, so the
     /// command identity is the only safe completion correlation available.
@@ -1871,7 +1872,7 @@ final class ClaudeHookSessionStore {
         }
     }
 
-    private func makeSessionRecord(
+    func makeSessionRecord(
         state: ClaudeHookSessionStoreFile,
         sessionId: String,
         workspaceId: String,
@@ -2075,6 +2076,7 @@ final class ClaudeHookSessionStore {
                 startIdentity: processStartIdentity(pid: pid)
             )
         }
+        record.retireShepherdProducerIfOwnershipChanged()
         if let launchCommand {
             let existingHasArguments = !(record.launchCommand?.arguments.isEmpty ?? true)
             let incomingHasArguments = !launchCommand.arguments.isEmpty
@@ -6778,7 +6780,9 @@ struct CMUXCLI {
         if (command == "codex-hook" || command == "feed-hook"), processEnv["CMUX_SURFACE_ID"]?.isEmpty != false, processEnv["CMUX_WORKSPACE_ID"]?.isEmpty != false,
            !commandArgs.contains(where: { $0 == "--workspace" || $0 == "--surface" || $0.hasPrefix("--workspace=") || $0.hasPrefix("--surface=") }) { print("{}"); return } // Backwards compatibility for old installed hooks outside cmux terminals.
         if command == "hooks" {
-            if try runHooksNoSocketCommand(commandArgs: commandArgs) {
+            if try runHooksNoSocketCommand(
+                commandArgs: commandArgs, socketPath: resolvedSocketPath, socketPassword: socketPasswordArg
+            ) {
                 return
             }
             if commandArgs == ["claude", "spool-forwarder"] {
@@ -31644,26 +31648,6 @@ struct CMUXCLI {
                         kind: stopFailure == nil ? .turnCompleted : .errorReported, rawObject: parsedInput.rawObject, payload: payload,
                         pendingWork: hasUnsettledWork), client: client)
                 }
-                if liveProcessIdentityAllowed, !isNestedAgentSession, stopFailure == nil,
-                   let sessionID = parsedInput.sessionId,
-                   let workspaceUUID = UUID(uuidString: workspaceId),
-                   let surfaceUUID = UUID(uuidString: surfaceId) {
-                    do {
-                        let accepted = try sessionStore.recordShepherdReadiness(
-                            sessionID: sessionID, workspaceID: workspaceUUID, surfaceID: surfaceUUID,
-                            stopInput: parsedInput.rawObject ?? parsedInput.object ?? [:],
-                            inspection: {
-                                try client.sendV2(method: "surface.shepherd.inspect", params: [
-                                    "workspace_id": workspaceId, "surface_id": surfaceId
-                                ], responseTimeout: 1)
-                            },
-                            processIdentity: { AgentPIDProcessIdentity(pid: $0) }
-                        )
-                        telemetry.breadcrumb("claude-hook.shepherd-readiness", data: ["accepted": accepted])
-                    } catch {
-                        telemetry.breadcrumb("claude-hook.shepherd-readiness.unavailable")
-                    }
-                }
                 printClaudeHookAck()
             } catch {
                 if shouldIgnoreClaudeHookTeardownError(error) {
@@ -35313,11 +35297,12 @@ struct CMUXCLI {
         return Int64(info.kp_eproc.e_tdev)
     }
 
-    private func parentPID(of pid: pid_t) -> pid_t {
+    func parentPID(of pid: pid_t) -> pid_t {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.size
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else {
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0,
+              size == MemoryLayout<kinfo_proc>.size, info.kp_proc.p_pid == pid else {
             return -1
         }
         return info.kp_eproc.e_ppid
@@ -45366,7 +45351,9 @@ export default {
 
     // MARK: - Hooks namespace
 
-    private func runHooksNoSocketCommand(commandArgs: [String]) throws -> Bool {
+    private func runHooksNoSocketCommand(
+        commandArgs: [String], socketPath: String, socketPassword: String?
+    ) throws -> Bool {
         guard let first = commandArgs.first?.lowercased() else {
             print(subcommandUsage("hooks") ?? "Usage: cmux hooks <setup|uninstall|agent>")
             return true
@@ -45395,6 +45382,12 @@ export default {
             return false
 
         case "claude":
+            if try runShepherdHookNoSocketCommand(
+                commandArgs: Array(commandArgs.dropFirst()), socketPath: socketPath,
+                socketPassword: socketPassword
+            ) {
+                return true
+            }
             let action = commandArgs.dropFirst().first?.lowercased()
             guard action == "inject-settings" else {
                 return false

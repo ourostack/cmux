@@ -409,10 +409,17 @@ public enum AgentLaunchSanitizer {
     }
 
     private static func isClaudeHookSettingsObject(_ object: [String: Any]) -> Bool {
+        if hasManagedClaudeHookMarker(object) {
+            return true
+        }
         if object["preferredNotifChannel"] as? String == "notifications_disabled" {
             return true
         }
         return containsLegacyClaudeHookSettingsValue(object["hooks"])
+    }
+
+    private static func hasManagedClaudeHookMarker(_ object: [String: Any]) -> Bool {
+        (object["__cmux"] as? [String: Any])?["managed"] as? String == "claude-hooks"
     }
 
     private static func containsLegacyClaudeHookSettingsValue(_ value: Any?) -> Bool {
@@ -432,6 +439,9 @@ public enum AgentLaunchSanitizer {
         var object = object
         for key in claudeCmuxSettingsKeys {
             object.removeValue(forKey: key)
+        }
+        if hasManagedClaudeHookMarker(object) {
+            object.removeValue(forKey: "__cmux")
         }
         guard !object.isEmpty,
               JSONSerialization.isValidJSONObject(object),

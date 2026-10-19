@@ -24,11 +24,15 @@ extension TerminalController {
             methods.append(method)
         }
         capabilities["methods"] = methods.sorted()
-        capabilities["shepherd_guarded_input"] = [
+        var guardedInput: [String: Any] = [
             "protocol_version": 1,
-            "state": "unqualified",
-            "agents": [String]()
+            "state": ShepherdHookLaunchPolicy.qualifiedAgents.isEmpty ? "unqualified" : "qualified",
+            "agents": ShepherdHookLaunchPolicy.qualifiedAgents.sorted()
         ]
+        if let reason = ShepherdHookLaunchPolicy.qualificationBlocker {
+            guardedInput["qualification_reason"] = reason
+        }
+        capabilities["shepherd_guarded_input"] = guardedInput
         return capabilities
     }
 

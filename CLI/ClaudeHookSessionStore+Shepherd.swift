@@ -3,6 +3,17 @@ import CmuxFoundation
 import Foundation
 
 extension ClaudeHookSessionRecord {
+    mutating func retireShepherdProducerIfOwnershipChanged() {
+        guard let launch = shepherdProducer?.launch else { return }
+        guard UUID(uuidString: workspaceId) == launch.workspaceID,
+              UUID(uuidString: surfaceId) == launch.surfaceID,
+              pid == Int(launch.pid), pidStartSeconds == launch.pidStartSeconds,
+              pidStartMicroseconds == launch.pidStartMicroseconds else {
+            shepherdProducer = nil
+            return
+        }
+    }
+
     mutating func invalidateShepherdReadiness() {
         shepherdReadiness = nil
         shepherdWorkRevision = UUID()

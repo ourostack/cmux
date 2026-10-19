@@ -1,6 +1,7 @@
 import CmuxControlSocket
 import CmuxFoundation
 import CmuxTerminal
+import CryptoKit
 import Foundation
 import Testing
 
@@ -374,7 +375,7 @@ struct TerminalControllerShepherdHostTests {
         let fixture = try ReadinessFixture()
         let host = TerminalControllerShepherdHost(
             owner: fixture.owner, processEvidenceReader: fixture.process.reader, hostInstance: fixture.boot,
-            readinessStoreData: { fixture.data }
+            readinessStoreData: { fixture.data }, qualifiedBinaries: fixture.qualified
         )
         let controller = ShepherdAdmissionController(
             host: host, now: { ProcessInfo.processInfo.systemUptime }, wait: { _ in }
@@ -414,6 +415,31 @@ struct TerminalControllerShepherdHostTests {
         #expect(fixture.panel.surface.pastes == ["Continue."])
         #expect(fixture.panel.surface.submits.count == 1)
     }
+
+    @Test func aLegacyProofCannotBorrowTheNewProducerLaunchAuthority() throws {
+        let fixture = try ReadinessFixture()
+        let bytes = try #require(fixture.data)
+        var store = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        var sessions = try #require(store["sessions"] as? [String: Any])
+        var record = try #require(sessions["root"] as? [String: Any])
+        let rawProducer = try #require(record["shepherdProducer"])
+        let producer = try JSONDecoder().decode(ShepherdHookProducerState.self,
+            from: JSONSerialization.data(withJSONObject: rawProducer))
+        let scope = try #require(producer.proof?.scope)
+        let legacy = try #require(ShepherdHookReadinessProof(
+            stopInput: ["background_tasks": [], "session_crons": []], sessionID: "root", scope: scope
+        ))
+        record.removeValue(forKey: "shepherdProducer")
+        record["shepherdReadiness"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy))
+        sessions["root"] = record
+        store["sessions"] = sessions
+        fixture.data = try JSONSerialization.data(withJSONObject: store)
+        let snapshot = try #require(fixture.host.snapshot(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        ))
+        #expect(snapshot.idle == nil)
+        #expect(snapshot.backgroundWork == nil)
+    }
 }
 
 @MainActor private final class ReadinessFixture {
@@ -422,14 +448,25 @@ struct TerminalControllerShepherdHostTests {
     let panel: TerminalPanel
     let process = ProcessFixture()
     let boot = UUID()
+    let executableDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let executableDigest: String
     var data: Data?
+    var qualified: [String: Set<String>] { ["2.1.295": [executableDigest]] }
     lazy var host = TerminalControllerShepherdHost(
         owner: owner, processEvidenceReader: process.reader, hostInstance: boot,
-        readinessStoreData: { [unowned self] in self.data }, qualifiedAgents: ["claude"]
+        readinessStoreData: { [unowned self] in self.data }, qualifiedAgents: ["claude"],
+        qualifiedBinaries: qualified
     )
 
     init() throws {
+        try FileManager.default.createDirectory(at: executableDirectory, withIntermediateDirectories: false)
+        let executable = executableDirectory.appendingPathComponent("claude")
+        try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: executable.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        executableDigest = SHA256.hash(data: try Data(contentsOf: executable))
+            .map { String(format: "%02x", $0) }.joined()
         panel = TerminalPanel(workspaceID: workspace.id)
+        process.executable = executable.resolvingSymlinksInPath().path
         workspace.panels[panel.id] = panel
         panel.surface.foregroundPID = 42
         panel.surface.shepherdInputRevision = 9
@@ -438,15 +475,36 @@ struct TerminalControllerShepherdHostTests {
         data = try store()
     }
 
+    deinit { try? FileManager.default.removeItem(at: executableDirectory) }
+
     func store(boot: UUID? = nil) throws -> Data {
+        let executable = try #require(process.executable)
         let scope = ShepherdHookReadinessScope(
             hostInstance: boot ?? self.boot, workspaceID: workspace.id, surfaceID: panel.id,
             processInstance: "42:123456", pid: 42, pidStartSeconds: process.birth.startSeconds,
             pidStartMicroseconds: process.birth.startMicroseconds, surfaceGeneration: 1, inputRevision: 9
         )
-        let proof = try #require(ShepherdHookReadinessProof(
-            stopInput: ["background_tasks": [], "session_crons": []], sessionID: "root", scope: scope
+        let launch = ShepherdHookLaunchReceipt(
+            id: UUID(), hostInstance: scope.hostInstance, workspaceID: workspace.id, surfaceID: panel.id,
+            pid: 42, pidStartSeconds: process.birth.startSeconds,
+            pidStartMicroseconds: process.birth.startMicroseconds, executablePath: executable,
+            executableSHA256: executableDigest, settingsSHA256: String(repeating: "b", count: 64),
+            agentVersion: "2.1.295",
+            executableIdentity: try ShepherdHookExecutableIdentity.capture(path: executable)
+        )
+        var producer = try #require(ShepherdHookProducerState(
+            sessionID: "root", launch: launch, qualifiedBinaries: qualified
         ))
+        let prompt = UUID()
+        let revision = producer.invalidate(promptID: prompt)
+        let observed = producer.capturePromptScope(scope, promptID: prompt, expectedWorkRevision: revision)
+        #expect(observed)
+        let sealed = producer.seal(
+            stopInput: ["session_id": "root", "hook_event_name": "Stop", "prompt_id": prompt.uuidString,
+                        "background_tasks": [], "session_crons": []],
+            scope: scope, expectedWorkRevision: revision
+        )
+        #expect(sealed)
         return try JSONSerialization.data(withJSONObject: [
             "version": 1,
             "sessions": ["root": [
@@ -455,7 +513,7 @@ struct TerminalControllerShepherdHostTests {
                 "pidStartSeconds": process.birth.startSeconds,
                 "pidStartMicroseconds": process.birth.startMicroseconds,
                 "hookEventName": "Stop", "turnSettled": true, "activePromptDepth": 0,
-                "shepherdReadiness": try JSONSerialization.jsonObject(with: JSONEncoder().encode(proof))
+                "shepherdProducer": try JSONSerialization.jsonObject(with: JSONEncoder().encode(producer))
             ]],
             "activeSessionsBySurface": [panel.id.uuidString: ["sessionId": "root"]]
         ])

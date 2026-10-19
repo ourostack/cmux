@@ -18,9 +18,11 @@ shutil.copy2(
 )
 shutil.copy2(ROOT / "tests/shepherd_app_source/AppProbes.swift", PACKAGE / "Sources/cmux")
 shutil.copy2(ROOT / "tests/shepherd_app_source/HookStoreProbes.swift", PACKAGE / "Sources/cmux")
-producer = ROOT / "CLI/ClaudeHookSessionStore+Shepherd.swift"
-if producer.exists():
-    shutil.copy2(producer, PACKAGE / "Sources/cmux")
+for name in ("ClaudeHookSessionStore+Shepherd.swift", "ClaudeHookSessionStore+ShepherdProducer.swift",
+             "ShepherdHookExecutableVerifier.swift"):
+    producer = ROOT / "CLI" / name
+    if producer.exists():
+        shutil.copy2(producer, PACKAGE / "Sources/cmux")
 adapter = ROOT / "Sources/TerminalController+Shepherd.swift"
 if adapter.exists():
     shutil.copy2(adapter, PACKAGE / "Sources/cmux")
