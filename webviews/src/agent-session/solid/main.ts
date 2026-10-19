@@ -80,6 +80,7 @@ function pickAutoStartState(state: SessionState): SessionState {
     runningSessionId: state.runningSessionId,
     status: state.status,
     input: "",
+    inputVersion: state.inputVersion,
     log: [],
     transcript: [],
     autoStartAttemptedProviderIds: state.autoStartAttemptedProviderIds,

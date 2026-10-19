@@ -30,6 +30,7 @@ import {
   type FooterCollapseState,
 } from "../shared/footerCollapse";
 import { renderMarkdownFragment, renderPlainTextHTML } from "../shared/markdown";
+import { makeClientId } from "../shared/ids";
 import { promptTextWithAttachments } from "../shared/promptAttachments";
 import { promptTextWithAutoContext } from "../shared/promptMentions";
 import { promptTextWithPlanMode } from "../shared/promptModes";
@@ -329,6 +330,13 @@ function SessionSurface({
   const editorRef = useRef<PromptEditorHandle | null>(null);
   const commandSubmissionGateRef = useRef(new ComposerCommandSubmissionGate());
   const inputRevisionRef = useRef(0);
+  const inputVersionRef = useRef(state.inputVersion);
+  const setComposerInput = (input: string) => {
+    const inputVersion = makeClientId();
+    inputRevisionRef.current += 1;
+    inputVersionRef.current = inputVersion;
+    dispatch({ type: "setInput", input, inputVersion });
+  };
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
   const [menuKind, setMenuKind] = useState<ComposerMenuKind>(null);
@@ -359,7 +367,7 @@ function SessionSurface({
         const shouldClear = gate.complete(submittedRevision, inputRevisionRef.current);
         const currentEditorInput = editorRef.current?.getText() ?? latestStateRef.current.input;
         if (shouldClear && currentEditorInput === submittedInput) {
-          dispatch({ type: "setInput", input: "" });
+          setComposerInput("");
         }
       })
       .catch((error) => {
@@ -382,8 +390,7 @@ function SessionSurface({
       return;
     }
     if (currentInput !== state.input) {
-      inputRevisionRef.current += 1;
-      dispatch({ type: "setInput", input: currentInput });
+      setComposerInput(currentInput);
     }
     if (submitRoutedCommand(currentInput)) {
       return;
@@ -403,6 +410,7 @@ function SessionSurface({
     void sendInput(state, dispatch, {
       attachments,
       clearInput: currentInput,
+      clearInputVersion: inputVersionRef.current,
       displayText: currentInput,
       permissionMode: canConfigurePermissions ? permissionMode : "default",
       text,
@@ -655,10 +663,7 @@ function SessionSurface({
     onAutocompleteChange: updateComposerAutocomplete,
     onAutocompleteKeyDown: handleComposerAutocompleteKey,
     onPlanModeShortcut: togglePlanMode,
-    onTextChange: (input: string) => {
-      inputRevisionRef.current += 1;
-      dispatch({ type: "setInput", input });
-    },
+    onTextChange: setComposerInput,
     onSubmit: submit,
     onTriggerToken: (token: "@" | "$") => {
       setMenuKind(token === "@" ? "mention" : "skill");

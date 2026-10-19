@@ -449,6 +449,7 @@ test("sent action appends a user transcript turn", () => {
     sentAtMs: 1_850_000_000_000,
     text: "hello codex",
     submittedInput: "hello codex",
+    submittedInputVersion: running.inputVersion,
   });
 
   expect(state.input).toBe("");
@@ -480,6 +481,7 @@ test("sent action keeps displayed attachments separate from provider prompt text
     sessionId: "session-1",
     text: "[moon.jpeg](/tmp/moon.jpeg)\n\ndescribe this",
     submittedInput: "describe this",
+    submittedInputVersion: running.inputVersion,
   });
 
   expect(state.input).toBe("");
@@ -726,11 +728,89 @@ test("sent input only clears the submitted value", () => {
     sessionId: "session-1",
     text: "old draft",
     submittedInput: "old draft",
+    submittedInputVersion: loaded.inputVersion,
   });
 
   expect(state.input).toBe("new draft");
   expect(state.log.at(-1)?.text).toBe("Sent 9 chars");
 });
+
+test.each(["react", "solid"] as const)(
+  "send acknowledgement preserves retyped identical input in %s",
+  async (renderer) => {
+    let state = reduceSession(initialState(renderer), { type: "context", context: { ...context, renderer } });
+    state = { ...state, status: "running", runningSessionId: "session-1" };
+    state = reduceSession(state, { type: "setInput", input: "same draft" });
+    let release: () => void = () => { throw new Error("native reply was not initialized"); };
+    const reply = new Promise<{ ok: true; value: { sent: true } }>((resolve) => {
+      release = () => resolve({ ok: true, value: { sent: true } });
+    });
+    const globalWithWindow = globalThis as unknown as { window?: unknown };
+    const originalWindow = globalWithWindow.window;
+    globalWithWindow.window = {
+      webkit: { messageHandlers: { agentSession: { postMessage: () => reply } } },
+    };
+    try {
+      const sending = sendInput(state, (action) => {
+        state = reduceSession(state, action);
+      });
+      state = reduceSession(state, { type: "setInput", input: "" });
+      state = reduceSession(state, { type: "setInput", input: "same draft" });
+      release();
+      expect(await sending).toBe(true);
+      expect(state.input).toBe("same draft");
+    } finally {
+      if (originalWindow === undefined) {
+        delete globalWithWindow.window;
+      } else {
+        globalWithWindow.window = originalWindow;
+      }
+    }
+  },
+);
+
+test.each([false, true])(
+  "queued React editor resync clears only its own edit (newer edits: %s)",
+  async (newerEdits) => {
+    const rendered = {
+      ...reduceSession(initialState("react"), { type: "context", context }),
+      status: "running" as const,
+      runningSessionId: "session-1",
+    };
+    const inputVersion = makeClientId();
+    const actions: Action[] = [{
+      type: "setInput", input: "editor is ahead", inputVersion,
+    }];
+    let release: () => void = () => { throw new Error("native reply was not initialized"); };
+    const reply = new Promise<{ ok: true; value: { sent: true } }>((resolve) => {
+      release = () => resolve({ ok: true, value: { sent: true } });
+    });
+    const globalWithWindow = globalThis as unknown as { window?: unknown };
+    const originalWindow = globalWithWindow.window;
+    globalWithWindow.window = {
+      webkit: { messageHandlers: { agentSession: { postMessage: () => reply } } },
+    };
+    try {
+      const sending = sendInput(rendered, (action) => actions.push(action), {
+        text: "editor is ahead", clearInput: "editor is ahead", clearInputVersion: inputVersion,
+      });
+      if (newerEdits) {
+        actions.push({ type: "setInput", input: "", inputVersion: makeClientId() });
+        actions.push({ type: "setInput", input: "editor is ahead", inputVersion: makeClientId() });
+      }
+      release();
+      expect(await sending).toBe(true);
+      const state = actions.reduce<ReturnType<typeof initialState>>(reduceSession, rendered);
+      expect(state.input).toBe(newerEdits ? "editor is ahead" : "");
+    } finally {
+      if (originalWindow === undefined) {
+        delete globalWithWindow.window;
+      } else {
+        globalWithWindow.window = originalWindow;
+      }
+    }
+  },
+);
 
 test("late sent replies do not overwrite a requested stop", () => {
   const stopping = {
@@ -745,6 +825,7 @@ test("late sent replies do not overwrite a requested stop", () => {
     sessionId: "session-1",
     text: "draft",
     submittedInput: "draft",
+    submittedInputVersion: stopping.inputVersion,
   });
 
   expect(state).toBe(stopping);

@@ -39,6 +39,8 @@ export type SessionState = {
   runningSessionId?: string;
   status: "loading" | "idle" | "starting" | "running" | "stopping" | "failed";
   input: string;
+  /** Last editor edit identity, not a provider acknowledgement. */
+  inputVersion: string;
   log: LogEntry[];
   transcript: TranscriptEntry[];
   autoStartAttemptedProviderIds: ProviderId[];
@@ -50,7 +52,7 @@ export type Action =
   | { type: "context"; context: AppContext }
   | { type: "providers"; providers: ProviderInfo[] }
   | { type: "selectProvider"; providerId: ProviderId }
-  | { type: "setInput"; input: string }
+  | { type: "setInput"; input: string; inputVersion?: string }
   | { type: "autoStartAttempted"; providerId: ProviderId }
   | { type: "starting" }
   | { type: "startAccepted"; sessionId: string }
@@ -68,6 +70,7 @@ export type Action =
       sessionId: string;
       text: string;
       submittedInput: string;
+      submittedInputVersion: string;
     };
 
 const maxAssistantTranscriptChars = 256 * 1024;
@@ -82,6 +85,7 @@ export function initialState(_renderer: AppContext["renderer"]): SessionState {
     selectedProviderId: "codex",
     status: "loading",
     input: "",
+    inputVersion: makeClientId(),
     providers: [],
     log: [],
     transcript: [],
@@ -110,7 +114,7 @@ export function reduceSession(state: SessionState, action: Action): SessionState
         selectedProviderId: action.providerId,
       };
     case "setInput":
-      return { ...state, input: action.input };
+      return { ...state, input: action.input, inputVersion: action.inputVersion ?? makeClientId() };
     case "autoStartAttempted":
       if (state.autoStartAttemptedProviderIds.includes(action.providerId)) {
         return state;
@@ -167,16 +171,18 @@ export function reduceSession(state: SessionState, action: Action): SessionState
         log: appendLog(state, "error", action.message),
         transcript: appendNoticeTranscript(state, action.message, "error"),
       };
-    case "sent":
+    case "sent": {
       if (state.runningSessionId !== action.sessionId || state.requestedStopSessionId === action.sessionId) {
         return state;
       }
+      const clearsInput = state.input === action.submittedInput && state.inputVersion === action.submittedInputVersion;
       return {
         ...state,
-        input: state.input === action.submittedInput ? "" : state.input,
+        input: clearsInput ? "" : state.input,
         log: appendLog(state, "info", formatCopy(state, "sentCharsFormat", "Sent %d chars", action.text.length)),
         transcript: appendUserTranscript(state, action.displayText ?? action.text, action.attachments, action.sentAtMs),
       };
+    }
     case "event":
       return applyEvent(state, action.event);
     default:
@@ -270,6 +276,7 @@ export async function sendInput(
   options: {
     attachments?: AgentSessionAttachment[];
     clearInput?: string;
+    clearInputVersion?: string;
     displayText?: string;
     permissionMode?: ComposerPermissionMode;
     text?: string;
@@ -277,6 +284,7 @@ export async function sendInput(
 ): Promise<boolean> {
   const submittedInput = options.text ?? state.input;
   const clearInput = options.clearInput ?? submittedInput;
+  const submittedInputVersion = options.clearInputVersion ?? state.inputVersion;
   if (submittedInput.length === 0 || !state.runningSessionId || state.status !== "running") {
     return false;
   }
@@ -295,6 +303,7 @@ export async function sendInput(
       sessionId,
       text: submittedInput,
       submittedInput: clearInput,
+      submittedInputVersion,
     });
     return true;
   } catch (error) {
