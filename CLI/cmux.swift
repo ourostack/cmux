@@ -285,6 +285,8 @@ struct ClaudeHookSessionRecord: Codable {
     var autoNameRecentMessages: [AutoNamingTranscriptMessage]?
     var autoNameMessageSequence: Int?
     var hadPendingBackgroundWorkAtStop: Bool?
+    var shepherdReadiness: ShepherdHookReadinessProof? = nil
+    var shepherdWorkRevision: UUID? = nil
     /// Unsandboxed Cursor shell calls that cmux asked Cursor to gate. The
     /// after/failure hooks do not carry a native approval decision, so the
     /// command identity is the only safe completion correlation available.
@@ -2053,6 +2055,7 @@ final class ClaudeHookSessionStore {
         title: String? = nil,
         now: TimeInterval
     ) {
+        record.invalidateShepherdReadiness()
         record.workspaceId = workspaceId
         if !surfaceId.isEmpty {
             record.surfaceId = surfaceId
@@ -31168,6 +31171,12 @@ struct CMUXCLI {
         let hookCwd = relayOrigin ? nil : parsedInput.cwd
         let hookTranscriptPath = relayOrigin ? nil : parsedInput.transcriptPath
         let sessionStore = ClaudeHookSessionStore()
+        // Every work-bearing hook, including self-started prompts, retires the
+        // old registry proof before routing, telemetry, or other socket I/O.
+        if subcommand != "notification", subcommand != "notify",
+           let sessionID = parsedInput.sessionId {
+            try sessionStore.invalidateShepherdReadiness(sessionId: sessionID)
+        }
         func localClaudePID(mapped: ClaudeHookSessionRecord?) -> Int? {
             guard !relayOrigin else { return nil }
             return mapped?.pid ?? observedHookAgentPID
@@ -31634,6 +31643,26 @@ struct CMUXCLI {
                         sessionId: parsedInput.sessionId, workspaceId: workspaceId, surfaceId: surfaceId,
                         kind: stopFailure == nil ? .turnCompleted : .errorReported, rawObject: parsedInput.rawObject, payload: payload,
                         pendingWork: hasUnsettledWork), client: client)
+                }
+                if liveProcessIdentityAllowed, !isNestedAgentSession, stopFailure == nil,
+                   let sessionID = parsedInput.sessionId,
+                   let workspaceUUID = UUID(uuidString: workspaceId),
+                   let surfaceUUID = UUID(uuidString: surfaceId) {
+                    do {
+                        let accepted = try sessionStore.recordShepherdReadiness(
+                            sessionID: sessionID, workspaceID: workspaceUUID, surfaceID: surfaceUUID,
+                            stopInput: parsedInput.rawObject ?? parsedInput.object ?? [:],
+                            inspection: {
+                                try client.sendV2(method: "surface.shepherd.inspect", params: [
+                                    "workspace_id": workspaceId, "surface_id": surfaceId
+                                ], responseTimeout: 1)
+                            },
+                            processIdentity: { AgentPIDProcessIdentity(pid: $0) }
+                        )
+                        telemetry.breadcrumb("claude-hook.shepherd-readiness", data: ["accepted": accepted])
+                    } catch {
+                        telemetry.breadcrumb("claude-hook.shepherd-readiness.unavailable")
+                    }
                 }
                 printClaudeHookAck()
             } catch {

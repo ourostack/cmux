@@ -6,8 +6,25 @@ import CMUXMobileCore
     public var runtimeSurfaceGeneration: UInt64 = 1
     public var shepherdInputRevision: UInt64 = 0
     public var shepherdFocusRevision: UInt64 = 0
-    public var isShepherdFocused = false
-    public var acceptsShepherdImmediateInput = true
+    var desiredFocusState = false
+    public var shepherdLastFocusedAt: TimeInterval?
+    var shepherdInputReservation: (
+        id: UUID, deadline: TimeInterval, generation: UInt64,
+        baseRevision: UInt64, expectedRevision: UInt64
+    )?
+    var shepherdInputExclusionDepth = 0
+    var ioMode = IOMode()
+    var sharingViewDetached = false
+    var pendingSocketInputQueue: [Int] = []
+    var pendingSocketInputBytes = 0
+    var startupInputGate = StartupGate()
+    var terminalLifecycleId: UInt64 = 1
+    var runtimeSurfaceSuspendedForAgentHibernation = false
+    var surfaceView = SurfaceView()
+    var tabId: UUID { owningTabId }
+    var id = UUID()
+    var hibernationRecorder = HibernationRecorder()
+    public var onWrite: (() -> Void)?
     public var screen: String? = "abc"
     public var pastes: [String] = []
     public var submits: [UUID] = []
@@ -30,14 +47,21 @@ import CMUXMobileCore
         return (renderFrame, [])
     }
     public enum Region { case screen }
-    public func sendShepherdPaste(_ text: String, requestID: UUID, expiresAt: TimeInterval) -> UInt64? {
-        pastes.append(text)
-        shepherdInputRevision += 1
-        return shepherdInputRevision
+    func liveSurfaceForGhosttyAccess(reason: String) -> Int? { 1 }
+    func writeTextData(_ data: Data, to live: Int) {
+        pastes.append(String(decoding: data, as: UTF8.self))
+        onWrite?()
     }
-    public func sendShepherdSubmit(requestID: UUID) -> Bool {
-        submits.append(requestID)
+    func sendKeyEvent(surface: Int, keycode: UInt32) -> Bool {
+        submits.append(UUID())
+        onWrite?()
         return true
     }
-    public func finishShepherdInputReservation(requestID: UUID) { releases.append(requestID) }
+    func didAcceptExplicitInput() {}
+    struct IOMode { var usesManualIO = false }
+    struct StartupGate { func hasPendingInput(generation: UInt64) -> Bool { false } }
+    struct SurfaceView { var acceptsGuardedImmediateInput = true }
+    struct HibernationRecorder {
+        func recordTerminalInput(workspaceId: UUID, panelId: UUID) {}
+    }
 }

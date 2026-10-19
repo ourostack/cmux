@@ -7,6 +7,16 @@ extension TerminalSurface {
     @MainActor
     public var isShepherdFocused: Bool { desiredFocusState }
 
+    /// Reads do not consume the owned-paste exception; only the reserved write can.
+    @MainActor
+    public var shepherdReadinessObservationRevision: UInt64 {
+        guard let reservation = shepherdInputReservation,
+              ProcessInfo.processInfo.systemUptime < reservation.deadline,
+              runtimeSurfaceGeneration == reservation.generation,
+              shepherdInputRevision == reservation.expectedRevision else { return shepherdInputRevision }
+        return reservation.baseRevision
+    }
+
     /// Excludes guarded admission across a synchronous physical input dispatch.
     ///
     /// Balance with ``endShepherdInputExclusion()`` using `defer`.
@@ -45,7 +55,8 @@ extension TerminalSurface {
     public var hasShepherdInputReservation: Bool {
         guard let reservation = shepherdInputReservation else { return false }
         guard ProcessInfo.processInfo.systemUptime < reservation.deadline,
-              runtimeSurfaceGeneration == reservation.generation else {
+              runtimeSurfaceGeneration == reservation.generation,
+              shepherdInputRevision == reservation.expectedRevision else {
             shepherdInputReservation = nil
             return false
         }
@@ -84,8 +95,11 @@ extension TerminalSurface {
               let live = liveSurfaceForGhosttyAccess(reason: "shepherd.paste") else { return nil }
         beginShepherdInputExclusion()
         defer { endShepherdInputExclusion() }
-        shepherdInputReservation = (requestID, expiresAt, runtimeSurfaceGeneration)
+        let baseRevision = shepherdInputRevision
         shepherdInputRevision &+= 1
+        shepherdInputReservation = (
+            requestID, expiresAt, runtimeSurfaceGeneration, baseRevision, shepherdInputRevision
+        )
         let admittedRevision = shepherdInputRevision
         writeTextData(data, to: live)
         didAcceptExplicitInput()

@@ -644,6 +644,7 @@
 		79390011AA11BB22CC33DD11 /* ClaudeHookPIDAuthenticationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79390012AA11BB22CC33DD12 /* ClaudeHookPIDAuthenticationTests.swift */; };
 		5F0C70BF9BF7328093200E72 /* ClaudeHookSessionLivenessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C51DB22258B5393E2AB9104C /* ClaudeHookSessionLivenessTests.swift */; };
 		D3AD00000000000000000002 /* ClaudeHookSessionStore+CodexTurnAdmission.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3AD00000000000000000001 /* ClaudeHookSessionStore+CodexTurnAdmission.swift */; };
+		A5E0D100000000000000000E /* ClaudeHookSessionStore+Shepherd.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D100000000000000000D /* ClaudeHookSessionStore+Shepherd.swift */; };
 		89930005AABBCCDDEEFF0001 /* ClaudeHookSessionStore+SupersededCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89930005AABBCCDDEEFF0002 /* ClaudeHookSessionStore+SupersededCleanup.swift */; };
 		89930004AABBCCDDEEFF0001 /* ClaudeHookSessionStoreFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89930004AABBCCDDEEFF0002 /* ClaudeHookSessionStoreFile.swift */; };
 		C117570000000000000000C1 /* ClaudeHookSessionStoreRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C117570000000000000000C0 /* ClaudeHookSessionStoreRecoveryTests.swift */; };
@@ -3328,6 +3329,8 @@
 		EE45396CAC0142289F52DCA0 /* ShellIntegrationSendTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831E0F65E3D945CE8970852E /* ShellIntegrationSendTransportTests.swift */; };
 		C0F16A000000000000000001 /* ShellStartupMatrixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16A000000000000000002 /* ShellStartupMatrixTests.swift */; };
 		C0F16C000000000000000001 /* ShellStartupMissingBundleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16C000000000000000002 /* ShellStartupMissingBundleTests.swift */; };
+		A5E0D1000000000000000012 /* ShepherdHookProducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000011 /* ShepherdHookProducerTests.swift */; };
+		A5E0D1000000000000000010 /* ShepherdInputReservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D100000000000000000F /* ShepherdInputReservationTests.swift */; };
 		A5E0D1000000000000000006 /* ShepherdProcessEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000005 /* ShepherdProcessEvidence.swift */; };
 		A5E0D1000000000000000008 /* ShepherdProcessEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */; };
 		A5E0D100000000000000000A /* ShepherdRenderEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000009 /* ShepherdRenderEvidence.swift */; };
@@ -5375,6 +5378,7 @@
 		79390012AA11BB22CC33DD12 /* ClaudeHookPIDAuthenticationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHookPIDAuthenticationTests.swift; sourceTree = "<group>"; };
 		C51DB22258B5393E2AB9104C /* ClaudeHookSessionLivenessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionLivenessTests.swift"; sourceTree = "<group>"; };
 		D3AD00000000000000000001 /* ClaudeHookSessionStore+CodexTurnAdmission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionStore+CodexTurnAdmission.swift"; sourceTree = "<group>"; };
+		A5E0D100000000000000000D /* ClaudeHookSessionStore+Shepherd.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionStore+Shepherd.swift"; sourceTree = "<group>"; };
 		89930005AABBCCDDEEFF0002 /* ClaudeHookSessionStore+SupersededCleanup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClaudeHookSessionStore+SupersededCleanup.swift"; sourceTree = "<group>"; };
 		89930004AABBCCDDEEFF0002 /* ClaudeHookSessionStoreFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHookSessionStoreFile.swift; sourceTree = "<group>"; };
 		C117570000000000000000C0 /* ClaudeHookSessionStoreRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHookSessionStoreRecoveryTests.swift; sourceTree = "<group>"; };
@@ -7891,6 +7895,8 @@
 		831E0F65E3D945CE8970852E /* ShellIntegrationSendTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellIntegrationSendTransportTests.swift; sourceTree = "<group>"; };
 		C0F16A000000000000000002 /* ShellStartupMatrixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellStartupMatrixTests.swift; sourceTree = "<group>"; };
 		C0F16C000000000000000002 /* ShellStartupMissingBundleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellStartupMissingBundleTests.swift; sourceTree = "<group>"; };
+		A5E0D1000000000000000011 /* ShepherdHookProducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdHookProducerTests.swift; sourceTree = "<group>"; };
+		A5E0D100000000000000000F /* ShepherdInputReservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdInputReservationTests.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000005 /* ShepherdProcessEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdProcessEvidence.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdProcessEvidenceTests.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000009 /* ShepherdRenderEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdRenderEvidence.swift; sourceTree = "<group>"; };
@@ -12496,6 +12502,7 @@
 				89930008AABBCCDDEEFF0002 /* CMUXCLI+AgentHookProcessBindingResult.swift */,
 				89930007AABBCCDDEEFF0002 /* CMUXCLI+AgentHookProcessBindingSource.swift */,
 				89930005AABBCCDDEEFF0002 /* ClaudeHookSessionStore+SupersededCleanup.swift */,
+				A5E0D100000000000000000D /* ClaudeHookSessionStore+Shepherd.swift */,
 				89930004AABBCCDDEEFF0002 /* ClaudeHookSessionStoreFile.swift */,
 				61AD48A9E6C3F1BE2B547FFE /* CMUXCLI+AgentHookCatalog.swift */,
 				E1FF1D48B584498AB7FD6B9E /* CMUXCLI+CloudFeature.swift */,
@@ -13936,6 +13943,8 @@
 				A5E0D1000000000000000003 /* TerminalControllerShepherdHostTests.swift */,
 				A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */,
 				A5E0D100000000000000000B /* ShepherdRenderEvidenceTests.swift */,
+				A5E0D100000000000000000F /* ShepherdInputReservationTests.swift */,
+				A5E0D1000000000000000011 /* ShepherdHookProducerTests.swift */,
 			);
 			path = cmuxTests;
 			sourceTree = "<group>";
@@ -17502,6 +17511,7 @@
 				A10649380000000000000001 /* AutomationWebhookRedirectDelegate.swift in Sources */,
 				805500000000000000000004 /* BrowserValueTextFormatter.swift in Sources */,
 				D3AD00000000000000000002 /* ClaudeHookSessionStore+CodexTurnAdmission.swift in Sources */,
+				A5E0D100000000000000000E /* ClaudeHookSessionStore+Shepherd.swift in Sources */,
 				89930005AABBCCDDEEFF0001 /* ClaudeHookSessionStore+SupersededCleanup.swift in Sources */,
 				89930004AABBCCDDEEFF0001 /* ClaudeHookSessionStoreFile.swift in Sources */,
 				C11218000000000000000052 /* CLIError.swift in Sources */,
@@ -18858,6 +18868,8 @@
 				EE45396CAC0142289F52DCA0 /* ShellIntegrationSendTransportTests.swift in Sources */,
 				C0F16A000000000000000001 /* ShellStartupMatrixTests.swift in Sources */,
 				C0F16C000000000000000001 /* ShellStartupMissingBundleTests.swift in Sources */,
+				A5E0D1000000000000000012 /* ShepherdHookProducerTests.swift in Sources */,
+				A5E0D1000000000000000010 /* ShepherdInputReservationTests.swift in Sources */,
 				A5E0D1000000000000000008 /* ShepherdProcessEvidenceTests.swift in Sources */,
 				A5E0D100000000000000000C /* ShepherdRenderEvidenceTests.swift in Sources */,
 				1521D55DC63D5E5FC4955E31 /* ShortcutAndCommandPaletteTests.swift in Sources */,

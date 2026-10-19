@@ -27,9 +27,11 @@ extension TerminalController {
     }
 
     func makeShepherdControlBoundary() -> ShepherdControlBoundary {
-        let host = TerminalControllerShepherdHost(owner: self)
+        let boot = UUID()
+        let host = TerminalControllerShepherdHost(owner: self, hostInstance: boot)
         return ShepherdControlBoundary(
             host: host,
+            hostInstance: boot,
             now: { ProcessInfo.processInfo.systemUptime },
             unixMilliseconds: { Int64(Date().timeIntervalSince1970 * 1_000) },
             readVisibleScreen: { workspaceID, surfaceID in
@@ -46,9 +48,19 @@ extension TerminalController {
 final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
     private weak var owner: TerminalController?
     private let processEvidenceReader: ShepherdProcessEvidenceReader
+    private let hostInstance: UUID
+    private let readinessStoreData: () throws -> Data?
+    private let qualifiedAgents: Set<String>
 
-    init(owner: TerminalController, processEvidenceReader: ShepherdProcessEvidenceReader? = nil) {
+    init(
+        owner: TerminalController, processEvidenceReader: ShepherdProcessEvidenceReader? = nil,
+        hostInstance: UUID = UUID(), readinessStoreData: (() throws -> Data?)? = nil,
+        qualifiedAgents: Set<String> = []
+    ) {
         self.owner = owner
+        self.hostInstance = hostInstance
+        self.readinessStoreData = readinessStoreData ?? { try ShepherdHookReadinessProof.loadStoreData() }
+        self.qualifiedAgents = qualifiedAgents
         self.processEvidenceReader = processEvidenceReader ?? ShepherdProcessEvidenceReader(
             processStart: { [weak owner] pid in owner?.transport.processStartTime(of: pid)?.absoluteTime }
         )
@@ -62,12 +74,42 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
         guard owner != nil, let surface = surface(workspaceID: workspaceID, surfaceID: surfaceID) else {
             return nil
         }
+        let initialStore = readReadinessStore()
         let initialProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
+        let initialRevision = surface.shepherdInputRevision
+        let readinessRevision = surface.shepherdReadinessObservationRevision
         let initialScreen = surface.readText(region: .screen)
         let render = ShepherdRenderEvidence.capture(surface: surface, surfaceID: surfaceID, agent: initialProcess?.agent)
         let screen = surface.readText(region: .screen)
         let finalProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
+        let finalStore = readReadinessStore()
         let stable = initialScreen == screen && initialProcess == finalProcess
+        let readiness: ShepherdHookReadinessProof?
+        if stable, initialRevision == surface.shepherdInputRevision,
+           readinessRevision == surface.shepherdReadinessObservationRevision,
+           let process = finalProcess, process.agent == "claude",
+           initialStore == finalStore, let data = finalStore {
+            let scope = ShepherdHookReadinessScope(
+                hostInstance: hostInstance, workspaceID: workspaceID, surfaceID: surfaceID,
+                processInstance: process.processInstance, pid: process.surface.pid,
+                pidStartSeconds: process.birth.startSeconds, pidStartMicroseconds: process.birth.startMicroseconds,
+                surfaceGeneration: process.surface.generation, inputRevision: readinessRevision
+            )
+            do {
+                readiness = try ShepherdHookReadinessProof.readStore(data, matching: scope)
+            } catch {
+                NSLog("Shepherd readiness unavailable: malformed hook session store.")
+                readiness = nil
+            }
+        } else {
+            readiness = nil
+        }
+        var outside = stable ? render.outsideComposerFingerprint : ""
+        if !outside.isEmpty, let readiness {
+            outside = SHA256.hash(data: Data(
+                "cmux.shepherd.readiness.v1\u{0}\(outside)\u{0}\(readiness.nonce.uuidString)".utf8
+            )).map { String(format: "%02x", $0) }.joined()
+        }
         let composer: ShepherdComposerState
         switch stable ? render.state : .unknown {
         case .unknown: composer = .unknown
@@ -83,14 +125,25 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
             screenFingerprint: stable ? screen.map {
                 SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
             } ?? "" : "",
-            outsideComposerFingerprint: stable ? render.outsideComposerFingerprint : "",
+            outsideComposerFingerprint: outside,
             inputRevision: surface.shepherdInputRevision,
             focusRevision: surface.shepherdFocusRevision,
             focused: surface.isShepherdFocused,
-            idle: nil, composer: composer, backgroundWork: nil,
-            acceptsImmediateInput: surface.acceptsShepherdImmediateInput,
+            idle: readiness == nil ? nil : true, composer: composer,
+            backgroundWork: readiness == nil ? nil : false,
+            acceptsImmediateInput: process.map { qualifiedAgents.contains($0.agent) } == true
+                && surface.acceptsShepherdImmediateInput,
             agent: process?.agent, workingDirectory: process?.workingDirectory, tty: process?.tty
         )
+    }
+
+    private func readReadinessStore() -> Data? {
+        do {
+            return try readinessStoreData()
+        } catch {
+            NSLog("Shepherd readiness unavailable: hook session store could not be read safely.")
+            return nil
+        }
     }
 
     func paste(
@@ -98,7 +151,8 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
         snapshot expected: ShepherdAdmissionSnapshot,
         expiresAt: TimeInterval
     ) -> ShepherdPasteWriteResult {
-        guard snapshot(workspaceID: expected.workspaceID, surfaceID: expected.surfaceID) == expected,
+        guard expected.acceptsImmediateInput,
+              snapshot(workspaceID: expected.workspaceID, surfaceID: expected.surfaceID) == expected,
               let surface = surface(workspaceID: expected.workspaceID, surfaceID: expected.surfaceID),
               let revision = surface.sendShepherdPaste(
                   request.text, requestID: request.requestID, expiresAt: expiresAt
@@ -107,7 +161,8 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
     }
 
     func submit(requestID: UUID, snapshot expected: ShepherdAdmissionSnapshot) -> Bool {
-        guard snapshot(workspaceID: expected.workspaceID, surfaceID: expected.surfaceID) == expected,
+        guard expected.acceptsImmediateInput,
+              snapshot(workspaceID: expected.workspaceID, surfaceID: expected.surfaceID) == expected,
               let surface = surface(workspaceID: expected.workspaceID, surfaceID: expected.surfaceID) else {
             return false
         }

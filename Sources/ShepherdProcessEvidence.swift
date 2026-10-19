@@ -15,6 +15,7 @@ struct ShepherdProcessEvidence: Equatable {
     let agent: String
     let workingDirectory: String
     let tty: String
+    let birth: AgentPIDProcessIdentity
 }
 
 struct ShepherdProcessEvidenceReader {
@@ -48,7 +49,7 @@ struct ShepherdProcessEvidenceReader {
               surface() == target else { return nil }
         return ShepherdProcessEvidence(
             surface: target, processInstance: "\(target.pid):\(start)", agent: agent,
-            workingDirectory: directory, tty: target.tty
+            workingDirectory: directory, tty: target.tty, birth: birth
         )
     }
 

@@ -151,6 +151,7 @@ final class ProcessFixture {
     var missing: String?
     var changing: String?
     var invalid: String?
+    var birth = AgentPIDProcessIdentity(pid: 42, startSeconds: 100, startMicroseconds: 1)
     private var reads: [String: Int] = [:]
 
     private func changed(_ field: String) -> Bool {
@@ -168,7 +169,8 @@ final class ProcessFixture {
                 #expect(pid == 42)
                 return self.missing == "birth" ? nil : .init(
                     pid: self.invalid == "birthPID" ? 43 : pid,
-                    startSeconds: 100, startMicroseconds: self.changed("birth") ? 2 : 1
+                    startSeconds: self.birth.startSeconds,
+                    startMicroseconds: self.changed("birth") ? 2 : self.birth.startMicroseconds
                 )
             },
             processTTY: { pid in

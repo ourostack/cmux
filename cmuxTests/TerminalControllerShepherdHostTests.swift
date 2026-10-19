@@ -1,4 +1,5 @@
 import CmuxControlSocket
+import CmuxFoundation
 import CmuxTerminal
 import Foundation
 import Testing
@@ -299,6 +300,165 @@ struct TerminalControllerShepherdHostTests {
         let value = try #require(host.snapshot(workspaceID: workspace.id, surfaceID: panel.id))
         #expect(value.composer == .unknown)
         #expect(value.outsideComposerFingerprint == "")
+    }
+
+    @Test func exactCurrentRootProofMakesReadinessKnownAndNonceChangesInvalidateSnapshots() throws {
+        let fixture = try ReadinessFixture()
+        let value = try #require(fixture.host.snapshot(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        ))
+        #expect(value.idle == true)
+        #expect(value.backgroundWork == false)
+        #expect(value.composer == .empty)
+        fixture.data = try fixture.store()
+        let next = try #require(fixture.host.snapshot(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        ))
+        #expect(next.idle == true)
+        #expect(next.outsideComposerFingerprint != value.outsideComposerFingerprint)
+        #expect(fixture.host.paste(
+            request: ShepherdContinuationRequest(requestID: UUID(), tokenID: UUID(), text: "Continue."),
+            snapshot: value, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ) == .notAdmitted)
+        #expect(fixture.panel.surface.pastes.isEmpty)
+    }
+
+    @Test(arguments: ["missing", "input", "boot", "birth", "during-capture"])
+    func readinessCannotOutliveItsFileAndNativeEpoch(change: String) throws {
+        let fixture = try ReadinessFixture()
+        switch change {
+        case "missing": fixture.data = nil
+        case "input": fixture.panel.surface.invalidateShepherdInput()
+        case "boot": fixture.data = try fixture.store(boot: UUID())
+        case "birth": fixture.process.birth = AgentPIDProcessIdentity(
+            pid: 42, startSeconds: 999, startMicroseconds: 200
+        )
+        default: fixture.panel.surface.onReadGrid = { fixture.data = nil }
+        }
+        let value = try #require(fixture.host.snapshot(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        ))
+        #expect(value.idle == nil)
+        #expect(value.backgroundWork == nil)
+    }
+
+    @Test func realPasteAndBothPostPasteReadsRetainProofUntilSingleEnterConsumesIt() throws {
+        let fixture = try ReadinessFixture()
+        let expected = try #require(fixture.host.snapshot(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        ))
+        let request = ShepherdContinuationRequest(requestID: UUID(), tokenID: UUID(), text: "Continue.")
+        #expect(fixture.host.paste(
+            request: request, snapshot: expected, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ) == .admitted(inputRevision: 10))
+        fixture.panel.surface.renderFrame = try shepherdRenderFrame(
+            surfaceID: fixture.panel.id, draft: "Continue."
+        )
+        let after = try #require(fixture.host.snapshot(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        ))
+        #expect(after.idle == true)
+        #expect(after.backgroundWork == false)
+        #expect(after.inputRevision == 10)
+        #expect(after.outsideComposerFingerprint == expected.outsideComposerFingerprint)
+        #expect(fixture.host.submit(requestID: request.requestID, snapshot: after))
+        #expect(!fixture.host.submit(requestID: request.requestID, snapshot: after))
+        #expect(fixture.panel.surface.pastes == ["Continue."])
+        #expect(fixture.panel.surface.submits.count == 1)
+        #expect(fixture.host.snapshot(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        )?.idle == nil)
+    }
+
+    @Test func completeEvidenceDoesNotQualifyTheDefaultProductionHost() throws {
+        let fixture = try ReadinessFixture()
+        let host = TerminalControllerShepherdHost(
+            owner: fixture.owner, processEvidenceReader: fixture.process.reader, hostInstance: fixture.boot,
+            readinessStoreData: { fixture.data }
+        )
+        let controller = ShepherdAdmissionController(
+            host: host, now: { ProcessInfo.processInfo.systemUptime }, wait: { _ in }
+        )
+        let inspection = try controller.inspect(workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id)
+        #expect(inspection.snapshot.idle == true)
+        #expect(inspection.snapshot.backgroundWork == false)
+        #expect(inspection.token == nil)
+        #expect(!inspection.snapshot.acceptsImmediateInput)
+        #expect(host.paste(
+            request: ShepherdContinuationRequest(requestID: UUID(), tokenID: UUID(), text: "Continue."),
+            snapshot: inspection.snapshot, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ) == .notAdmitted)
+        #expect(fixture.panel.surface.pastes.isEmpty)
+    }
+
+    @Test func controllerUsesRepeatedProofReadsWithoutMintingATokenDuringOwnedPaste() async throws {
+        let fixture = try ReadinessFixture()
+        var clock = ProcessInfo.processInfo.systemUptime
+        var controller: ShepherdAdmissionController!
+        controller = ShepherdAdmissionController(host: fixture.host, now: { clock }, wait: { seconds in
+            #expect(try controller.inspect(
+                workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+            ).token == nil)
+            fixture.panel.surface.renderFrame = try shepherdRenderFrame(
+                surfaceID: fixture.panel.id, draft: "Continue."
+            )
+            clock += seconds
+        })
+        let token = try #require(controller.inspect(
+            workspaceID: fixture.workspace.id, surfaceID: fixture.panel.id
+        ).token)
+        let request = ShepherdContinuationRequest(requestID: UUID(), tokenID: token.id, text: "Continue.")
+        let receipt = try await controller.continueInput(request)
+        #expect(receipt.state == .accepted)
+        #expect(try await controller.continueInput(request) == receipt)
+        #expect(fixture.panel.surface.pastes == ["Continue."])
+        #expect(fixture.panel.surface.submits.count == 1)
+    }
+}
+
+@MainActor private final class ReadinessFixture {
+    let workspace = Workspace()
+    let owner = TerminalController()
+    let panel: TerminalPanel
+    let process = ProcessFixture()
+    let boot = UUID()
+    var data: Data?
+    lazy var host = TerminalControllerShepherdHost(
+        owner: owner, processEvidenceReader: process.reader, hostInstance: boot,
+        readinessStoreData: { [unowned self] in self.data }, qualifiedAgents: ["claude"]
+    )
+
+    init() throws {
+        panel = TerminalPanel(workspaceID: workspace.id)
+        workspace.panels[panel.id] = panel
+        panel.surface.foregroundPID = 42
+        panel.surface.shepherdInputRevision = 9
+        panel.surface.renderFrame = try shepherdRenderFrame(surfaceID: panel.id)
+        AppDelegate.shared = AppDelegate(workspace: workspace)
+        data = try store()
+    }
+
+    func store(boot: UUID? = nil) throws -> Data {
+        let scope = ShepherdHookReadinessScope(
+            hostInstance: boot ?? self.boot, workspaceID: workspace.id, surfaceID: panel.id,
+            processInstance: "42:123456", pid: 42, pidStartSeconds: process.birth.startSeconds,
+            pidStartMicroseconds: process.birth.startMicroseconds, surfaceGeneration: 1, inputRevision: 9
+        )
+        let proof = try #require(ShepherdHookReadinessProof(
+            stopInput: ["background_tasks": [], "session_crons": []], sessionID: "root", scope: scope
+        ))
+        return try JSONSerialization.data(withJSONObject: [
+            "version": 1,
+            "sessions": ["root": [
+                "sessionId": "root", "workspaceId": workspace.id.uuidString,
+                "surfaceId": panel.id.uuidString, "pid": 42,
+                "pidStartSeconds": process.birth.startSeconds,
+                "pidStartMicroseconds": process.birth.startMicroseconds,
+                "hookEventName": "Stop", "turnSettled": true, "activePromptDepth": 0,
+                "shepherdReadiness": try JSONSerialization.jsonObject(with: JSONEncoder().encode(proof))
+            ]],
+            "activeSessionsBySurface": [panel.id.uuidString: ["sessionId": "root"]]
+        ])
     }
 }
 #endif
