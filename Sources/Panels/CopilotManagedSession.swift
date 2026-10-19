@@ -182,10 +182,6 @@ final class CopilotManagedSession {
             hold("duplicateStartupEvent")
             return
         }
-        guard phase != .awaitingReadback, phase != .configurationObserved else {
-            hold("configurationChanged")
-            return
-        }
         guard bufferedEvents.count < 64, bufferedEventBytes + body.count <= 1_048_576 else {
             hold("eventBufferOverflow")
             return

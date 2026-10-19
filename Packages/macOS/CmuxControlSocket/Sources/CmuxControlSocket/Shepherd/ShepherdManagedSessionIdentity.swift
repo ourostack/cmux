@@ -46,7 +46,7 @@ public struct ShepherdManagedSessionIdentity: Equatable, Sendable {
         self.profileSHA256 = profileSHA256
     }
 
-    static func validIdentifier(_ value: String) -> Bool {
+    public static func validIdentifier(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 512
             && value == value.trimmingCharacters(in: .whitespacesAndNewlines)
             && !value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }

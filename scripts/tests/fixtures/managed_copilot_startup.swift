@@ -83,6 +83,7 @@ enum ManagedCopilotStartupFixture {
         var framer = ShepherdManagedRPCFramer()
         var bytes = [UInt8](repeating: 0, count: 4096)
         var plannedID: String?
+        var requestedNoBuiltinAgents = false
         while true {
             let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
             if count == 0 { return }
@@ -207,6 +208,7 @@ enum ManagedCopilotStartupFixture {
                         }
                     }
                     guard params["sessionId"] as? String == plannedID,
+                          params["includedBuiltinAgents"] as? [String] == [],
                           params["skipCustomInstructions"] as? Bool == true,
                           params["customAgentsLocalOnly"] as? Bool == true,
                           params["coauthorEnabled"] as? Bool == false,
@@ -215,9 +217,12 @@ enum ManagedCopilotStartupFixture {
                           params["includedBuiltinSkills"] as? [String] == [] else {
                         throw POSIXError(.EPROTO)
                     }
+                    requestedNoBuiltinAgents = true
                     result = ["success": scenario != "options-refused", "pluginHookCount": 0]
                 case "session.agent.list":
-                    guard params["includeBuiltInAgents"] as? Bool == true else { throw POSIXError(.EPROTO) }
+                    guard params["includeBuiltInAgents"] as? Bool == true, requestedNoBuiltinAgents else {
+                        throw POSIXError(.EPROTO)
+                    }
                     result = ["agents": scenario == "inherited-agent" ? [["name": "unexpected"]] : []]
                 case "session.agent.getCurrent":
                     result = scenario == "missing-current-agent" ? [:] : [
