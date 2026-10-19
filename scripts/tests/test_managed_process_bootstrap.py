@@ -54,6 +54,7 @@ class ManagedProcessBootstrapTests(unittest.TestCase):
                      str(control / "ShepherdManagedBackendLaunchReceipt.swift"),
                      str(control / "ShepherdManagedBootstrapReader.swift"),
                      str(control / "ShepherdManagedPipeWriter.swift"),
+                     str(control / "ShepherdManagedSessionIdentity.swift"),
                      "-o", str(cls.build / "libCmuxControlSocket.dylib")],
             flags + ["-parse-as-library", "-I", str(cls.build), "-L", str(cls.build),
                      "-lCmuxFoundation", "-lCmuxControlSocket", "-Xlinker", "-rpath",
@@ -61,6 +62,8 @@ class ManagedProcessBootstrapTests(unittest.TestCase):
                      str(ROOT / "CLI/CodexTeamsPOSIXSupport.swift"),
                      str(ROOT / "CLI/OwnedProcessSupervisor.swift"),
                      str(ROOT / "Sources/Panels/AgentSessionOwnedProcessLauncher.swift"),
+                     str(ROOT / "Sources/Panels/AgentSessionManagedSession.swift"),
+                     str(ROOT / "scripts/tests/fixtures/managed_session_lifetime.swift"),
                      str(ROOT / "scripts/tests/fixtures/managed_process_supervisor_main.swift"),
                      "-o", str(cls.build / "supervisor")],
         ]
@@ -243,6 +246,97 @@ time.sleep(30)
             for record in (backend, supervisor):
                 if self.live(record):
                     os.kill(record[0], signal.SIGKILL)
+
+    def lifetime(self, scenario):
+        result = subprocess.run(
+            [str(self.executable), "--fixture-lifetime", scenario],
+            capture_output=True, timeout=40,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        return json.loads(result.stdout)
+
+    def test_a_native_receipt_waits_for_the_actual_provider_handshake(self):
+        result = self.lifetime("handshake")
+        self.assertEqual(result["afterReceipt"], "awaitingProvider")
+        self.assertFalse(result["identityBeforeHandshake"])
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["providerSessionID"], "actual-provider-session")
+        self.assertEqual(result["backend"], result["receiptBackend"])
+
+    def test_old_launch_callbacks_cannot_bind_a_replacement_native_session(self):
+        result = self.lifetime("stale")
+        self.assertFalse(result["acceptedOld"])
+        self.assertEqual(result["afterOld"], "awaitingProvider")
+        self.assertTrue(result["acceptedCurrent"])
+        self.assertEqual(result["providerSessionID"], "current-session")
+
+    def test_native_handshake_session_identity_is_immutable(self):
+        result = self.lifetime("conflict")
+        self.assertTrue(result["acceptedFirst"])
+        self.assertFalse(result["acceptedConflict"])
+        self.assertEqual(result["phase"], "held")
+        self.assertFalse(result["identityAfterConflict"])
+
+    def test_actual_backend_exit_invalidates_while_supervisor_remains_alive(self):
+        result = self.lifetime("backend-exit")
+        self.assertTrue(result["boundBeforeExit"])
+        self.assertTrue(result["supervisorStillAlive"])
+        self.assertEqual(result["phase"], "held")
+        self.assertFalse(result["identityAfterExit"])
+        self.assertFalse(result["drained"])
+
+    def test_explicit_abandonment_never_counts_as_actual_stream_drain(self):
+        result = self.lifetime("abandon")
+        self.assertEqual(result["phase"], "held")
+        self.assertFalse(result["acceptedLate"])
+        self.assertFalse(result["drained"])
+
+    def test_stdout_errno_and_real_eof_are_different_native_results(self):
+        result = self.lifetime("read-results")
+        self.assertEqual(result["beforeClose"], "waiting")
+        self.assertEqual(result["afterWriterClose"], "endOfFile")
+        self.assertEqual(result["afterReaderClose"], "closed")
+        self.assertFalse(result["closedIsDrain"])
+        self.assertEqual(result["readFailure"], "errno:9")
+        self.assertTrue(result["stickyFailure"])
+
+    def test_real_eof_drains_but_never_becomes_provider_completion(self):
+        result = self.lifetime("drain")
+        self.assertEqual(result["phase"], "held")
+        self.assertTrue(result["drained"])
+        self.assertFalse(result["identityAfterExit"])
+
+    def test_abandoned_provider_handshake_expires_without_retry_or_binding(self):
+        result = self.lifetime("timeout")
+        self.assertEqual(result["before"], "awaitingProvider")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "providerHandshakeUnavailable")
+        self.assertFalse(result["acceptedLate"])
+
+    def test_missing_bootstrap_expires_without_drain_or_identity(self):
+        result = self.lifetime("bootstrap-timeout")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "bootstrapUnavailable")
+        self.assertFalse(result["drained"])
+        self.assertFalse(result["identity"])
+
+    def test_pre_bootstrap_provider_handshake_is_refused(self):
+        result = self.lifetime("early-handshake")
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["phase"], "held")
+        self.assertFalse(result["identity"])
+
+    def test_malformed_provider_session_id_cannot_become_native_identity(self):
+        result = self.lifetime("invalid-handshake")
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["phase"], "held")
+        self.assertFalse(result["identity"])
+
+    def test_backend_death_before_provider_init_reports_failed_handshake(self):
+        result = self.lifetime("pre-handshake-exit")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "providerHandshakeUnavailable")
+        self.assertFalse(result["acceptedLate"])
 
 
 if __name__ == "__main__":
