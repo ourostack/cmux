@@ -169,7 +169,7 @@ final class AgentSessionManagedSession {
     /// Called only by the strict native provider adapter after its real initialization response.
     @discardableResult
     func acceptProviderHandshake(sessionID: String, launchID: UUID) -> Bool {
-        guard launchID == self.launchID, phase != .held, phase == .awaitingBootstrap else { return false }
+        guard launchID == self.launchID, phase != .held else { return false }
         guard phase == .awaitingProvider || phase == .bound else {
             hold(.providerHandshakeUnavailable)
             return false
