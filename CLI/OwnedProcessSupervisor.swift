@@ -1,3 +1,5 @@
+import CmuxControlSocket
+import CmuxFoundation
 import Darwin
 import Foundation
 
@@ -11,22 +13,45 @@ struct OwnedProcessSupervisor {
     private let executablePath: String
     private let arguments: [String]
     private let usesParentLifetime: Bool
+    private let managedNonce: UUID?
 
     init?(command: String, arguments: [String]) throws {
-        guard command == "__owned-process-supervisor" || command == "__codex-teams-app-server-supervisor" else {
+        let managed = false
+        guard managed || command == "__owned-process-supervisor"
+                || command == "__codex-teams-app-server-supervisor" else {
             return nil
         }
-        usesParentLifetime = command == "__owned-process-supervisor"
-        guard let executablePath = arguments.first, !executablePath.isEmpty else {
+        usesParentLifetime = command != "__codex-teams-app-server-supervisor"
+        let targetArguments: [String]
+        if managed {
+            guard let value = arguments.first, let nonce = UUID(uuidString: value) else {
+                throw CodexTeamsPOSIXSupport.error(operation: "missing managed launch nonce", code: EINVAL)
+            }
+            managedNonce = nonce
+            targetArguments = Array(arguments.dropFirst())
+        } else {
+            managedNonce = nil
+            targetArguments = arguments
+        }
+        guard let executablePath = targetArguments.first, !executablePath.isEmpty else {
             throw CodexTeamsPOSIXSupport.error(operation: "missing target executable", code: EINVAL)
         }
         self.executablePath = executablePath
-        self.arguments = Array(arguments.dropFirst())
+        self.arguments = Array(targetArguments.dropFirst())
     }
 
     func run() throws -> Int32 {
         let ownerPID = usesParentLifetime ? getppid() : nil
         guard ownerPID.map({ $0 > 1 }) ?? true else { throw POSIXError(.ESRCH) }
+        let managedOwner: AgentPIDProcessIdentity?
+        if managedNonce != nil {
+            guard let ownerPID, let owner = AgentPIDProcessIdentity(pid: ownerPID) else {
+                throw POSIXError(.ESRCH)
+            }
+            managedOwner = owner
+        } else {
+            managedOwner = nil
+        }
         let queue = kqueue()
         guard queue >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(queue) }
@@ -55,6 +80,15 @@ struct OwnedProcessSupervisor {
             // If the owner died before registration, never resume the target.
             // Parentage is kernel-owned and cannot be forged by inherited env.
             guard ownerPID == nil || getppid() == ownerPID else { throw POSIXError(.ESRCH) }
+            if let managedNonce, let managedOwner {
+                try Self.writeManagedBootstrap(
+                    nonce: managedNonce, owner: managedOwner, backendPID: processIdentifier
+                )
+                guard getppid() == managedOwner.pid,
+                      AgentPIDProcessIdentity(pid: managedOwner.pid) == managedOwner else {
+                    throw POSIXError(.ESRCH)
+                }
+            }
             guard Darwin.kill(processIdentifier, SIGCONT) == 0 else {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
@@ -64,6 +98,46 @@ struct OwnedProcessSupervisor {
         } catch {
             Self.forceTerminateAndReap(processIdentifier)
             throw error
+        }
+    }
+
+    private static func writeManagedBootstrap(
+        nonce: UUID, owner: AgentPIDProcessIdentity, backendPID: pid_t
+    ) throws {
+        guard getppid() == owner.pid, AgentPIDProcessIdentity(pid: owner.pid) == owner,
+              let supervisor = AgentPIDProcessIdentity.processSnapshot(pid: getpid()),
+              supervisor.parentPID == owner.pid,
+              let backend = AgentPIDProcessIdentity.processSnapshot(pid: backendPID),
+              backend.parentPID == supervisor.identity.pid else {
+            throw POSIXError(.ESRCH)
+        }
+        let frame = try ShepherdManagedBackendLaunchReceipt(
+            nonce: nonce, owner: owner, supervisor: supervisor.identity, backend: backend.identity
+        ).encoded()
+        var metadata = stat()
+        guard fstat(STDERR_FILENO, &metadata) == 0 else {
+            throw CodexTeamsPOSIXSupport.error(operation: "inspect bootstrap pipe", code: errno)
+        }
+        guard metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFIFO) else {
+            throw POSIXError(.EINVAL)
+        }
+        let flags = fcntl(STDERR_FILENO, F_GETFL, 0)
+        let noSIGPIPE = fcntl(STDERR_FILENO, F_GETNOSIGPIPE, 0)
+        guard flags >= 0, noSIGPIPE >= 0,
+              fcntl(STDERR_FILENO, F_SETFL, flags | O_NONBLOCK) == 0,
+              fcntl(STDERR_FILENO, F_SETNOSIGPIPE, 1) == 0 else {
+            throw CodexTeamsPOSIXSupport.error(operation: "configure bootstrap pipe", code: errno)
+        }
+        var count: Int
+        repeat {
+            count = frame.withUnsafeBytes { Darwin.write(STDERR_FILENO, $0.baseAddress, $0.count) }
+        } while count < 0 && errno == EINTR
+        guard count == frame.count else {
+            throw CodexTeamsPOSIXSupport.error(operation: "write bootstrap receipt", code: count < 0 ? errno : EIO)
+        }
+        guard fcntl(STDERR_FILENO, F_SETFL, flags) == 0,
+              fcntl(STDERR_FILENO, F_SETNOSIGPIPE, noSIGPIPE) == 0 else {
+            throw CodexTeamsPOSIXSupport.error(operation: "restore provider pipe", code: errno)
         }
     }
 
