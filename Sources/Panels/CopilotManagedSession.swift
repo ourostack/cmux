@@ -8,6 +8,7 @@ final class CopilotManagedSession {
     enum Phase: String {
         case idle, connecting, creating, configuring, awaitingReadback, configurationObserved, held
         case sending, awaitingRoot, inspectingWork, workObserved
+        case executingCallback, respondingCallback
     }
 
     let sessionID = UUID().uuidString.lowercased()
@@ -19,7 +20,8 @@ final class CopilotManagedSession {
 
     var hasCompleteWorkEvidence: Bool {
         phase == .workObserved && lifetime.transportIsLive(launchID: lifetime.launchID)
-            && turnLedger?.hasCompleteWorkEvidence == true
+            && turnLedger?.hasCompleteWorkEvidence == true && (codingAuthority?.outstandingWorkCount ?? 0) == 0
+            && commandAuthorityIsLive
     }
     var inputState: ShepherdManagedSessionState? { turnLedger?.state }
 
@@ -29,7 +31,7 @@ final class CopilotManagedSession {
               pending.isEmpty,
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         guard lifetime.transportIsLive(launchID: launchID), let identity = lifetime.identity,
-              let turnLedger, turnLedger.state.identity == identity else {
+              let turnLedger, turnLedger.state.identity == identity, commandAuthorityIsLive else {
             hold("transportUnavailable")
             return false
         }
@@ -50,10 +52,18 @@ final class CopilotManagedSession {
         case readback(CopilotManagedConfiguration.Readback)
         case send(UUID)
         case work(CopilotManagedTurnLedger.WorkReadback, UUID)
+        case callback(String)
 
         var ownsConfigurationMutation: Bool {
             switch self {
             case .create, .options, .readback(.initializeTools): true
+            default: false
+            }
+        }
+
+        var requiresCommandAuthority: Bool {
+            switch self {
+            case .send, .work, .callback: true
             default: false
             }
         }
@@ -65,6 +75,7 @@ final class CopilotManagedSession {
             case .options: "session.options.update"
             case .readback(let readback): readback.method
             case .send: "session.send"
+            case .callback: "session.tools.handlePendingToolCall"
             case .work(let readback, _):
                 switch readback {
                 case .refresh: "session.tasks.refresh"
@@ -94,14 +105,23 @@ final class CopilotManagedSession {
     private var startupEventIDs: Set<UUID> = []
     private var verifiedReadbacks: Set<CopilotManagedConfiguration.Readback> = []
     private var turnLedger: CopilotManagedTurnLedger?
+    private let codingAuthority: AgentSessionManagedCommandService.NativeCodingAuthority?
+    private var commandTask: Task<Void, Never>?
+    private var commandAuthorityIsLive: Bool {
+        codingAuthority == nil || codingAuthority?.isLive(for: lifetime, workingDirectory: workingDirectory) == true
+    }
+
+    func waitForCommandSettlement() async { await commandTask?.value }
 
     init(
         lifetime: AgentSessionManagedSession, takingOwnershipOf input: FileHandle,
-        workingDirectory: String
+        workingDirectory: String,
+        codingAuthority: AgentSessionManagedCommandService.NativeCodingAuthority? = nil
     ) throws {
         self.lifetime = lifetime
         self.writer = try ShepherdManagedPipeWriter(takingOwnershipOf: input)
         self.workingDirectory = workingDirectory
+        self.codingAuthority = codingAuthority
         lifetime.outputSink = { [weak self] stream, bytes, launchID in
             self?.receive(stream: stream, bytes: bytes, launchID: launchID)
         }
@@ -114,6 +134,7 @@ final class CopilotManagedSession {
     deinit {
         writeTask?.cancel()
         timeoutTask?.cancel()
+        commandTask?.cancel()
     }
 
     func start(launchID: UUID) {
@@ -152,6 +173,7 @@ final class CopilotManagedSession {
             guard let self, self.phase != .held else { return }
             let result = await self.writer.write(frame, deadline: .now.advanced(by: .seconds(2))) {
                 self.phase != .held && self.lifetime.transportIsLive(launchID: launchID)
+                    && (!method.requiresCommandAuthority || self.commandAuthorityIsLive)
             }
             guard self.phase != .held else { return }
             guard result == .complete(frame.count), self.pending[id] != nil else {
@@ -249,6 +271,7 @@ final class CopilotManagedSession {
                 return
             }
             if phase == .workObserved { phase = .awaitingRoot }
+            dispatchCallbackIfReady()
             inspectWorkIfReady()
             return
         }
@@ -390,6 +413,10 @@ final class CopilotManagedSession {
             hold("transportUnavailable")
             return
         }
+        guard !registered.method.requiresCommandAuthority || commandAuthorityIsLive else {
+            hold("commandAuthorityUnavailable")
+            return
+        }
         pending.removeValue(forKey: id)
         timeoutTask?.cancel()
         switch registered.method {
@@ -402,7 +429,7 @@ final class CopilotManagedSession {
             }
             phase = .creating
             request(.create, params: CopilotManagedConfiguration.createParameters(
-                sessionID: sessionID, workingDirectory: workingDirectory
+                sessionID: sessionID, workingDirectory: workingDirectory, nativeForegroundTool: codingAuthority != nil
             ))
         case .create:
             guard response["sessionId"] as? String == sessionID else {
@@ -414,7 +441,9 @@ final class CopilotManagedSession {
                 return
             }
             phase = .configuring
-            request(.options, params: CopilotManagedConfiguration.optionParameters(sessionID: sessionID))
+            request(.options, params: CopilotManagedConfiguration.optionParameters(
+                sessionID: sessionID, nativeForegroundTool: codingAuthority != nil
+            ))
         case .options:
             guard CopilotManagedEventMetadata.boolean(response["success"]) == true,
                   response["pluginHookCount"] as? Int == 0 else {
@@ -428,7 +457,7 @@ final class CopilotManagedSession {
             phase = .awaitingReadback
             requestReadback(.initializeTools)
         case .readback(let readback):
-            guard phase == .awaitingReadback, readback.accepts(response),
+            guard phase == .awaitingReadback, readback.accepts(response, nativeForegroundTool: codingAuthority != nil),
                   verifiedReadbacks.insert(readback).inserted else {
                 hold("configurationMismatch")
                 return
@@ -441,7 +470,14 @@ final class CopilotManagedSession {
                     hold("transportUnavailable")
                     return
                 }
-                turnLedger = CopilotManagedTurnLedger(identity: identity)
+                guard codingAuthority == nil
+                        || codingAuthority?.isLive(for: lifetime, workingDirectory: workingDirectory) == true else {
+                    hold("commandAuthorityUnavailable")
+                    return
+                }
+                turnLedger = CopilotManagedTurnLedger(
+                    identity: identity, allowsForegroundCommands: codingAuthority != nil, workingDirectory: workingDirectory
+                )
                 phase = .configurationObserved
             }
         case .send(let inputID):
@@ -456,6 +492,19 @@ final class CopilotManagedSession {
                 return
             }
             phase = .awaitingRoot
+            dispatchCallbackIfReady()
+            inspectWorkIfReady()
+        case .callback(let callID):
+            guard phase == .respondingCallback, Set(response.keys) == ["success"],
+                  CopilotManagedEventMetadata.boolean(response["success"]) == true,
+                  codingAuthority?.isLive(for: lifetime, workingDirectory: workingDirectory) == true,
+                  codingAuthority?.outstandingWorkCount == 0,
+                  turnLedger?.acknowledgeCallback(callID) == true else {
+                hold("invalidCallbackAcknowledgement")
+                return
+            }
+            phase = .awaitingRoot
+            dispatchCallbackIfReady()
             inspectWorkIfReady()
         case .work(let readback, let token):
             guard phase == .inspectingWork, let turnLedger,
@@ -487,6 +536,58 @@ final class CopilotManagedSession {
         request(.work(.refresh, token), params: ["sessionId": sessionID])
     }
 
+    private func dispatchCallbackIfReady() {
+        guard phase == .awaitingRoot, pending.isEmpty, commandTask == nil,
+              let callback = turnLedger?.nextCallback else { return }
+        guard let codingAuthority,
+              codingAuthority.isLive(for: lifetime, workingDirectory: workingDirectory),
+              let requestID = callback.requestID, turnLedger?.dispatchCallback(callback.callID) == true else {
+            hold("commandAuthorityUnavailable")
+            return
+        }
+        phase = .executingCallback
+        let operationID = UUID()
+        commandTask = Task { [weak self] in
+            guard let self else { return }
+            let outcome = await codingAuthority.execute(callback.command, operationID: operationID)
+            self.commandTask = nil
+            guard self.phase != .held else { return }
+            guard codingAuthority.isLive(for: self.lifetime, workingDirectory: self.workingDirectory) else {
+                self.hold("commandAuthorityUnavailable")
+                return
+            }
+            switch outcome {
+            case .held(let reason):
+                self.hold("commandHeld:\(reason.rawValue)")
+            case .completed(let completion):
+                guard self.turnLedger?.registerCallbackResponse(callback.callID) == true else {
+                    self.hold("callbackMismatch")
+                    return
+                }
+                let limit = 16 * 1024
+                let report: [String: Any] = [
+                    "status": completion.status,
+                    "stdout": String(decoding: completion.stdout.prefix(limit), as: UTF8.self),
+                    "stderr": String(decoding: completion.stderr.prefix(limit), as: UTF8.self),
+                    "stdoutBytes": completion.stdout.count, "stderrBytes": completion.stderr.count,
+                    "stdoutTruncated": completion.stdout.count > limit, "stderrTruncated": completion.stderr.count > limit,
+                    "decoding": "utf8-replacement",
+                ]
+                do {
+                    let encoded = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+                    let text = String(decoding: encoded, as: UTF8.self)
+                    self.phase = .respondingCallback
+                    self.request(.callback(callback.callID), params: [
+                        "sessionId": self.sessionID, "requestId": requestID,
+                        "result": ["textResultForLlm": text, "resultType": completion.status == 0 ? "success" : "failure"],
+                    ])
+                } catch {
+                    self.hold("callbackResultEncodingFailed")
+                }
+            }
+        }
+    }
+
     private func requestReadback(_ readback: CopilotManagedConfiguration.Readback) {
         var params: [String: Any] = ["sessionId": sessionID]
         if readback == .agents { params["includeBuiltInAgents"] = true }
@@ -500,6 +601,8 @@ final class CopilotManagedSession {
         pending.removeAll()
         writeTask?.cancel()
         timeoutTask?.cancel()
+        commandTask?.cancel()
+        codingAuthority?.revoke()
         do { try writer.close() } catch { closeFailures.append("stdin: \(error)") }
         do { try lifetime.abandon() } catch { closeFailures.append("output: \(error)") }
     }

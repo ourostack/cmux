@@ -70,6 +70,7 @@ class ManagedCopilotTurnLedgerTests(unittest.TestCase):
             flags + ["-parse-as-library", "-I", str(cls.build), "-L", str(cls.build), "-lCmuxControlSocket",
                      "-Xlinker", "-rpath", "-Xlinker", str(cls.build),
                      str(ROOT / "Sources/Panels/CopilotManagedEventMetadata.swift"),
+                     str(ROOT / "Sources/Panels/AgentSessionManagedCommand.swift"),
                      str(ROOT / "Sources/Panels/CopilotManagedTurnLedger.swift"),
                      str(ROOT / "scripts/tests/fixtures/managed_copilot_turn_ledger_main.swift"),
                      "-o", str(cls.build / "ledger")],

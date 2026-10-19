@@ -7,10 +7,15 @@ import Foundation
 enum ManagedCopilotStartupFixture {
     static func run(_ scenario: String) async throws -> [String: Any] {
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
+        let callbackFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-copilot-callback-\(UUID().uuidString)")
+        if scenario.hasPrefix("owner-tool-") {
+            try Data("before\n".utf8).write(to: callbackFile)
+        }
         let nonce = UUID()
         let process = try AgentSessionOwnedProcessLauncher(supervisorExecutableURL: executable).prepareManaged(
             nonce: nonce, executableURL: executable, arguments: ["--fixture-copilot-peer", scenario],
-            workingDirectory: "/tmp", environment: [:]
+            workingDirectory: "/tmp", environment: ["CMUX_FIXTURE_CALLBACK_FILE": callbackFile.path]
         )
         let input = Pipe(), output = Pipe(), error = Pipe()
         process.standardInput = input
@@ -25,8 +30,15 @@ enum ManagedCopilotStartupFixture {
             profileSHA256: String(repeating: "b", count: 64), workingDirectory: "/tmp",
             stdout: output.fileHandleForReading, stderr: error.fileHandleForReading
         )
+        let authority = scenario.hasPrefix("owner-tool-") && scenario != "owner-tool-no-native-authority"
+            ? AgentSessionManagedCommandService.NativeCodingAuthority(
+                explicitNativeCodingOptInFor: lifetime, projectMandate: UUID(), workingDirectory: "/tmp",
+                launcher: AgentSessionOwnedProcessLauncher(supervisorExecutableURL: executable),
+                environment: ["PATH": "/usr/bin:/bin"]
+            ) : nil
         let adapter = try CopilotManagedSession(
-            lifetime: lifetime, takingOwnershipOf: input.fileHandleForWriting, workingDirectory: "/tmp"
+            lifetime: lifetime, takingOwnershipOf: input.fileHandleForWriting, workingDirectory: "/tmp",
+            codingAuthority: authority
         )
         try process.run()
         defer {
@@ -85,8 +97,9 @@ enum ManagedCopilotStartupFixture {
             if scenario != "owner-stale-launch" && scenario != "owner-whitespace" {
                 secondAccepted = adapter.submitOwnerInput(UUID(), prompt: "must not queue", launchID: lifetime.launchID)
             }
-            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(scenario.hasPrefix("owner-tool-") ? 8 : 2))
             while adapter.phase != .held && !adapter.hasCompleteWorkEvidence && ContinuousClock.now < deadline {
+                if scenario == "owner-tool-revoked", adapter.phase == .executingCallback { authority?.revoke() }
                 try await Task.sleep(for: .milliseconds(5))
             }
             if ["owner-next-input", "owner-reused-host", "owner-reused-provider", "owner-late-prior-root"]
@@ -102,6 +115,8 @@ enum ManagedCopilotStartupFixture {
                 }
             }
         }
+        if adapter.phase == .held { await adapter.waitForCommandSettlement() }
+        let executionFile = URL(fileURLWithPath: callbackFile.path + ".executions")
         return [
             "phase": adapter.phase.rawValue, "reason": adapter.holdReason ?? "",
             "nativePhase": ManagedSessionLifetimeFixture.phase(lifetime),
@@ -114,6 +129,12 @@ enum ManagedCopilotStartupFixture {
             "ackMatchesHost": adapter.inputState?.inputID(matchingProviderInputID: "server-input-one") == hostInputID,
             "nextAccepted": nextAccepted,
             "nextAckMatchesHost": adapter.inputState?.inputID(matchingProviderInputID: "server-input-two") == nextHostInputID,
+            "callbackFile": scenario.hasPrefix("owner-tool-")
+                ? String(decoding: try Data(contentsOf: callbackFile), as: UTF8.self) : "",
+            "callbackExecutions": FileManager.default.fileExists(atPath: executionFile.path)
+                ? String(decoding: try Data(contentsOf: executionFile), as: UTF8.self) : "",
+            "nativeOutstanding": authority?.outstandingWorkCount ?? 0,
+            "outstandingActivities": adapter.inputState?.outstandingActivityCount ?? 0,
         ]
     }
 
@@ -127,6 +148,8 @@ enum ManagedCopilotStartupFixture {
         var initializedTools = false
         var readbackStep = 0
         var configurationEventID: String?
+        var callbackStep = 0
+        var nativeToolAdvertised = false
         while true {
             let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
             if count == 0 { return }
@@ -190,7 +213,30 @@ enum ManagedCopilotStartupFixture {
                         "version": scenario == "wrong-version" ? "1.0.97" : "1.0.98",
                     ]
                 case "session.create":
-                    if scenario == "strict-profile" {
+                    if scenario.hasPrefix("owner-tool-") {
+                        let tools = params["tools"] as? [[String: Any]] ?? []
+                        nativeToolAdvertised = tools.count == 1
+                            && tools.first?["name"] as? String == "cmux_run_foreground"
+                        if !tools.isEmpty {
+                            let expected: [String: Any] = [
+                                "name": "cmux_run_foreground",
+                                "description": "Run one foreground command with the native project authority. No terminal, background work, stdin, directory, environment or timeout overrides.",
+                                "parameters": [
+                                    "type": "object", "properties": [
+                                        "program": ["type": "string"], "arguments": ["type": "array", "items": ["type": "string"]],
+                                    ],
+                                    "required": ["program", "arguments"], "additionalProperties": false,
+                                ],
+                                "isTerminal": false, "overridesBuiltInTool": false, "skipPermission": true,
+                            ]
+                            guard tools.count == 1,
+                                  try JSONSerialization.data(withJSONObject: tools[0], options: [.sortedKeys])
+                                    == JSONSerialization.data(withJSONObject: expected, options: [.sortedKeys]) else {
+                                throw POSIXError(.EPROTO)
+                            }
+                        }
+                    }
+                    if scenario == "strict-profile" || scenario.hasPrefix("owner-tool-") {
                         let disabled = [
                             "enableSessionTelemetry", "enableOnDemandInstructionDiscovery",
                             "enableHostGitOperations", "enableSessionStore", "enableGitHubCacheStore",
@@ -219,7 +265,9 @@ enum ManagedCopilotStartupFixture {
                           params["enableConfigDiscovery"] as? Bool == false,
                           params["enableSkills"] as? Bool == false,
                           params["enableFileHooks"] as? Bool == false,
-                          params["availableTools"] as? [String] == [],
+                          (params["availableTools"] as? [String] == []
+                           || (scenario.hasPrefix("owner-tool-")
+                               && params["availableTools"] as? [String] == ["custom:cmux_run_foreground"])),
                           params["mcpServers"] as? [String: String] == [:],
                           params["customAgents"] as? [String] == [],
                           params["requestPermission"] as? Bool == true,
@@ -273,10 +321,13 @@ enum ManagedCopilotStartupFixture {
                     }
                     result = ["sessionId": scenario == "wrong-session" ? "foreign" : sid]
                 case "session.options.update":
-                    if scenario == "strict-profile" {
+                    if scenario == "strict-profile" || scenario.hasPrefix("owner-tool-") {
                         guard params["includedBuiltinAgents"] as? [String] == [],
                               params["sessionCapabilities"] as? [String] == [],
-                              params["continueOnAutoMode"] as? Bool == false else {
+                              params["continueOnAutoMode"] as? Bool == false,
+                              params["availableTools"] as? [String] == (nativeToolAdvertised ? ["custom:cmux_run_foreground"] : []),
+                              params["excludedTools"] as? [String] == [],
+                              params["toolFilterPrecedence"] as? String == "excluded" else {
                             throw POSIXError(.EPROTO)
                         }
                     }
@@ -322,8 +373,25 @@ enum ManagedCopilotStartupFixture {
                     }
                     result = [:]
                 case "session.tools.getCurrentMetadata":
-                    result = ["tools": scenario == "null-tools" ? NSNull()
-                              : scenario == "unaccounted-tool" ? [["name": "unexpected"]] : []]
+                    if nativeToolAdvertised {
+                        var metadata: [String: Any] = [
+                            "name": "cmux_run_foreground",
+                            "description": "Run one foreground command with the native project authority. No terminal, background work, stdin, directory, environment or timeout overrides.",
+                            "input_schema": [
+                                "type": "object", "properties": [
+                                    "program": ["type": "string"], "arguments": ["type": "array", "items": ["type": "string"]],
+                                ],
+                                "required": ["program", "arguments"], "additionalProperties": false,
+                            ],
+                        ]
+                        if scenario == "owner-tool-metadata-extra" { metadata["namespacedName"] = "custom:cmux_run_foreground" }
+                        if scenario == "owner-tool-metadata-deferred" { metadata["deferLoading"] = true }
+                        if scenario == "owner-tool-metadata-mcp" { metadata["mcpServerName"] = "foreign" }
+                        result = ["tools": [metadata]]
+                    } else {
+                        result = ["tools": scenario == "null-tools" ? NSNull()
+                                  : scenario == "unaccounted-tool" ? [["name": "unexpected"]] : []]
+                    }
                 case "session.send":
                     guard scenario.hasPrefix("owner-"), sentInputs == 0 || (
                             sentInputs == 1 && ["owner-next-input", "owner-reused-provider", "owner-late-prior-root"]
@@ -338,6 +406,14 @@ enum ManagedCopilotStartupFixture {
                           let plannedID else { throw POSIXError(.EPROTO) }
                     sentInputs += 1
                     workStep = 0
+                    if scenario == "owner-tool-before-send-ack" {
+                        try sendTool(sessionID: plannedID, step: callbackStep, scenario: scenario)
+                        usleep(40_000)
+                        guard let file = ProcessInfo.processInfo.environment["CMUX_FIXTURE_CALLBACK_FILE"],
+                              !FileManager.default.fileExists(atPath: file + ".executions") else {
+                            throw POSIXError(.EPROTO)
+                        }
+                    }
                     if scenario == "owner-early-root" { try sendRoot(sessionID: plannedID, scenario: scenario) }
                     var ack: [String: Any] = ["messageId": "server-input-one"]
                     if sentInputs == 2 && scenario != "owner-reused-provider" {
@@ -354,12 +430,94 @@ enum ManagedCopilotStartupFixture {
                     if scenario == "owner-configuration-changed" {
                         try sendConfiguration("configuration-before-start", sessionID: plannedID)
                     }
-                    if scenario != "owner-early-root" && scenario != "owner-ack-only" {
+                    if scenario.hasPrefix("owner-tool-") {
+                        if scenario != "owner-tool-before-send-ack" {
+                            try sendTool(sessionID: plannedID, step: callbackStep, scenario: scenario)
+                        }
+                        if scenario == "owner-tool-unrequested-permission" {
+                            try send(["jsonrpc": "2.0", "id": "server-permission",
+                                      "method": "permission.request", "params": ["sessionId": plannedID]])
+                        }
+                    } else if scenario != "owner-early-root" && scenario != "owner-ack-only" {
                         try sendRoot(
                             sessionID: plannedID, scenario: scenario,
                             input: scenario == "owner-late-prior-root" ? 1 : sentInputs,
                             replayEventID: scenario == "owner-configuration-replay" ? configurationEventID : nil
                         )
+                    }
+                    continue
+                case "session.tools.handlePendingToolCall":
+                    guard scenario.hasPrefix("owner-tool-"), callbackStep < 3,
+                          Set(params.keys) == ["sessionId", "requestId", "result"],
+                          params["sessionId"] as? String == plannedID,
+                          params["requestId"] as? String == "request-\(callbackStep)",
+                          let toolResult = params["result"] as? [String: Any],
+                          Set(toolResult.keys) == ["textResultForLlm", "resultType"],
+                          toolResult["resultType"] as? String == (scenario == "owner-tool-known-failure" ? "failure" : "success"),
+                          let text = toolResult["textResultForLlm"] as? String,
+                          let encoded = text.data(using: .utf8),
+                          let report = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
+                          report["status"] as? Int == (scenario == "owner-tool-known-failure" ? 7 : 0),
+                          report["stdout"] as? String == (scenario == "owner-tool-invalid-utf8" ? "\u{fffd}"
+                              : scenario == "owner-tool-large-result"
+                              ? String(repeating: "\u{1}", count: 16 * 1024) : callbackStep == 0 ? "before\n"
+                              : callbackStep == 1 ? "" : "validated\n"),
+                          report["stderr"] as? String == (scenario == "owner-tool-large-result"
+                              ? String(repeating: "\u{2}", count: 16 * 1024)
+                              : scenario == "owner-tool-known-failure" ? "known failure\n" : ""),
+                          report["stdoutTruncated"] as? Bool == (scenario == "owner-tool-large-result"),
+                          report["stderrTruncated"] as? Bool == (scenario == "owner-tool-large-result"),
+                          report["decoding"] as? String == "utf8-replacement",
+                          report["stdoutBytes"] as? Int == (scenario == "owner-tool-invalid-utf8" ? 1
+                              : scenario == "owner-tool-large-result" ? 20_000
+                              : callbackStep == 0 ? 7 : callbackStep == 1 ? 0 : 10),
+                          report["stderrBytes"] as? Int == (scenario == "owner-tool-large-result" ? 20_000
+                              : scenario == "owner-tool-known-failure" ? 14 : 0) else {
+                        throw POSIXError(.EPROTO)
+                    }
+                    if scenario == "owner-tool-idle-before-ack" {
+                        try sendEvent(sessionID: plannedID!, type: "session.idle", data: [:])
+                    }
+                    if scenario == "owner-tool-root-before-ack" {
+                        try sendRoot(sessionID: plannedID!, scenario: scenario)
+                    }
+                    if scenario == "owner-tool-ui-before-ack" {
+                        try sendEvent(sessionID: plannedID!, type: "external_tool.completed",
+                                      data: ["requestId": "request-\(callbackStep)"])
+                    }
+                    if scenario == "owner-tool-missing-ack" { continue }
+                    var acknowledgement: [String: Any] = ["success": true]
+                    if scenario == "owner-tool-refused-ack" { acknowledgement["success"] = false }
+                    if scenario == "owner-tool-numeric-ack" { acknowledgement["success"] = 1 }
+                    if scenario == "owner-tool-extra-ack" { acknowledgement["unexpected"] = true }
+                    if scenario == "owner-tool-empty-ack" { acknowledgement = [:] }
+                    try send([
+                        "jsonrpc": "2.0", "id": scenario == "owner-tool-foreign-ack" ? "foreign" : id,
+                        "result": acknowledgement,
+                    ])
+                    if scenario == "owner-tool-telemetry" {
+                        try sendEvent(sessionID: plannedID!, type: "tool.execution_complete", data: [
+                            "toolCallId": "call-\(callbackStep)", "success": true, "result": ["content": text],
+                            "turnId": "tool-turn-\(callbackStep)",
+                        ])
+                    }
+                    if scenario == "owner-tool-duplicate-ack" {
+                        try send(["jsonrpc": "2.0", "id": id, "result": acknowledgement])
+                    }
+                    if scenario != "owner-tool-ui-before-ack" {
+                        try sendEvent(sessionID: plannedID!, type: "external_tool.completed",
+                                      data: ["requestId": "request-\(callbackStep)"])
+                    }
+                    try sendEvent(sessionID: plannedID!, type: "assistant.turn_end",
+                                  data: ["turnId": "tool-turn-\(callbackStep)"])
+                    callbackStep += 1
+                    if ["owner-tool-known-failure", "owner-tool-large-result", "owner-tool-invalid-utf8"].contains(scenario) {
+                        callbackStep = 3
+                    }
+                    if callbackStep < 3 {
+                        try sendTool(sessionID: plannedID!, step: callbackStep, scenario: scenario)
+                    } else {
+                        try sendRoot(sessionID: plannedID!, scenario: scenario)
                     }
                     continue
                 case "session.tasks.refresh", "session.tasks.list", "session.schedule.list",
@@ -395,6 +553,96 @@ enum ManagedCopilotStartupFixture {
                     try sendConfiguration("configuration-before-start", sessionID: plannedID!)
                 }
             }
+        }
+    }
+
+    static func sendTool(sessionID: String, step: Int, scenario: String) throws {
+        guard let path = ProcessInfo.processInfo.environment["CMUX_FIXTURE_CALLBACK_FILE"] else {
+            throw POSIXError(.EINVAL)
+        }
+        var scripts = [
+            (scenario == "owner-tool-revoked" ? "sleep 1; " : "") + "printf 'read\\n' >> \"$1.executions\"; cat \"$1\"",
+            "printf 'edit\\n' >> \"$1.executions\"; printf 'after\\n' > \"$1\"",
+            "printf 'validate\\n' >> \"$1.executions\"; test \"$(cat \"$1\")\" = after && printf 'validated\\n'",
+        ]
+        if scenario == "owner-tool-known-failure" {
+            scripts[0] += "; printf 'known failure\\n' >&2; exit 7"
+        }
+        if scenario == "owner-tool-large-result" {
+            scripts[0] = "printf 'read\\n' >> \"$1.executions\"; i=0; while [ $i -lt 20000 ]; do printf '\\001'; printf '\\002' >&2; i=$((i+1)); done"
+        }
+        if scenario == "owner-tool-invalid-utf8" {
+            scripts[0] = "printf 'read\\n' >> \"$1.executions\"; printf '\\377'"
+        }
+        var arguments: [String: Any] = [
+            "program": "/bin/sh", "arguments": ["-c", scripts[step], "controlled-callback", path],
+        ]
+        if scenario == "owner-tool-invalid-arguments" { arguments["directory"] = "/tmp" }
+        var rootRequest: [String: Any] = [
+            "toolCallId": "call-\(step)", "name": "cmux_run_foreground", "arguments": arguments,
+        ]
+        if scenario == "owner-tool-hosted-caller" { rootRequest["caller"] = ["type": "code", "callerId": "hosted"] }
+        if scenario == "owner-tool-mcp-root" { rootRequest["mcpServerName"] = "foreign" }
+        if scenario == "owner-tool-nonfunction" { rootRequest["type"] = "custom" }
+        var requested: [String: Any] = [
+            "requestId": "request-\(step)", "sessionId": sessionID, "toolCallId": "call-\(step)",
+            "toolName": "cmux_run_foreground", "arguments": arguments, "workingDirectory": "/tmp",
+        ]
+        if scenario == "owner-tool-foreign-session" { requested["sessionId"] = "foreign" }
+        if scenario == "owner-tool-foreign-call" { requested["toolCallId"] = "foreign" }
+        if scenario == "owner-tool-foreign-name" { requested["toolName"] = "shell" }
+        if scenario == "owner-tool-foreign-provider" { requested["providerId"] = "foreign" }
+        if scenario == "owner-tool-foreign-cwd" { requested["workingDirectory"] = "/" }
+        if scenario == "owner-tool-parented" { requested["parentToolCallId"] = "foreign" }
+        if scenario == "owner-tool-argument-mismatch" {
+            requested["arguments"] = ["program": "/bin/echo", "arguments": ["foreign"]]
+        }
+        if scenario == "owner-tool-replayed-call", step > 0 {
+            rootRequest["toolCallId"] = "call-0"
+            requested["toolCallId"] = "call-0"
+        }
+        if scenario == "owner-tool-replayed-request", step > 0 { requested["requestId"] = "request-0" }
+        if scenario == "owner-tool-external-before-root" {
+            try sendEvent(sessionID: sessionID, type: "external_tool.requested", data: requested)
+            usleep(40_000)
+            guard step != 0 || !FileManager.default.fileExists(atPath: path + ".executions") else {
+                throw POSIXError(.EPROTO)
+            }
+        }
+        try sendEvent(sessionID: sessionID, type: "assistant.turn_start", data: ["turnId": "tool-turn-\(step)"])
+        try sendEvent(sessionID: sessionID, type: "assistant.message", data: [
+            "turnId": "tool-turn-\(step)",
+            "originatingMessageId": scenario == "owner-tool-foreign-root" ? "foreign" : "server-input-one",
+            "messageId": "tool-message-\(step)", "content": "",
+            "toolRequests": [rootRequest],
+        ])
+        if ["owner-tool-telemetry", "owner-tool-foreign-telemetry", "owner-tool-early-complete-telemetry"]
+            .contains(scenario) {
+            try sendEvent(sessionID: sessionID, type: "tool.execution_start", data: [
+                "toolCallId": "call-\(step)", "toolName": "cmux_run_foreground",
+                "arguments": arguments, "turnId": "tool-turn-\(step)",
+            ])
+            try sendEvent(sessionID: sessionID, type: "tool.execution_progress", data: [
+                "toolCallId": scenario == "owner-tool-foreign-telemetry" ? "foreign" : "call-\(step)",
+                "progressMessage": "Running",
+            ])
+            if scenario == "owner-tool-early-complete-telemetry" {
+                try sendEvent(sessionID: sessionID, type: "tool.execution_complete", data: [
+                    "toolCallId": "call-\(step)", "success": true,
+                ])
+            }
+        }
+        if scenario != "owner-tool-external-before-root" {
+            try sendEvent(sessionID: sessionID, type: "external_tool.requested", data: requested)
+        }
+        if scenario == "owner-tool-overlap" {
+            var overlap = requested
+            overlap["requestId"] = "overlap"
+            overlap["toolCallId"] = "overlap"
+            try sendEvent(sessionID: sessionID, type: "external_tool.requested", data: overlap)
+        }
+        if scenario == "owner-tool-ui-before-result" {
+            try sendEvent(sessionID: sessionID, type: "external_tool.completed", data: ["requestId": "request-\(step)"])
         }
     }
 
@@ -446,7 +694,7 @@ enum ManagedCopilotStartupFixture {
         ]
         if [
             "session.idle", "assistant.idle", "assistant.intent", "assistant.message_start",
-            "assistant.message_delta", "assistant.reasoning_delta",
+            "assistant.message_delta", "assistant.reasoning_delta", "tool.execution_progress",
         ].contains(type) { event["ephemeral"] = true }
         if type == "assistant.turn_start" {
             switch metadataScenario {

@@ -40,13 +40,64 @@ final class CopilotManagedTurnLedger {
     private var completedRoot: Root?
     private var eventRevision = UUID()
     private var inspection: Inspection?
+    struct Callback {
+        let callID: String
+        let command: AgentSessionManagedCommand
+        var requestID: String?
+        var rootMatched = false
+        var turnID: String?
+        var dispatched = false
+        var responseRegistered = false
+        var acknowledged = false
+        var dismissed = false
+        var telemetryStarted = false
+        var telemetryCompleted = false
+    }
+    private var callbacks: [String: Callback] = [:]
+    private var retainedCallIDs: Set<String> = []
+    private var retainedRequestIDs: Set<String> = []
+    private var callbackCount = 0
+    private let allowsForegroundCommands: Bool
+    private let workingDirectory: String
+
+    var nextCallback: Callback? {
+        guard failureReason == nil, providerInputID != nil else { return nil }
+        return callbacks.values.first { $0.rootMatched && $0.requestID != nil && !$0.dispatched }
+    }
+
+    func dispatchCallback(_ callID: String) -> Bool {
+        guard failureReason == nil, var current = callbacks[callID], current.rootMatched,
+              current.requestID != nil, !current.dispatched else { return fail("callbackMismatch") }
+        current.dispatched = true
+        callbacks[callID] = current
+        return true
+    }
+
+    func registerCallbackResponse(_ callID: String) -> Bool {
+        guard failureReason == nil, var current = callbacks[callID], current.dispatched,
+              !current.responseRegistered else { return fail("callbackMismatch") }
+        current.responseRegistered = true
+        callbacks[callID] = current
+        return true
+    }
+
+    func acknowledgeCallback(_ callID: String) -> Bool {
+        guard failureReason == nil, var current = callbacks[callID], current.responseRegistered,
+              !current.acknowledged, let requestID = current.requestID,
+              state.finishActivity("callback:\(requestID)") else { return fail("callbackMismatch") }
+        current.acknowledged = true
+        callbacks[callID] = current
+        return true
+    }
 
     var hasCompleteWorkEvidence: Bool {
         failureReason == nil && inspection == nil && completedRoot != nil && state.hasCompleteWorkEvidence
     }
 
-    init(identity: ShepherdManagedSessionIdentity) {
+    init(identity: ShepherdManagedSessionIdentity, allowsForegroundCommands: Bool = false, workingDirectory: String = "") {
         state = ShepherdManagedSessionState(identity: identity)
+        self.allowsForegroundCommands = allowsForegroundCommands
+        self.workingDirectory = workingDirectory
     }
 
     func beginInput(_ input: UUID, origin: ShepherdManagedInputOrigin) -> Bool {
@@ -60,6 +111,8 @@ final class CopilotManagedTurnLedger {
         reasoningStreams.removeAll()
         candidate = nil
         completedRoot = nil
+        callbacks.removeAll()
+        callbackCount = 0
         return true
     }
 
@@ -110,6 +163,9 @@ final class CopilotManagedTurnLedger {
         state.observeProviderActivity()
         inspection = nil
         completedRoot = nil
+        if event["type"] as? String == "external_tool.requested" {
+            guard observeCallback(event) else { return }
+        }
         if providerInputID == nil {
             guard earlyEvents.count < 64, earlyEventBytes + bytes.count <= 1_048_576 else {
                 fail("earlyEventOverflow")
@@ -261,9 +317,28 @@ final class CopilotManagedTurnLedger {
                 return
             }
             if let requests = data["toolRequests"] {
-                guard let list = requests as? [Any], list.isEmpty else {
+                guard let list = requests as? [[String: Any]] else {
                     fail("unsupportedCallback")
                     return
+                }
+                if !list.isEmpty {
+                    guard allowsForegroundCommands, list.count == 1, let request = list.first,
+                          Set(request.keys).isSubset(of: [
+                            "toolCallId", "name", "arguments", "type", "intentionSummary", "toolTitle",
+                          ]),
+                          request["type"] == nil || request["type"] as? String == "function",
+                          request["toolTitle"] == nil || request["toolTitle"] is String,
+                          request["intentionSummary"] == nil || request["intentionSummary"] is NSNull
+                            || request["intentionSummary"] is String,
+                          request["name"] as? String == "cmux_run_foreground",
+                          let callID = identifier(request["toolCallId"]),
+                          let command = AgentSessionManagedCommand(toolArguments: request["arguments"]),
+                          matchCallback(callID, command: command, fromRoot: true) else {
+                        fail("unsupportedCallback")
+                        return
+                    }
+                    callbacks[callID]?.turnID = turn
+                    candidate = nil
                 }
             }
             guard !closedMessageIDs.contains(message) else {
@@ -276,7 +351,13 @@ final class CopilotManagedTurnLedger {
             }
             messageStreams.removeValue(forKey: message)
             closedMessageIDs.insert(message)
-            candidate = Root(input: owner, providerInputID: originatingID, turnID: turn)
+            if (data["toolRequests"] as? [Any] ?? []).isEmpty {
+                guard callbacks.values.allSatisfy(\.acknowledged) else {
+                    fail("callbackStillActive")
+                    return
+                }
+                candidate = Root(input: owner, providerInputID: originatingID, turnID: turn)
+            }
         case "assistant.turn_end":
             guard let turn = identifier(data["turnId"]), let activity = turns.removeValue(forKey: turn),
                   state.finishActivity(activity) else {
@@ -285,6 +366,10 @@ final class CopilotManagedTurnLedger {
             }
             if candidate?.turnID == turn { candidate?.ended = true }
         case "session.idle":
+            guard callbacks.values.allSatisfy(\.acknowledged) else {
+                fail("callbackStillActive")
+                return
+            }
             guard data["mode"] == nil || data["mode"] as? String == "interactive",
                   data["aborted"] == nil || CopilotManagedEventMetadata.boolean(data["aborted"]) == false else {
                 fail("rootNotSuccessful")
@@ -310,9 +395,134 @@ final class CopilotManagedTurnLedger {
                 fail("invalidEvent")
                 return
             }
+        case "external_tool.requested":
+            break
+        case "external_tool.completed":
+            guard Set(data.keys) == ["requestId"],
+                  event["ephemeral"] == nil || CopilotManagedEventMetadata.boolean(event["ephemeral"]) == true,
+                  let requestID = identifier(data["requestId"]),
+                  let callID = callbacks.first(where: { $0.value.requestID == requestID })?.key,
+                  var current = callbacks[callID], current.responseRegistered, !current.dismissed else {
+                fail("callbackMismatch")
+                return
+            }
+            current.dismissed = true
+            callbacks[callID] = current
+        case "tool.execution_start", "tool.execution_progress", "tool.execution_complete":
+            receiveToolTelemetry(kind, event: event, data: data)
         default:
             fail("unsupportedEvent")
         }
+    }
+
+    private func receiveToolTelemetry(_ kind: String, event: [String: Any], data: [String: Any]) {
+        guard let callID = identifier(data["toolCallId"]), var current = callbacks[callID],
+              current.rootMatched,
+              data["turnId"] == nil || data["turnId"] as? String == current.turnID else {
+            fail("callbackMismatch")
+            return
+        }
+        switch kind {
+        case "tool.execution_start":
+            guard !current.telemetryStarted, !current.responseRegistered,
+                  Set(data.keys).isSubset(of: [
+                    "toolCallId", "toolName", "arguments", "turnId", "model", "rte", "toolTitle", "displayVerbatim",
+                  ]),
+                  data["toolName"] as? String == "cmux_run_foreground",
+                  AgentSessionManagedCommand(toolArguments: data["arguments"]) == current.command,
+                  ["model", "toolTitle"].allSatisfy({ data[$0] == nil || data[$0] is String }),
+                  ["rte", "displayVerbatim"].allSatisfy({
+                    data[$0] == nil || CopilotManagedEventMetadata.boolean(data[$0]) != nil
+                  }) else {
+                fail("unsupportedToolTelemetry")
+                return
+            }
+            current.telemetryStarted = true
+        case "tool.execution_progress":
+            guard current.telemetryStarted, !current.telemetryCompleted,
+                  Set(data.keys) == ["toolCallId", "progressMessage"], data["progressMessage"] is String,
+                  CopilotManagedEventMetadata.boolean(event["ephemeral"]) == true else {
+                fail("unsupportedToolTelemetry")
+                return
+            }
+        case "tool.execution_complete":
+            guard current.telemetryStarted, current.responseRegistered, !current.telemetryCompleted,
+                  Set(data.keys).isSubset(of: [
+                    "toolCallId", "success", "result", "error", "turnId", "model", "rte", "interactionId",
+                    "isUserRequested", "sandboxed",
+                  ]),
+                  CopilotManagedEventMetadata.boolean(data["success"]) != nil,
+                  ["model", "interactionId"].allSatisfy({ data[$0] == nil || data[$0] is String }),
+                  ["rte", "isUserRequested", "sandboxed"].allSatisfy({
+                    data[$0] == nil || CopilotManagedEventMetadata.boolean(data[$0]) != nil
+                  }) else {
+                fail("unsupportedToolTelemetry")
+                return
+            }
+            if let result = data["result"] {
+                guard let result = result as? [String: Any],
+                      Set(result.keys).isSubset(of: ["content", "detailedContent"]), result["content"] is String,
+                      result["detailedContent"] == nil || result["detailedContent"] is String else {
+                    fail("unsupportedToolTelemetry")
+                    return
+                }
+            }
+            if let error = data["error"] {
+                guard let error = error as? [String: Any], Set(error.keys).isSubset(of: ["message", "code"]),
+                      error["message"] is String, error["code"] == nil || error["code"] is String else {
+                    fail("unsupportedToolTelemetry")
+                    return
+                }
+            }
+            current.telemetryCompleted = true
+        default:
+            fail("unsupportedToolTelemetry")
+            return
+        }
+        // Provider telemetry never releases native callback activity or proves command completion.
+        callbacks[callID] = current
+    }
+
+    private func matchCallback(_ callID: String, command: AgentSessionManagedCommand, fromRoot: Bool) -> Bool {
+        if var current = callbacks[callID] {
+            guard current.command == command, !current.acknowledged,
+                  !fromRoot || !current.rootMatched else { return fail("callbackMismatch") }
+            if fromRoot { current.rootMatched = true }
+            callbacks[callID] = current
+            return true
+        }
+        guard callbackCount < 8, retainedCallIDs.count < 4096, !retainedCallIDs.contains(callID),
+              callbacks.values.allSatisfy(\.acknowledged) else { return fail("callbackConflict") }
+        retainedCallIDs.insert(callID)
+        callbackCount += 1
+        callbacks[callID] = Callback(callID: callID, command: command, rootMatched: fromRoot)
+        return true
+    }
+
+    private func observeCallback(_ event: [String: Any]) -> Bool {
+        guard allowsForegroundCommands, event["agentId"] == nil,
+              let data = event["data"] as? [String: Any],
+              Set(data.keys).isSubset(of: [
+                "arguments", "providerId", "requestId", "sessionId", "toolCallId", "toolName",
+                "traceparent", "tracestate", "workingDirectory",
+              ]),
+              data["sessionId"] as? String == state.identity.providerSessionID,
+              data["toolName"] as? String == "cmux_run_foreground",
+              data["providerId"] == nil || data["providerId"] is NSNull,
+              ["traceparent", "tracestate"].allSatisfy({ data[$0] == nil || data[$0] is String }),
+              data["workingDirectory"] == nil || data["workingDirectory"] as? String == workingDirectory,
+              let callID = identifier(data["toolCallId"]), let requestID = identifier(data["requestId"]),
+              let command = AgentSessionManagedCommand(toolArguments: data["arguments"]),
+              !retainedRequestIDs.contains(requestID), retainedRequestIDs.count < 4096,
+              matchCallback(callID, command: command, fromRoot: false),
+              var current = callbacks[callID], current.requestID == nil,
+              state.beginActivity("callback:\(requestID)", kind: .callback) else {
+            return fail("unsupportedCallback")
+        }
+        retainedRequestIDs.insert(requestID)
+        current.requestID = requestID
+        callbacks[callID] = current
+        return true
     }
 
     private func identifier(_ value: Any?) -> String? {

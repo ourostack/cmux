@@ -7,18 +7,67 @@ import Foundation
 /// Keep one per owner generation: known completions permit reuse; held work never does.
 @MainActor
 final class AgentSessionManagedCommandService {
-    struct Command {
-        let executableURL: URL
-        let arguments: [String]
+    typealias Command = AgentSessionManagedCommand
 
-        init?(program: String, arguments: [String]) {
-            guard program.hasPrefix("/"), program.utf8.count <= 4096, !program.utf8.contains(0),
-                  arguments.count <= 256, !arguments.contains(where: { $0.utf8.contains(0) }),
-                  arguments.reduce(program.utf8.count, { $0 + $1.utf8.count + 1 }) <= 65_536 else {
-                return nil
+    /// Native-only, revocable opt-in. It deliberately grants OS-account command authority,
+    /// not a filesystem sandbox or a semantic program/argument allowlist.
+    @MainActor final class NativeCodingAuthority {
+        enum Descriptor {
+            case generalPurposeForegroundOSAccount
+        }
+
+        let descriptor: Descriptor = .generalPurposeForegroundOSAccount
+        let projectMandate: UUID
+        let launchID: UUID
+        let workingDirectory: String
+        private let lifetime: AgentSessionManagedSession
+        private let host: AgentPIDProcessIdentity
+        private let launcher: AgentSessionOwnedProcessLauncher
+        private let environment: [String: String]
+        private var revoked = false
+        private var keptService: AgentSessionManagedCommandService?
+
+        init?(
+            explicitNativeCodingOptInFor lifetime: AgentSessionManagedSession,
+            projectMandate: UUID, workingDirectory: String,
+            launcher: AgentSessionOwnedProcessLauncher, environment: [String: String]
+        ) {
+            guard lifetime.ownsWorkingDirectory(workingDirectory),
+                  let host = AgentPIDProcessIdentity(pid: getpid()) else { return nil }
+            self.lifetime = lifetime
+            self.projectMandate = projectMandate
+            self.launchID = lifetime.launchID
+            self.workingDirectory = workingDirectory
+            self.host = host
+            self.launcher = launcher
+            self.environment = environment
+        }
+
+        func revoke() { revoked = true }
+
+        func isLive(for lifetime: AgentSessionManagedSession, workingDirectory: String) -> Bool {
+            !revoked && self.lifetime === lifetime && self.workingDirectory == workingDirectory
+                && AgentPIDProcessIdentity(pid: getpid()) == host
+                && lifetime.transportIsLive(launchID: launchID) && lifetime.identity != nil
+        }
+
+        var outstandingWorkCount: Int { keptService?.outstandingWorkCount ?? 0 }
+
+        func execute(_ command: Command, operationID: UUID) async -> Outcome {
+            guard isLive(for: lifetime, workingDirectory: workingDirectory) else {
+                return .held(.ownerUnavailable)
             }
-            executableURL = URL(fileURLWithPath: program)
-            self.arguments = arguments
+            if keptService == nil {
+                keptService = AgentSessionManagedCommandService(
+                    launcher: launcher, workingDirectory: workingDirectory, environment: environment,
+                    validateOwner: { [weak self] in
+                        guard let self else { return false }
+                        return self.isLive(for: self.lifetime, workingDirectory: self.workingDirectory)
+                    }
+                )
+            }
+            guard let keptService else { return .held(.ownerUnavailable) }
+            return await keptService.execute(command, operationID: operationID)
         }
     }
 

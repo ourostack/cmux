@@ -120,6 +120,8 @@ final class AgentSessionManagedSession {
 
     var hasActuallyDrainedStreams: Bool { stdoutEOF && stderrEOF }
 
+    func ownsWorkingDirectory(_ directory: String) -> Bool { directory == workingDirectory }
+
     var identity: ShepherdManagedSessionIdentity? {
         guard phase == .bound, validateBackend() else { return nil }
         return boundIdentity
