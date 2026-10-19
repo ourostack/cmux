@@ -7,6 +7,25 @@ import Foundation
 struct ManagedProcessSupervisorFixture {
     @MainActor static func main() async {
         let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.count == 2, arguments.first == "--fixture-copilot-startup" {
+            do {
+                let result = try await ManagedCopilotStartupFixture.run(arguments[1])
+                try FileHandle.standardOutput.write(contentsOf: JSONSerialization.data(withJSONObject: result))
+                exit(0)
+            } catch {
+                try? FileHandle.standardError.write(contentsOf: Data("\(error)\n".utf8))
+                exit(1)
+            }
+        }
+        if arguments.count == 2, arguments.first == "--fixture-copilot-peer" {
+            do {
+                try ManagedCopilotStartupFixture.peer(arguments[1])
+                exit(0)
+            } catch {
+                try? FileHandle.standardError.write(contentsOf: Data("\(error)\n".utf8))
+                exit(1)
+            }
+        }
         if arguments.first == "--fixture-lifetime", arguments.count == 2 {
             do {
                 let result = try await ManagedSessionLifetimeFixture.run(arguments[1])

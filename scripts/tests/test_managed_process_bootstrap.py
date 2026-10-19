@@ -54,6 +54,7 @@ class ManagedProcessBootstrapTests(unittest.TestCase):
                      str(control / "ShepherdManagedBackendLaunchReceipt.swift"),
                      str(control / "ShepherdManagedBootstrapReader.swift"),
                      str(control / "ShepherdManagedPipeWriter.swift"),
+                     str(control / "ShepherdManagedRPCFramer.swift"),
                      str(control / "ShepherdManagedSessionIdentity.swift"),
                      "-o", str(cls.build / "libCmuxControlSocket.dylib")],
             flags + ["-parse-as-library", "-I", str(cls.build), "-L", str(cls.build),
@@ -63,7 +64,9 @@ class ManagedProcessBootstrapTests(unittest.TestCase):
                      str(ROOT / "CLI/OwnedProcessSupervisor.swift"),
                      str(ROOT / "Sources/Panels/AgentSessionOwnedProcessLauncher.swift"),
                      str(ROOT / "Sources/Panels/AgentSessionManagedSession.swift"),
+                     str(ROOT / "Sources/Panels/CopilotManagedSession.swift"),
                      str(ROOT / "scripts/tests/fixtures/managed_session_lifetime.swift"),
+                     str(ROOT / "scripts/tests/fixtures/managed_copilot_startup.swift"),
                      str(ROOT / "scripts/tests/fixtures/managed_process_supervisor_main.swift"),
                      "-o", str(cls.build / "supervisor")],
         ]
