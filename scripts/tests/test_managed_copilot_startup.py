@@ -91,6 +91,12 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
         self.assertEqual(result["reason"], "responseTimeout")
         self.assertEqual(result["boundSessionID"], "")
 
+    def test_unsuccessful_options_update_invalidates_the_bound_session(self):
+        result = self.startup("options-refused")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "configurationRefused")
+        self.assertEqual(result["boundSessionID"], "")
+
 
 if __name__ == "__main__":
     parser = bootstrap.argparse.ArgumentParser(add_help=False)

@@ -149,6 +149,12 @@ final class AgentSessionManagedSession {
 
     deinit { monitoringTask?.cancel() }
 
+    func transportIsLive(launchID: UUID) -> Bool {
+        guard launchID == self.launchID,
+              phase == .awaitingProvider || phase == .bound else { return false }
+        return validateBackend()
+    }
+
     func attach(supervisor: AgentPIDProcessIdentity) throws {
         guard self.supervisor == nil, phase == .awaitingBootstrap,
               let snapshot = AgentPIDProcessIdentity.processSnapshot(pid: supervisor.pid),

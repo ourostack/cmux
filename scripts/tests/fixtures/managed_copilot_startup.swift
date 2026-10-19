@@ -150,7 +150,7 @@ enum ManagedCopilotStartupFixture {
                           params["includedBuiltinSkills"] as? [String] == [] else {
                         throw POSIXError(.EPROTO)
                     }
-                    result = [:]
+                    result = ["success": scenario != "options-refused", "pluginHookCount": 0]
                 default:
                     throw POSIXError(.EPROTO)
                 }
