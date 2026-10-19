@@ -21,10 +21,19 @@ struct ShepherdRenderEvidence {
         let spans = validated.rowSpans.sorted { ($0.row, $0.column) < ($1.row, $1.column) }
         for span in spans {
             guard let style = styles[span.styleID] else { return }
-            rows[span.row].append(.init(column: span.column, text: span.text, faint: style.faint))
+            let background = style.inverse || style.invisible ? nil : style.background ?? frame.terminalBackground
+            rows[span.row].append(.init(
+                column: span.column, text: span.text, faint: style.faint, bold: style.bold,
+                background: background, cellWidth: span.cellWidth
+            ))
         }
+        let visibleCursor = frame.cursor.flatMap { $0.visible ? $0 : nil }
+        let codexCoordinatesKnown = visibleCursor.map { $0.column >= 2 && $0.column < frame.columns - 1 } == true
+            && !frame.modes.contains { !$0.ansi && $0.code == 5 && $0.on }
         guard let observation = AgentPromptInputState.guardedObservation(
-            screenRows: rows, expectedAgent: agent
+            screenRows: rows, expectedAgent: agent, columns: frame.columns,
+            terminalBackground: frame.terminalBackground,
+            cursorRow: agent == "codex" && !codexCoordinatesKnown ? nil : visibleCursor?.row
         ) else { return }
         if observation.state == .empty {
             guard let cursor = frame.cursor, cursor.visible,

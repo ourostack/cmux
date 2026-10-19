@@ -114,6 +114,77 @@ import Testing
         #expect(value.state == .unknown)
         #expect(value.outsideComposerFingerprint == "")
     }
+
+    @Test func codexComposerChangesPreserveAllOutsideEvidence() throws {
+        let before = ShepherdRenderEvidence(frame: try shepherdCodexRenderFrame(), agent: "codex")
+        let after = ShepherdRenderEvidence(
+            frame: try shepherdCodexRenderFrame(draft: "Continue the work."), agent: "codex"
+        )
+        #expect(before.state == .empty)
+        #expect(after.state == .draft("Continue the work."))
+        #expect(before.outsideComposerFingerprint.count == 64)
+        #expect(before.outsideComposerFingerprint == after.outsideComposerFingerprint)
+    }
+
+    @Test func codexCursorBindingIgnoresHistoricalComposerMarkers() throws {
+        let value = ShepherdRenderEvidence(frame: try shepherdCodexRenderFrame(history: true), agent: "codex")
+        #expect(value.state == .empty)
+        #expect(value.outsideComposerFingerprint.count == 64)
+    }
+
+    @Test func codexWideDraftUsesActualExportedCellWidths() throws {
+        let value = ShepherdRenderEvidence(
+            frame: try shepherdCodexRenderFrame(draft: "\u{1F642}", draftWidth: 2), agent: "codex"
+        )
+        #expect(value.state == .draft("\u{1F642}"))
+        #expect(value.outsideComposerFingerprint.count == 64)
+    }
+
+    @Test(arguments: ["output", "footer", "padding-style", "color", "columns", "mode"])
+    func codexOutsideChangesNeverBorrowTheComposerExclusion(change: String) throws {
+        let original = try shepherdCodexRenderFrame()
+        var changed = original
+        switch change {
+        case "output": changed.rowSpans[0].text = "Different output"
+        case "footer": changed.rowSpans[changed.rowSpans.count - 1].text = "2 background tasks"
+        case "padding-style":
+            changed.styles.append(.init(id: 4, background: "#202020", italic: true))
+            changed.rowSpans[1].styleID = 4
+        case "color": changed.terminalForeground = "#abcdef"
+        case "columns": changed.columns += 1
+        default: changed.modes = [.init(code: 2004, on: true)]
+        }
+        #expect(ShepherdRenderEvidence(frame: original, agent: "codex").outsideComposerFingerprint !=
+                ShepherdRenderEvidence(frame: changed, agent: "codex").outsideComposerFingerprint)
+    }
+
+    @Test(arguments: ["inverse", "invisible", "reverse", "cursor-hidden", "cursor-missing",
+                      "cursor-outside", "cursor-moved", "draft-cursor-prefix", "default-background",
+                      "no-default-background", "background-gap", "bold", "width"])
+    func codexUnsupportedNativeFactsStayUnknown(failure: String) throws {
+        var frame = try shepherdCodexRenderFrame(draft: failure == "draft-cursor-prefix" ? "draft" : "")
+        switch failure {
+        case "inverse": frame.styles[1].inverse = true
+        case "invisible": frame.styles[1].invisible = true
+        case "reverse": frame.modes = [.init(code: 5, on: true)]
+        case "cursor-hidden": frame.cursor?.visible = false
+        case "cursor-missing": frame.cursor = nil
+        case "cursor-outside": frame.cursor?.row = 0
+        case "cursor-moved": frame.cursor?.column = 3
+        case "draft-cursor-prefix": frame.cursor?.column = 1
+        case "default-background":
+            for index in 1..<frame.styles.count { frame.styles[index].background = "#000000" }
+        case "no-default-background": frame.terminalBackground = nil
+        case "background-gap":
+            frame.rowSpans[1].text.removeLast()
+            frame.rowSpans[1].cellWidth = frame.columns - 1
+        case "bold": frame.styles[3].bold = false
+        default: frame.rowSpans[2].cellWidth = 0
+        }
+        let value = ShepherdRenderEvidence(frame: frame, agent: "codex")
+        #expect(value.state == .unknown)
+        #expect(value.outsideComposerFingerprint == "")
+    }
 }
 
 func shepherdRenderFrame(surfaceID: UUID = UUID(), draft: String = "") throws -> MobileTerminalRenderGridFrame {
@@ -129,5 +200,40 @@ func shepherdRenderFrame(surfaceID: UUID = UUID(), draft: String = "") throws ->
             .init(row: 3, column: 0, text: rule),
             .init(row: 4, column: 0, text: "auto mode on"),
         ], anchor: .screen
+    )
+}
+
+/// Source-derived Codex 0.154.0 geometry/styles; not installed-editor qualification.
+func shepherdCodexRenderFrame(
+    draft: String = "", draftWidth: Int? = nil, history: Bool = false
+) throws -> MobileTerminalRenderGridFrame {
+    let columns = 40
+    let width = draftWidth ?? draft.count
+    let shift = history ? 4 : 0
+    var spans: [MobileTerminalRenderGridFrame.RowSpan] = []
+    if history {
+        spans += [
+            .init(row: 0, column: 0, styleID: 1, text: String(repeating: " ", count: columns)),
+            .init(row: 1, column: 0, styleID: 3, text: "\u{203A}", cellWidth: 1),
+            .init(row: 1, column: 1, styleID: 1, text: " prior request" + String(repeating: " ", count: columns - 15)),
+            .init(row: 2, column: 0, styleID: 1, text: String(repeating: " ", count: columns)),
+        ]
+    }
+    spans += [
+        .init(row: shift, column: 0, text: "Completed 12 tests"),
+        .init(row: 2 + shift, column: 0, styleID: 1, text: String(repeating: " ", count: columns)),
+        .init(row: 3 + shift, column: 0, styleID: 3, text: "\u{203A}", cellWidth: 1),
+        .init(row: 3 + shift, column: 1, styleID: 1, text: " " + draft
+              + String(repeating: " ", count: columns - 2 - width), cellWidth: columns - 1),
+        .init(row: 4 + shift, column: 0, styleID: 1, text: String(repeating: " ", count: columns)),
+        .init(row: 6 + shift, column: 0, text: "arbitrary footer text"),
+    ]
+    return try MobileTerminalRenderGridFrame(
+        surfaceID: UUID().uuidString, stateSeq: 0, columns: columns, rows: 8 + shift,
+        cursor: .init(row: 3 + shift, column: 2 + width),
+        styles: [.default, .init(id: 1, background: "#202020"),
+                 .init(id: 2, background: "#202020", faint: true),
+                 .init(id: 3, background: "#202020", bold: true)],
+        rowSpans: spans, terminalForeground: "#ffffff", terminalBackground: "#000000", anchor: .screen
     )
 }

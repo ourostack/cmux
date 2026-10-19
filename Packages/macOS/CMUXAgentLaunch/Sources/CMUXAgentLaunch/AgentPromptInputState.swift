@@ -31,11 +31,22 @@ public struct AgentPromptScreenSpan: Equatable, Sendable {
     public var text: String
     /// Faint (SGR 2) text. Agent TUIs draw placeholders and hints faint.
     public var faint: Bool
+    public var bold: Bool
+    /// Resolved, uninverted RGB background; nil means it is not established.
+    public var background: String?
+    /// Actual grid width, required when a run's display width cannot be inferred.
+    public var cellWidth: Int?
 
-    public init(column: Int, text: String, faint: Bool) {
+    public init(
+        column: Int, text: String, faint: Bool, bold: Bool = false,
+        background: String? = nil, cellWidth: Int? = nil
+    ) {
         self.column = column
         self.text = text
         self.faint = faint
+        self.bold = bold
+        self.background = background
+        self.cellWidth = cellWidth
     }
 }
 
@@ -65,8 +76,14 @@ public struct AgentGuardedPromptObservation: Equatable, Sendable {
 extension AgentPromptInputState {
     /// Returns no exclusion for unsupported, ambiguous or boxed render shapes.
     public static func guardedObservation(
-        screenRows rows: [[AgentPromptScreenSpan]], expectedAgent: String
+        screenRows rows: [[AgentPromptScreenSpan]], expectedAgent: String,
+        columns: Int? = nil, terminalBackground: String? = nil, cursorRow: Int? = nil
     ) -> AgentGuardedPromptObservation? {
+        if expectedAgent == "codex" {
+            return guardedCodexObservation(
+                rows: rows, columns: columns, terminalBackground: terminalBackground, cursorRow: cursorRow
+            )
+        }
         guard expectedAgent == "claude" else { return nil }
         let plainRows = rows.map(plainText)
         let prompts = plainRows.indices.filter { promptPrefix(in: plainRows[$0]) != nil }
@@ -101,6 +118,81 @@ extension AgentPromptInputState {
             state: draft.isEmpty ? .empty : .draft(draft), editableRows: editableRows,
             emptyCursorColumn: emptyCursorColumn
         )
+    }
+
+    private static func guardedCodexObservation(
+        rows: [[AgentPromptScreenSpan]], columns: Int?, terminalBackground: String?, cursorRow: Int?
+    ) -> AgentGuardedPromptObservation? {
+        guard let columns, (4...16_384).contains(columns), let cursorRow,
+              cursorRow > 0, cursorRow < rows.count - 1,
+              let terminalBackground = guardedBackground(terminalBackground),
+              let background = guardedBackground(rows[cursorRow].first?.background),
+              background != terminalBackground,
+              detect(rows: rows) != .dialog else { return nil }
+        let input = rows[cursorRow].sorted { $0.column < $1.column }
+        guard let marker = input.first, marker.column == 0, marker.text == "\u{203A}",
+              marker.bold, !marker.faint, guardedSpanWidth(marker) == 1 else { return nil }
+        // Codex 0.154.0 paints one blank padding row on each side of its textarea.
+        for index in (cursorRow - 1)...(cursorRow + 1) {
+            guard isUniformCodexRow(rows[index], columns: columns, background: background) else { return nil }
+            if index != cursorRow {
+                guard rows[index].allSatisfy({ span in
+                    !span.bold && !span.faint && (span.cellWidth == nil || span.cellWidth == span.text.count)
+                        && span.text.allSatisfy { $0 == " " }
+                }) else { return nil }
+            }
+        }
+        for index in [cursorRow - 2, cursorRow + 2] where rows.indices.contains(index) {
+            guard !isUniformCodexRow(rows[index], columns: columns, background: background) else { return nil }
+        }
+        let text = input.map(\.text).joined()
+        guard text.hasPrefix(codexPromptPrefix), text.last == " " else { return nil }
+        let faint = input.filter(\.faint)
+        let draft: String
+        if faint.isEmpty {
+            draft = String(text.dropFirst(codexPromptPrefix.count)).trimmingCharacters(in: .whitespaces)
+        } else {
+            guard faint.count == 1, faint[0].column == 2,
+                  faint[0].text == "Ask Codex to do anything",
+                  input.dropFirst().filter({ !$0.faint }).allSatisfy({
+                      $0.text.allSatisfy { $0 == " " }
+                  }) else { return nil }
+            draft = ""
+        }
+        return AgentGuardedPromptObservation(
+            state: draft.isEmpty ? .empty : .draft(draft),
+            editableRows: cursorRow..<(cursorRow + 1), emptyCursorColumn: 2
+        )
+    }
+
+    private static func isUniformCodexRow(
+        _ row: [AgentPromptScreenSpan], columns: Int, background: String
+    ) -> Bool {
+        var end = 0
+        for span in row.sorted(by: { $0.column < $1.column }) {
+            guard span.column == end, guardedBackground(span.background) == background,
+                  !span.text.isEmpty, !span.text.unicodeScalars.contains(where: {
+                      CharacterSet.controlCharacters.contains($0) || $0.value == 0x2028 || $0.value == 0x2029
+                  }), let width = guardedSpanWidth(span), width > 0, width <= columns - end else { return false }
+            end += width
+        }
+        return end == columns
+    }
+
+    private static func guardedSpanWidth(_ span: AgentPromptScreenSpan) -> Int? {
+        let knownWidth = span.text.unicodeScalars.allSatisfy {
+            (0x20...0x7E).contains($0.value) || $0.value == 0x203A
+        }
+        if let width = span.cellWidth {
+            return width >= span.text.count && (!knownWidth || width == span.text.count) ? width : nil
+        }
+        return knownWidth ? span.text.count : nil
+    }
+
+    private static func guardedBackground(_ value: String?) -> String? {
+        guard let value, value.count == 7, value.first == "#",
+              value.dropFirst().allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+        return value.lowercased()
     }
 
     private static func isGuardedHorizontalRule(_ row: String) -> Bool {
