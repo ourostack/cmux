@@ -31,8 +31,8 @@ public enum ShepherdManagedHoldReason: Equatable, Sendable {
 /// Work evidence only; this type cannot qualify a profile or admit any input.
 /// Replay IDs survive for a backend generation; exhaustion requires explicit renewal.
 public struct ShepherdManagedSessionState: Sendable {
-    public static let maximumRetainedActivityIDs = 256
-    public static let maximumRetainedInputIDs = 256
+    public static let maximumRetainedActivityIDs = 16_384
+    public static let maximumRetainedInputIDs = 4_096
     public static let maximumObservedWorkIDs = 256
     public let identity: ShepherdManagedSessionIdentity
     public private(set) var currentInputID: UUID?
