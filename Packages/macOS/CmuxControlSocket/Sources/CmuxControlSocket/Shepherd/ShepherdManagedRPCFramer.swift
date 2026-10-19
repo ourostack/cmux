@@ -26,7 +26,7 @@ public struct ShepherdManagedRPCFramer: Sendable {
 
     public mutating func append(_ bytes: Data) throws -> [Data] {
         if let terminalFailure { throw terminalFailure }
-        guard !isClosed && bytes.isEmpty else { throw ShepherdManagedRPCFramingError.closed }
+        guard !isClosed else { throw ShepherdManagedRPCFramingError.closed }
         var frames: [Data] = []
         var index = bytes.startIndex
         while index < bytes.endIndex {
