@@ -3330,6 +3330,8 @@
 		C0F16C000000000000000001 /* ShellStartupMissingBundleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F16C000000000000000002 /* ShellStartupMissingBundleTests.swift */; };
 		A5E0D1000000000000000006 /* ShepherdProcessEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000005 /* ShepherdProcessEvidence.swift */; };
 		A5E0D1000000000000000008 /* ShepherdProcessEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */; };
+		A5E0D100000000000000000A /* ShepherdRenderEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D1000000000000000009 /* ShepherdRenderEvidence.swift */; };
+		A5E0D100000000000000000C /* ShepherdRenderEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0D100000000000000000B /* ShepherdRenderEvidenceTests.swift */; };
 		1521D55DC63D5E5FC4955E31 /* ShortcutAndCommandPaletteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6083A7DAD962E287FC2FFE94 /* ShortcutAndCommandPaletteTests.swift */; };
 		76027A12C93B4538BF22C71E /* ShortcutBareStartRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB7F2E9143904957AAA70726 /* ShortcutBareStartRouting.swift */; };
 		5C0DE0DE0000000000000004 /* ShortcutDiscoveryButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C0DE0DE0000000000000003 /* ShortcutDiscoveryButton.swift */; };
@@ -7891,6 +7893,8 @@
 		C0F16C000000000000000002 /* ShellStartupMissingBundleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellStartupMissingBundleTests.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000005 /* ShepherdProcessEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdProcessEvidence.swift; sourceTree = "<group>"; };
 		A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdProcessEvidenceTests.swift; sourceTree = "<group>"; };
+		A5E0D1000000000000000009 /* ShepherdRenderEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdRenderEvidence.swift; sourceTree = "<group>"; };
+		A5E0D100000000000000000B /* ShepherdRenderEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShepherdRenderEvidenceTests.swift; sourceTree = "<group>"; };
 		6083A7DAD962E287FC2FFE94 /* ShortcutAndCommandPaletteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutAndCommandPaletteTests.swift; sourceTree = "<group>"; };
 		AB7F2E9143904957AAA70726 /* ShortcutBareStartRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/ShortcutBareStartRouting.swift; sourceTree = "<group>"; };
 		5C0DE0DE0000000000000003 /* ShortcutDiscoveryButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutDiscoveryButton.swift; sourceTree = "<group>"; };
@@ -10788,6 +10792,7 @@
 				A13056000000000000000001 /* TerminalController+Capabilities.swift */,
 				A5E0D1000000000000000001 /* TerminalController+Shepherd.swift */,
 				A5E0D1000000000000000005 /* ShepherdProcessEvidence.swift */,
+				A5E0D1000000000000000009 /* ShepherdRenderEvidence.swift */,
 				AE55B7F6000000000000A003 /* TerminalController+SurfaceInputState.swift */,
 				EE30D5000000000000000003 /* WorkspaceRemoteRelayCommandRewriter.swift */,
 				EE30D6000000000000000001 /* WorkspaceRemoteSessionHostAdapter.swift */,
@@ -13930,6 +13935,7 @@
 				32D365F577CF1CC1E652684E /* TerminalClipboardInputSequencerShepherdTests.swift */,
 				A5E0D1000000000000000003 /* TerminalControllerShepherdHostTests.swift */,
 				A5E0D1000000000000000007 /* ShepherdProcessEvidenceTests.swift */,
+				A5E0D100000000000000000B /* ShepherdRenderEvidenceTests.swift */,
 			);
 			path = cmuxTests;
 			sourceTree = "<group>";
@@ -16523,6 +16529,7 @@
 				F0ACC0DE0000000000000007 /* SharedLiveAgentIndexLoader.swift in Sources */,
 				121580061215800612158006 /* SharedLiveAgentIndexRefreshOutcome.swift in Sources */,
 				A5E0D1000000000000000006 /* ShepherdProcessEvidence.swift in Sources */,
+				A5E0D100000000000000000A /* ShepherdRenderEvidence.swift in Sources */,
 				76027A12C93B4538BF22C71E /* ShortcutBareStartRouting.swift in Sources */,
 				5C0DE0DE0000000000000004 /* ShortcutDiscoveryButton.swift in Sources */,
 				125BAEF2FE3B454547B964D1 /* ShortcutHintPill.swift in Sources */,
@@ -18852,6 +18859,7 @@
 				C0F16A000000000000000001 /* ShellStartupMatrixTests.swift in Sources */,
 				C0F16C000000000000000001 /* ShellStartupMissingBundleTests.swift in Sources */,
 				A5E0D1000000000000000008 /* ShepherdProcessEvidenceTests.swift in Sources */,
+				A5E0D100000000000000000C /* ShepherdRenderEvidenceTests.swift in Sources */,
 				1521D55DC63D5E5FC4955E31 /* ShortcutAndCommandPaletteTests.swift in Sources */,
 				6042A0016042A0016042A001 /* ShortcutHintModifierPolicyTests.swift in Sources */,
 				F6001000A1B2C3D4E5F60718 /* ShortcutUnbindingTests.swift in Sources */,

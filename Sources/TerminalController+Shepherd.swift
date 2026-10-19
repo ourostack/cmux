@@ -63,24 +63,27 @@ final class TerminalControllerShepherdHost: ShepherdAdmissionHost {
             return nil
         }
         let initialProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
+        let initialScreen = surface.readText(region: .screen)
+        let render = ShepherdRenderEvidence.capture(surface: surface, surfaceID: surfaceID, agent: initialProcess?.agent)
         let screen = surface.readText(region: .screen)
+        let finalProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
+        let stable = initialScreen == screen && initialProcess == finalProcess
         let composer: ShepherdComposerState
-        switch TerminalController.agentPromptInputState(of: surface) {
+        switch stable ? render.state : .unknown {
         case .unknown: composer = .unknown
         case .empty: composer = .empty
         case .draft(let text): composer = .draft(text)
         case .dialog: composer = .dialog
         }
-        let finalProcess = processEvidence(workspaceID: workspaceID, surfaceID: surfaceID)
         let process = initialProcess == finalProcess ? finalProcess : nil
         return ShepherdAdmissionSnapshot(
             surfaceID: surfaceID, workspaceID: workspaceID,
             processInstance: process?.processInstance,
             surfaceGeneration: surface.runtimeSurfaceGeneration,
-            screenFingerprint: screen.map {
+            screenFingerprint: stable ? screen.map {
                 SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
-            } ?? "",
-            outsideComposerFingerprint: "",
+            } ?? "" : "",
+            outsideComposerFingerprint: stable ? render.outsideComposerFingerprint : "",
             inputRevision: surface.shepherdInputRevision,
             focusRevision: surface.shepherdFocusRevision,
             focused: surface.isShepherdFocused,

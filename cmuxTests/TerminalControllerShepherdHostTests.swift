@@ -162,7 +162,7 @@ struct TerminalControllerShepherdHostTests {
         #expect(value.idle == nil)
         #expect(value.backgroundWork == nil)
         #expect(value.outsideComposerFingerprint.isEmpty)
-        #expect(value.composer == .empty)
+        #expect(value.composer == .unknown)
         #expect(!value.focused)
     }
 
@@ -247,6 +247,58 @@ struct TerminalControllerShepherdHostTests {
         #expect(host.paste(request: request, snapshot: value, expiresAt: 2) == .notAdmitted)
         #expect(panel.surface.pastes.isEmpty)
         #expect(panel.surface.submits.isEmpty)
+    }
+
+    @Test func guardedComposerAndOutsideHashUseTheSameStrictGridNotLegacyEmpty() throws {
+        let owner = TerminalController()
+        let workspace = Workspace()
+        let panel = TerminalPanel(workspaceID: workspace.id)
+        workspace.panels[panel.id] = panel
+        panel.surface.foregroundPID = 42
+        panel.surface.renderFrame = try shepherdRenderFrame(surfaceID: panel.id, draft: "Human draft")
+        var captures = 0
+        panel.surface.onReadGrid = { captures += 1 }
+        AppDelegate.shared = AppDelegate(workspace: workspace)
+        let fixture = ProcessFixture()
+        let host = TerminalControllerShepherdHost(owner: owner, processEvidenceReader: fixture.reader)
+        let value = try #require(host.snapshot(workspaceID: workspace.id, surfaceID: panel.id))
+        #expect(value.composer == .draft("Human draft"))
+        #expect(value.outsideComposerFingerprint.count == 64)
+        #expect(captures == 1)
+        #expect(value.idle == nil)
+        #expect(value.backgroundWork == nil)
+    }
+
+    @Test func changedRawScreenWhileCapturingGridCannotMintRenderProof() throws {
+        let owner = TerminalController()
+        let workspace = Workspace()
+        let panel = TerminalPanel(workspaceID: workspace.id)
+        workspace.panels[panel.id] = panel
+        panel.surface.foregroundPID = 42
+        panel.surface.renderFrame = try shepherdRenderFrame(surfaceID: panel.id)
+        panel.surface.onReadGrid = { panel.surface.screen = "Output changed during the grid capture." }
+        AppDelegate.shared = AppDelegate(workspace: workspace)
+        let fixture = ProcessFixture()
+        let host = TerminalControllerShepherdHost(owner: owner, processEvidenceReader: fixture.reader)
+        let value = try #require(host.snapshot(workspaceID: workspace.id, surfaceID: panel.id))
+        #expect(value.composer == .unknown)
+        #expect(value.screenFingerprint == "")
+        #expect(value.outsideComposerFingerprint == "")
+    }
+
+    @Test func aGridFromAnotherSurfaceCannotDonateComposerProof() throws {
+        let owner = TerminalController()
+        let workspace = Workspace()
+        let panel = TerminalPanel(workspaceID: workspace.id)
+        workspace.panels[panel.id] = panel
+        panel.surface.foregroundPID = 42
+        panel.surface.renderFrame = try shepherdRenderFrame(surfaceID: UUID())
+        AppDelegate.shared = AppDelegate(workspace: workspace)
+        let fixture = ProcessFixture()
+        let host = TerminalControllerShepherdHost(owner: owner, processEvidenceReader: fixture.reader)
+        let value = try #require(host.snapshot(workspaceID: workspace.id, surfaceID: panel.id))
+        #expect(value.composer == .unknown)
+        #expect(value.outsideComposerFingerprint == "")
     }
 }
 #endif

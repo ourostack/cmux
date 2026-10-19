@@ -39,6 +39,13 @@ public struct AgentPromptScreenSpan: Equatable, Sendable {
     }
 }
 
+/// A strictly framed composer; its text and excluded rows share one boundary.
+public struct AgentGuardedPromptObservation: Equatable, Sendable {
+    public let state: AgentPromptInputState
+    public let editableRows: Range<Int>
+    public let emptyCursorColumn: Int
+}
+
 /// Recognizes the input areas of Claude Code and Codex on a terminal screen.
 ///
 /// - Claude Code draws its input row as `❯` followed by a no-break space,
@@ -56,6 +63,60 @@ public struct AgentPromptScreenSpan: Equatable, Sendable {
 /// Both glyphs can appear in other programs' output, so callers should only
 /// act on the result for a surface known to run an agent.
 extension AgentPromptInputState {
+    /// Returns no exclusion for unsupported, ambiguous or boxed render shapes.
+    public static func guardedObservation(
+        screenRows rows: [[AgentPromptScreenSpan]], expectedAgent: String
+    ) -> AgentGuardedPromptObservation? {
+        guard expectedAgent == "claude" else { return nil }
+        let plainRows = rows.map(plainText)
+        let prompts = plainRows.indices.filter { promptPrefix(in: plainRows[$0]) != nil }
+        guard prompts.count == 1, let prompt = prompts.first, prompt > 0 else { return nil }
+        let top = plainRows[prompt - 1]
+        let body = plainRows[prompt].drop(while: { $0 == " " })
+        guard !body.hasPrefix("\u{2502}"), isGuardedHorizontalRule(top),
+              body.hasPrefix(claudePromptPrefix) else { return nil }
+        let bottoms = plainRows.indices.filter { $0 > prompt && isGuardedHorizontalRule(plainRows[$0]) }
+        guard bottoms.count == 1, let bottom = bottoms.first, plainRows[bottom] == top,
+              detect(rows: rows) != .dialog else { return nil }
+        let editableRows = prompt..<bottom
+        var typed = ""
+        var emptyCursorColumn = 0
+        for index in editableRows {
+            guard var rowCells = guardedCells(rows[index]) else { return nil }
+            if index == prompt {
+                let leading = rowCells.prefix(while: { $0.character == " " }).count
+                let prefixCells = rowCells.dropFirst(leading).prefix(claudePromptPrefix.count)
+                guard String(prefixCells.map(\.character)) == claudePromptPrefix else { return nil }
+                emptyCursorColumn = leading + claudePromptPrefix.count
+                rowCells = Array(rowCells.dropFirst(emptyCursorColumn))
+            } else {
+                typed += "\n"
+            }
+            typed += String(rowCells.filter { !$0.faint }.map(\.character))
+        }
+        let draft = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An all-blank multirow area cannot establish an exact editor boundary.
+        guard !draft.isEmpty || editableRows.count == 1 else { return nil }
+        return AgentGuardedPromptObservation(
+            state: draft.isEmpty ? .empty : .draft(draft), editableRows: editableRows,
+            emptyCursorColumn: emptyCursorColumn
+        )
+    }
+
+    private static func isGuardedHorizontalRule(_ row: String) -> Bool {
+        row.contains("\u{2500}") && row.unicodeScalars.allSatisfy { $0 == "\u{2500}" || $0 == " " }
+    }
+
+    private static func guardedCells(_ row: [AgentPromptScreenSpan]) -> [Cell]? {
+        var result: [Cell] = []
+        for span in row.sorted(by: { $0.column < $1.column }) {
+            guard span.column >= result.count else { return nil }
+            result += Array(repeating: Cell(character: " ", faint: false), count: span.column - result.count)
+            result += span.text.map { Cell(character: $0, faint: span.faint) }
+        }
+        return result
+    }
+
     private static let claudePromptPrefix = "\u{276F}\u{00A0}"
     private static let codexPromptPrefix = "\u{203A} "
     private static let dialogHints = [

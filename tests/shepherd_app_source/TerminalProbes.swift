@@ -1,4 +1,5 @@
 import Foundation
+import CMUXMobileCore
 
 @MainActor public final class TerminalSurface {
     public var owningTabId: UUID
@@ -15,10 +16,19 @@ import Foundation
     public var ttyName: String? = "/dev/ttys123"
     public var controllingTTYDeviceIdentifier: Int64? = 123
     public var onReadScreen: (() -> Void)?
+    public var onReadGrid: (() -> Void)?
+    public var renderFrame: MobileTerminalRenderGridFrame?
     public init(workspaceID: UUID) { owningTabId = workspaceID }
     public func foregroundProcessID() -> Int? { foregroundPID }
     public func controllingTTYName() -> String? { ttyName }
     public func readText(region: Region) -> String? { onReadScreen?(); return screen }
+    public func mobileRenderGridFrame(
+        stateSeq: UInt64, includeTheme: Bool, anchor: MobileTerminalRenderGridFrame.Anchor
+    ) -> (frame: MobileTerminalRenderGridFrame, rows: [String])? {
+        onReadGrid?()
+        guard let renderFrame else { return nil }
+        return (renderFrame, [])
+    }
     public enum Region { case screen }
     public func sendShepherdPaste(_ text: String, requestID: UUID, expiresAt: TimeInterval) -> UInt64? {
         pastes.append(text)
