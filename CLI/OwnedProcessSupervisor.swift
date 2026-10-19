@@ -16,7 +16,7 @@ struct OwnedProcessSupervisor {
     private let managedNonce: UUID?
 
     init?(command: String, arguments: [String]) throws {
-        let managed = false
+        let managed = command == "__managed-agent-process-supervisor"
         guard managed || command == "__owned-process-supervisor"
                 || command == "__codex-teams-app-server-supervisor" else {
             return nil
