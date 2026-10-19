@@ -6,7 +6,7 @@ import Foundation
 @MainActor
 final class CopilotManagedSession {
     enum Phase: String {
-        case idle, connecting, creating, configuring, awaitingReadback, held
+        case idle, connecting, creating, configuring, awaitingReadback, configurationObserved, held
     }
 
     let sessionID = UUID().uuidString.lowercased()
@@ -16,10 +16,18 @@ final class CopilotManagedSession {
     private(set) var diagnostics = Data()
     private(set) var closeFailures: [String] = []
 
-    private enum Method: String {
-        case connect
-        case create = "session.create"
-        case options = "session.options.update"
+    private enum Method {
+        case connect, create, options
+        case readback(CopilotManagedConfiguration.Readback)
+
+        var name: String {
+            switch self {
+            case .connect: "connect"
+            case .create: "session.create"
+            case .options: "session.options.update"
+            case .readback(let readback): readback.method
+            }
+        }
     }
 
     private struct Pending {
@@ -36,6 +44,8 @@ final class CopilotManagedSession {
     private var writeTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
     private var bufferedEventBytes = 0
+    private var startupEventID: UUID?
+    private var verifiedReadbacks: Set<CopilotManagedConfiguration.Readback> = []
 
     init(
         lifetime: AgentSessionManagedSession, takingOwnershipOf input: FileHandle,
@@ -81,7 +91,7 @@ final class CopilotManagedSession {
         let frame: Data
         do {
             frame = try ShepherdManagedRPCFramer.frame(JSONSerialization.data(withJSONObject: [
-                "jsonrpc": "2.0", "id": id, "method": method.rawValue, "params": params,
+                "jsonrpc": "2.0", "id": id, "method": method.name, "params": params,
             ]))
         } catch {
             hold("requestEncodingFailed")
@@ -157,14 +167,23 @@ final class CopilotManagedSession {
               envelope["method"] as? String == "session.event",
               let params = envelope["params"] as? [String: Any],
               let event = params["event"] as? [String: Any],
-              event["type"] as? String == "session.start",
-              event["id"] is String, event["data"] is [String: Any] else {
+              event["type"] as? String == "session.start" else {
             hold("unsupportedNotification")
             return
         }
         guard params["sessionId"] as? String == sessionID,
-              phase == .creating || phase == .configuring || phase == .awaitingReadback else {
+              phase == .creating || phase == .configuring || phase == .awaitingReadback
+                || phase == .configurationObserved else {
             hold("sessionMismatch")
+            return
+        }
+        guard validateStartupEvent(event) else { return }
+        guard startupEventID == nil else {
+            hold("duplicateStartupEvent")
+            return
+        }
+        guard phase != .awaitingReadback, phase != .configurationObserved else {
+            hold("configurationChanged")
             return
         }
         guard bufferedEvents.count < 64, bufferedEventBytes + body.count <= 1_048_576 else {
@@ -173,6 +192,52 @@ final class CopilotManagedSession {
         }
         bufferedEvents.append(body)
         bufferedEventBytes += body.count
+        startupEventID = (event["id"] as? String).flatMap(UUID.init(uuidString:))
+    }
+
+    private func validateStartupEvent(_ event: [String: Any]) -> Bool {
+        guard let textID = event["id"] as? String, let eventID = UUID(uuidString: textID),
+              eventID.uuid.6 & 0xf0 == 0x40, eventID.uuid.8 & 0xc0 == 0x80,
+              event["parentId"] is NSNull,
+              let timestamp = event["timestamp"] as? String, Self.isTimestamp(timestamp),
+              let data = event["data"] as? [String: Any],
+              data["copilotVersion"] as? String == "1.0.98",
+              let producer = data["producer"] as? String, !producer.isEmpty,
+              let started = data["startTime"] as? String, Self.isTimestamp(started),
+              let version = data["version"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(),
+              version.doubleValue.isFinite, version.doubleValue > 0,
+              version.doubleValue.rounded() == version.doubleValue else {
+            hold("invalidStartupEvent")
+            return false
+        }
+        for field in ["alreadyInUse", "remoteSteerable"] {
+            if let value = data[field] {
+                guard let boolean = value as? NSNumber,
+                      CFGetTypeID(boolean) == CFBooleanGetTypeID() else {
+                    hold("invalidStartupEvent")
+                    return false
+                }
+                if boolean.boolValue {
+                    hold("foreignParticipant")
+                    return false
+                }
+            }
+        }
+        guard data["sessionId"] as? String == sessionID,
+              data["detachedFromSpawningParentSessionId"] == nil, event["agentId"] == nil else {
+            hold("foreignParticipant")
+            return false
+        }
+        return true
+    }
+
+    private static func isTimestamp(_ value: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if formatter.date(from: value) != nil { return true }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value) != nil
     }
 
     private func receiveResponse(_ envelope: [String: Any]) {
@@ -217,13 +282,9 @@ final class CopilotManagedSession {
                 return
             }
             phase = .creating
-            request(.create, params: [
-                "sessionId": sessionID, "workingDirectory": workingDirectory,
-                "enableConfigDiscovery": false, "enableSkills": false, "enableFileHooks": false,
-                "availableTools": [], "tools": [], "mcpServers": [:], "customAgents": [],
-                "requestPermission": true, "streaming": true,
-                "includeSubAgentStreamingEvents": true,
-            ])
+            request(.create, params: CopilotManagedConfiguration.createParameters(
+                sessionID: sessionID, workingDirectory: workingDirectory
+            ))
         case .create:
             guard response["sessionId"] as? String == sessionID else {
                 hold("sessionMismatch")
@@ -234,18 +295,37 @@ final class CopilotManagedSession {
                 return
             }
             phase = .configuring
-            request(.options, params: [
-                "sessionId": sessionID, "skipCustomInstructions": true,
-                "customAgentsLocalOnly": true, "coauthorEnabled": false, "manageScheduleEnabled": false,
-                "installedPlugins": [], "includedBuiltinSkills": [],
-            ])
+            request(.options, params: CopilotManagedConfiguration.optionParameters(sessionID: sessionID))
         case .options:
             guard Self.isTrue(response["success"]), response["pluginHookCount"] as? Int == 0 else {
                 hold("configurationRefused")
                 return
             }
+            guard startupEventID != nil else {
+                hold("startupEventUnavailable")
+                return
+            }
             phase = .awaitingReadback
+            requestReadback(.agents)
+        case .readback(let readback):
+            guard phase == .awaitingReadback, readback.accepts(response),
+                  verifiedReadbacks.insert(readback).inserted else {
+                hold("configurationMismatch")
+                return
+            }
+            let steps = CopilotManagedConfiguration.Readback.allCases
+            if let next = steps.first(where: { !verifiedReadbacks.contains($0) }) {
+                requestReadback(next)
+            } else {
+                phase = .configurationObserved
+            }
         }
+    }
+
+    private func requestReadback(_ readback: CopilotManagedConfiguration.Readback) {
+        var params: [String: Any] = ["sessionId": sessionID]
+        if readback == .agents { params["includeBuiltInAgents"] = true }
+        request(.readback(readback), params: params)
     }
 
     private static func isTrue(_ value: Any?) -> Bool {

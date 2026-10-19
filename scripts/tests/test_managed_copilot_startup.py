@@ -18,13 +18,13 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
 
     def test_verified_startup_binds_exact_preregistered_session_but_cannot_admit_input(self):
         result = self.startup("valid")
-        self.assertEqual(result["phase"], "awaitingReadback")
+        self.assertEqual(result["phase"], "configurationObserved")
         self.assertEqual(result["boundSessionID"], result["sessionID"])
         self.assertEqual(result["nativePhase"], "bound")
 
     def test_create_time_event_uses_the_preregistered_session(self):
         result = self.startup("early-event")
-        self.assertEqual(result["phase"], "awaitingReadback")
+        self.assertEqual(result["phase"], "configurationObserved")
         self.assertEqual(result["bufferedEvents"], 1)
 
     def test_foreign_generation_cannot_start_the_current_transport(self):
@@ -96,6 +96,59 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
         self.assertEqual(result["phase"], "held")
         self.assertEqual(result["reason"], "configurationRefused")
         self.assertEqual(result["boundSessionID"], "")
+
+    def test_startup_requires_all_effective_readbacks_not_an_empty_pending_map(self):
+        result = self.startup("valid")
+        self.assertEqual(result["phase"], "configurationObserved")
+        self.assertEqual(result["reason"], "")
+
+    def test_inherited_or_unknown_effective_inventory_invalidates_identity(self):
+        for scenario in ("inherited-agent", "selected-agent", "missing-current-agent",
+                         "inherited-mcp", "managed-plugin", "inherited-extension",
+                         "null-tools", "unaccounted-tool"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "configurationMismatch")
+                self.assertEqual(result["boundSessionID"], "")
+
+    def test_start_event_requires_real_required_fields_not_a_dictionary_placeholder(self):
+        for scenario in ("bad-start-data", "bad-start-shape", "boolean-start-version", "invalid-start-id"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "invalidStartupEvent")
+
+    def test_start_event_cannot_describe_a_foreign_participant(self):
+        for scenario in ("foreign-start-data", "already-in-use", "remote-steerable",
+                         "detached-start", "subagent-start"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "foreignParticipant")
+                self.assertEqual(result["boundSessionID"], "")
+
+    def test_missing_start_event_is_not_fresh_session_evidence(self):
+        result = self.startup("missing-start")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "startupEventUnavailable")
+
+    def test_duplicate_start_event_cannot_enter_the_startup_buffer_twice(self):
+        result = self.startup("duplicate-start")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "duplicateStartupEvent")
+
+    def test_kernel_revalidation_does_not_wait_for_the_lifetime_monitor(self):
+        result = self.startup("kernel-dead-before-start")
+        self.assertEqual(result["nativeBeforeStart"], "awaitingProvider")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "transportUnavailable")
+        self.assertEqual(result["boundSessionID"], "")
+
+    def test_native_profile_explicitly_excludes_inherited_and_automatic_context_sources(self):
+        result = self.startup("strict-profile")
+        self.assertEqual(result["phase"], "configurationObserved")
+        self.assertEqual(result["boundSessionID"], result["sessionID"])
 
 
 if __name__ == "__main__":

@@ -45,13 +45,27 @@ enum ManagedCopilotStartupFixture {
             }
             try await ManagedSessionLifetimeFixture.wait { lifetime.phase == .held }
         }
+        if scenario == "kernel-dead-before-start" {
+            guard let backend = lifetime.backendIdentity,
+                  kill(process.processIdentifier, SIGSTOP) == 0 else { throw POSIXError(.ESRCH) }
+            defer { kill(process.processIdentifier, SIGCONT) }
+            guard kill(backend.pid, SIGKILL) == 0 else { throw POSIXError(.ESRCH) }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+            while AgentPIDProcessIdentity.processSnapshot(pid: backend.pid) != nil {
+                guard ContinuousClock.now < deadline else { throw POSIXError(.ETIMEDOUT) }
+                usleep(1_000)
+            }
+        }
+        let beforeStart = ManagedSessionLifetimeFixture.phase(lifetime)
         adapter.start(launchID: scenario == "stale-start" ? UUID() : lifetime.launchID)
         if scenario == "stale-start" {
             try await Task.sleep(for: .milliseconds(100))
         } else {
-            try await ManagedSessionLifetimeFixture.wait({
-                adapter.phase == .held || adapter.phase == .awaitingReadback
-            }, seconds: 8)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(scenario == "timeout" ? 7 : 2))
+            while adapter.phase != .held && adapter.phase.rawValue != "configurationObserved"
+                    && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
             // A duplicate response must still invalidate a completed startup.
             try await Task.sleep(for: .milliseconds(80))
         }
@@ -61,6 +75,7 @@ enum ManagedCopilotStartupFixture {
             "sessionID": adapter.sessionID,
             "boundSessionID": lifetime.identity?.providerSessionID ?? "",
             "bufferedEvents": adapter.bufferedEvents.count,
+            "nativeBeforeStart": beforeStart,
         ]
     }
 
@@ -118,6 +133,29 @@ enum ManagedCopilotStartupFixture {
                         "version": scenario == "wrong-version" ? "1.0.97" : "1.0.98",
                     ]
                 case "session.create":
+                    if scenario == "strict-profile" {
+                        let disabled = [
+                            "enableSessionTelemetry", "enableOnDemandInstructionDiscovery",
+                            "enableHostGitOperations", "enableSessionStore", "enableGitHubCacheStore",
+                            "isExperimentalMode",
+                        ]
+                        guard disabled.allSatisfy({ params[$0] as? Bool == false }),
+                              params["skipEmbeddingRetrieval"] as? Bool == true,
+                              params["mcpOAuthTokenStorage"] as? String == "in-memory",
+                              params["embeddingCacheStorage"] as? String == "in-memory",
+                              params["memory"] as? [String: Bool] == ["enabled": false],
+                              params["infiniteSessions"] as? [String: Bool] == ["enabled": false],
+                              params["toolFilterPrecedence"] as? String == "excluded",
+                              ["additionalDirectories", "skillDirectories", "agentDirectories",
+                               "instructionDirectories", "hookDirectories", "pluginDirectories"]
+                                .allSatisfy({ params[$0] as? [String] == [] }),
+                              let systemMessage = params["systemMessage"] as? [String: Any],
+                              systemMessage["mode"] as? String == "customize",
+                              systemMessage["sections"] as? [String: [String: String]]
+                                == ["environment_context": ["action": "remove"]] else {
+                            throw POSIXError(.EPROTO)
+                        }
+                    }
                     guard let sid = params["sessionId"] as? String,
                           UUID(uuidString: sid) != nil,
                           params["workingDirectory"] as? String == "/tmp",
@@ -132,15 +170,42 @@ enum ManagedCopilotStartupFixture {
                         throw POSIXError(.EPROTO)
                     }
                     plannedID = sid
-                    if scenario == "early-event" || scenario == "foreign-event" {
-                        try send([
+                    if scenario != "missing-start" {
+                        var data: [String: Any] = [
+                            "copilotVersion": "1.0.98", "producer": "copilot-agent",
+                            "sessionId": sid, "startTime": "2026-10-19T13:00:00.000Z", "version": 1,
+                            "alreadyInUse": false, "remoteSteerable": false,
+                        ]
+                        if scenario == "bad-start-data" { data.removeValue(forKey: "version") }
+                        if scenario == "boolean-start-version" { data["version"] = true }
+                        if scenario == "foreign-start-data" { data["sessionId"] = "foreign" }
+                        if scenario == "already-in-use" { data["alreadyInUse"] = true }
+                        if scenario == "remote-steerable" { data["remoteSteerable"] = true }
+                        if scenario == "detached-start" { data["detachedFromSpawningParentSessionId"] = "foreign" }
+                        var event: [String: Any] = [
+                            "id": UUID().uuidString, "type": "session.start", "data": data,
+                            "parentId": NSNull(), "timestamp": "2026-10-19T13:00:00.000Z",
+                        ]
+                        if scenario == "bad-start-shape" { event.removeValue(forKey: "timestamp") }
+                        if scenario == "invalid-start-id" { event["id"] = "" }
+                        if scenario == "subagent-start" { event["agentId"] = "child" }
+                        let notification: [String: Any] = [
                             "jsonrpc": "2.0", "method": "session.event",
                             "params": ["sessionId": scenario == "foreign-event" ? "foreign" : sid,
-                                       "event": ["id": UUID().uuidString, "type": "session.start", "data": [:]]],
-                        ])
+                                       "event": event],
+                        ]
+                        try send(notification)
+                        if scenario == "duplicate-start" { try send(notification) }
                     }
                     result = ["sessionId": scenario == "wrong-session" ? "foreign" : sid]
                 case "session.options.update":
+                    if scenario == "strict-profile" {
+                        guard params["includedBuiltinAgents"] as? [String] == [],
+                              params["sessionCapabilities"] as? [String] == [],
+                              params["continueOnAutoMode"] as? Bool == false else {
+                            throw POSIXError(.EPROTO)
+                        }
+                    }
                     guard params["sessionId"] as? String == plannedID,
                           params["skipCustomInstructions"] as? Bool == true,
                           params["customAgentsLocalOnly"] as? Bool == true,
@@ -151,6 +216,24 @@ enum ManagedCopilotStartupFixture {
                         throw POSIXError(.EPROTO)
                     }
                     result = ["success": scenario != "options-refused", "pluginHookCount": 0]
+                case "session.agent.list":
+                    guard params["includeBuiltInAgents"] as? Bool == true else { throw POSIXError(.EPROTO) }
+                    result = ["agents": scenario == "inherited-agent" ? [["name": "unexpected"]] : []]
+                case "session.agent.getCurrent":
+                    result = scenario == "missing-current-agent" ? [:] : [
+                        "agent": scenario == "selected-agent" ? ["name": "unexpected"] : NSNull(),
+                    ]
+                case "session.mcp.listConfigured":
+                    result = ["servers": scenario == "inherited-mcp" ? [["name": "unexpected"]] : []]
+                case "session.plugins.list":
+                    result = ["plugins": scenario == "managed-plugin" ? [["name": "unexpected"]] : []]
+                case "session.extensions.list":
+                    result = ["extensions": scenario == "inherited-extension" ? [["name": "unexpected"]] : []]
+                case "session.tools.initializeAndValidate":
+                    result = [:]
+                case "session.tools.getCurrentMetadata":
+                    result = ["tools": scenario == "null-tools" ? NSNull()
+                              : scenario == "unaccounted-tool" ? [["name": "unexpected"]] : []]
                 default:
                     throw POSIXError(.EPROTO)
                 }
