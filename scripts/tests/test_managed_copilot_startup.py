@@ -271,6 +271,92 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
         self.assertEqual(result["reason"], "foreignRoot")
         self.assertFalse(result["workEvidence"])
 
+    def test_configuration_notifications_from_owned_startup_mutations_allow_fresh_readbacks(self):
+        for stage in ("create", "options", "initialize"):
+            with self.subTest(stage=stage):
+                result = self.startup(f"configuration-at-{stage}")
+                self.assertEqual(result["phase"], "configurationObserved")
+                self.assertEqual(result["bufferedEvents"], 6)
+                self.assertEqual(result["boundSessionID"], result["sessionID"])
+
+    def test_configuration_initialization_precedes_every_effective_inventory_read(self):
+        result = self.startup("configuration-readback-order")
+        self.assertEqual(result["phase"], "configurationObserved")
+        self.assertEqual(result["reason"], "")
+
+    def test_configuration_notices_cannot_replace_post_initialization_inventory_evidence(self):
+        result = self.startup("configuration-stale-readback")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "configurationMismatch")
+        self.assertEqual(result["boundSessionID"], "")
+
+    def test_configuration_notice_before_start_does_not_replace_the_required_start_event(self):
+        result = self.startup("configuration-before-start")
+        self.assertEqual(result["phase"], "configurationObserved")
+        self.assertEqual(result["bufferedEvents"], 2)
+        result = self.startup("configuration-without-start")
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "startupEventUnavailable")
+
+    def test_configuration_notice_rejects_nonempty_or_unknown_domain_payloads(self):
+        for domain in ("skills", "agents", "errors", "warnings", "mcp", "extensions", "model", "extra"):
+            with self.subTest(domain=domain):
+                result = self.startup(f"configuration-nonempty-{domain}")
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "configurationMismatch")
+                self.assertEqual(result["boundSessionID"], "")
+
+    def test_configuration_notice_requires_complete_typed_native_event_metadata(self):
+        for field in ("id", "uuid-version", "timestamp", "parent", "ephemeral"):
+            with self.subTest(field=field):
+                result = self.startup(f"configuration-malformed-{field}")
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "invalidConfigurationEvent")
+
+    def test_configuration_notice_cannot_describe_a_foreign_participant(self):
+        for field in ("agent", "parent"):
+            with self.subTest(field=field):
+                result = self.startup(f"configuration-foreign-{field}")
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "foreignParticipant")
+
+    def test_configuration_notice_ids_cannot_replay_each_other_or_the_start_event(self):
+        for scenario in ("configuration-duplicate", "configuration-start-replay"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "replayedConfigurationEvent")
+
+    def test_configuration_notification_buffer_has_a_hard_generation_limit(self):
+        accepted = self.startup("configuration-limit")
+        self.assertEqual(accepted["phase"], "configurationObserved")
+        self.assertEqual(accepted["bufferedEvents"], 64)
+        rejected = self.startup("configuration-overflow")
+        self.assertEqual(rejected["phase"], "held")
+        self.assertEqual(rejected["reason"], "eventBufferOverflow")
+
+    def test_configuration_notices_during_inventory_reads_or_after_observation_invalidate_identity(self):
+        for scenario in ("configuration-during-readback", "configuration-late"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertEqual(result["phase"], "held")
+                self.assertEqual(result["reason"], "configurationChanged")
+                self.assertEqual(result["boundSessionID"], "")
+
+    def test_configuration_changes_during_a_root_invalidate_input_and_work_evidence(self):
+        result = self.startup("owner-configuration-changed")
+        self.assertTrue(result["inputAccepted"])
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "configurationChanged")
+        self.assertFalse(result["workEvidence"])
+
+    def test_configuration_event_id_cannot_reappear_as_a_root_event(self):
+        result = self.startup("owner-configuration-replay")
+        self.assertTrue(result["inputAccepted"])
+        self.assertEqual(result["phase"], "held")
+        self.assertEqual(result["reason"], "replayedEvent")
+        self.assertFalse(result["workEvidence"])
+
 
 if __name__ == "__main__":
     parser = bootstrap.argparse.ArgumentParser(add_help=False)

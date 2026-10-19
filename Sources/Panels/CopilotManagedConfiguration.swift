@@ -38,7 +38,7 @@ enum CopilotManagedConfiguration {
     }
 
     enum Readback: String, CaseIterable {
-        case agents, currentAgent, mcp, plugins, extensions, initializeTools, tools
+        case initializeTools, agents, currentAgent, mcp, plugins, extensions, tools
 
         var method: String {
             switch self {
@@ -66,7 +66,13 @@ enum CopilotManagedConfiguration {
             case .tools: key = "tools"
             case .currentAgent, .initializeTools: return false
             }
-            guard Set(result.keys) == [key], let values = result[key] as? [Any] else { return false }
+            return CopilotManagedConfiguration.acceptsEmptyInventories(result, keys: [key])
+        }
+    }
+
+    static func acceptsEmptyInventories(_ result: [String: Any], keys: Set<String>) -> Bool {
+        Set(result.keys) == keys && keys.allSatisfy { key in
+            guard let values = result[key] as? [Any] else { return false }
             return values.isEmpty
         }
     }

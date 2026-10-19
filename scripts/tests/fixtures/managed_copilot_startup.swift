@@ -124,6 +124,9 @@ enum ManagedCopilotStartupFixture {
         var requestedNoBuiltinAgents = false
         var sentInputs = 0
         var workStep = 0
+        var initializedTools = false
+        var readbackStep = 0
+        var configurationEventID: String?
         while true {
             let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
             if count == 0 { return }
@@ -161,6 +164,19 @@ enum ManagedCopilotStartupFixture {
                 if scenario == "missing-result" {
                     try send(["jsonrpc": "2.0", "id": id])
                     continue
+                }
+                if scenario == "configuration-readback-order" {
+                    let ordered = [
+                        "session.tools.initializeAndValidate", "session.agent.list", "session.agent.getCurrent",
+                        "session.mcp.listConfigured", "session.plugins.list", "session.extensions.list",
+                        "session.tools.getCurrentMetadata",
+                    ]
+                    if ordered.contains(method) {
+                        guard readbackStep < ordered.count, method == ordered[readbackStep] else {
+                            throw POSIXError(.EPROTO)
+                        }
+                        readbackStep += 1
+                    }
                 }
                 let result: [String: Any]
                 switch method {
@@ -211,7 +227,13 @@ enum ManagedCopilotStartupFixture {
                         throw POSIXError(.EPROTO)
                     }
                     plannedID = sid
-                    if scenario != "missing-start" {
+                    if scenario == "configuration-before-start" || scenario == "configuration-without-start"
+                        || scenario == "owner-configuration-replay" {
+                        let eventID = UUID().uuidString
+                        configurationEventID = eventID
+                        try sendConfiguration("configuration-before-start", sessionID: sid, firstID: eventID)
+                    }
+                    if scenario != "missing-start" && scenario != "configuration-without-start" {
                         var data: [String: Any] = [
                             "copilotVersion": "1.0.98", "producer": "copilot-agent",
                             "sessionId": sid, "startTime": "2026-10-19T13:00:00.000Z", "version": 1,
@@ -237,6 +259,17 @@ enum ManagedCopilotStartupFixture {
                         ]
                         try send(notification)
                         if scenario == "duplicate-start" { try send(notification) }
+                        if [
+                            "configuration-at-create", "configuration-duplicate", "configuration-start-replay",
+                            "configuration-limit", "configuration-overflow",
+                        ].contains(scenario) || scenario.hasPrefix("configuration-nonempty-")
+                            || scenario.hasPrefix("configuration-malformed-")
+                            || scenario.hasPrefix("configuration-foreign-") {
+                            try sendConfiguration(
+                                scenario, sessionID: sid,
+                                firstID: scenario == "configuration-start-replay" ? event["id"] as? String : nil
+                            )
+                        }
                     }
                     result = ["sessionId": scenario == "wrong-session" ? "foreign" : sid]
                 case "session.options.update":
@@ -258,12 +291,20 @@ enum ManagedCopilotStartupFixture {
                         throw POSIXError(.EPROTO)
                     }
                     requestedNoBuiltinAgents = true
+                    if scenario == "configuration-at-options" {
+                        try sendConfiguration(scenario, sessionID: plannedID!)
+                    }
                     result = ["success": scenario != "options-refused", "pluginHookCount": 0]
                 case "session.agent.list":
                     guard params["includeBuiltInAgents"] as? Bool == true, requestedNoBuiltinAgents else {
                         throw POSIXError(.EPROTO)
                     }
-                    result = ["agents": scenario == "inherited-agent" ? [["name": "unexpected"]] : []]
+                    if scenario == "configuration-during-readback" {
+                        try sendConfiguration("configuration-before-start", sessionID: plannedID!)
+                    }
+                    result = ["agents": scenario == "inherited-agent"
+                              || (scenario == "configuration-stale-readback" && initializedTools)
+                              ? [["name": "unexpected"]] : []]
                 case "session.agent.getCurrent":
                     result = scenario == "missing-current-agent" ? [:] : [
                         "agent": scenario == "selected-agent" ? ["name": "unexpected"] : NSNull(),
@@ -275,6 +316,10 @@ enum ManagedCopilotStartupFixture {
                 case "session.extensions.list":
                     result = ["extensions": scenario == "inherited-extension" ? [["name": "unexpected"]] : []]
                 case "session.tools.initializeAndValidate":
+                    initializedTools = true
+                    if scenario == "configuration-at-initialize" || scenario == "configuration-stale-readback" {
+                        try sendConfiguration(scenario, sessionID: plannedID!)
+                    }
                     result = [:]
                 case "session.tools.getCurrentMetadata":
                     result = ["tools": scenario == "null-tools" ? NSNull()
@@ -306,10 +351,14 @@ enum ManagedCopilotStartupFixture {
                     ]
                     try send(response)
                     if scenario == "owner-duplicate-ack" { try send(response) }
+                    if scenario == "owner-configuration-changed" {
+                        try sendConfiguration("configuration-before-start", sessionID: plannedID)
+                    }
                     if scenario != "owner-early-root" && scenario != "owner-ack-only" {
                         try sendRoot(
                             sessionID: plannedID, scenario: scenario,
-                            input: scenario == "owner-late-prior-root" ? 1 : sentInputs
+                            input: scenario == "owner-late-prior-root" ? 1 : sentInputs,
+                            replayEventID: scenario == "owner-configuration-replay" ? configurationEventID : nil
                         )
                     }
                     continue
@@ -342,11 +391,14 @@ enum ManagedCopilotStartupFixture {
                 let response: [String: Any] = ["jsonrpc": "2.0", "id": id, "result": result]
                 try send(response)
                 if scenario == "duplicate" { try send(response) }
+                if scenario == "configuration-late" && method == "session.tools.getCurrentMetadata" {
+                    try sendConfiguration("configuration-before-start", sessionID: plannedID!)
+                }
             }
         }
     }
 
-    static func sendRoot(sessionID: String, scenario: String, input: Int = 1) throws {
+    static func sendRoot(sessionID: String, scenario: String, input: Int = 1, replayEventID: String? = nil) throws {
         let suffix = input == 1 ? "one" : "two"
         for (type, data) in [
             ("assistant.turn_start", ["turnId": "turn-\(suffix)"] as [String: Any]),
@@ -362,18 +414,71 @@ enum ManagedCopilotStartupFixture {
                 payload["originatingMessageId"] = "someone-else"
             }
             if scenario == "owner-aborted" && type == "session.idle" { payload["aborted"] = true }
-            try sendEvent(sessionID: sessionID, type: type, data: payload)
+            try sendEvent(
+                sessionID: sessionID, type: type, data: payload,
+                eventID: type == "assistant.turn_start" ? replayEventID : nil
+            )
         }
     }
 
-    static func sendEvent(sessionID: String, type: String, data: [String: Any]) throws {
+    static func sendEvent(sessionID: String, type: String, data: [String: Any], eventID: String? = nil) throws {
         try send([
             "jsonrpc": "2.0", "method": "session.event",
             "params": ["sessionId": sessionID, "event": [
-                "id": UUID().uuidString, "timestamp": "2026-10-19T13:00:00.000Z",
+                "id": eventID ?? UUID().uuidString, "timestamp": "2026-10-19T13:00:00.000Z",
                 "parentId": NSNull(), "type": type, "data": data,
             ]],
         ])
+    }
+
+    static func sendConfiguration(_ scenario: String, sessionID: String, firstID: String? = nil) throws {
+        var events: [(String, [String: Any])] = [
+            ("session.tools_updated", ["model": "controlled-model"]),
+            ("session.skills_loaded", ["skills": []]),
+            ("session.custom_agents_updated", ["agents": [], "errors": [], "warnings": []]),
+            ("session.mcp_servers_loaded", ["servers": []]),
+            ("session.extensions_loaded", ["extensions": []]),
+        ]
+        if scenario == "configuration-before-start" {
+            events = Array(events.prefix(1))
+        } else if scenario == "configuration-limit" || scenario == "configuration-overflow" {
+            events = Array(repeating: events[0], count: scenario == "configuration-limit" ? 63 : 64)
+        }
+        for (index, entry) in events.enumerated() {
+            let (kind, original) = entry
+            var data = original
+            if scenario == "configuration-nonempty-model" && kind == "session.tools_updated" { data["model"] = "" }
+            if scenario == "configuration-nonempty-extra" && index == 0 { data["unexpected"] = [] as [String] }
+            for (suffix, key) in [
+                ("skills", "skills"), ("agents", "agents"), ("errors", "errors"), ("warnings", "warnings"),
+                ("mcp", "servers"), ("extensions", "extensions"),
+            ] where scenario == "configuration-nonempty-\(suffix)" && data[key] != nil {
+                data[key] = ["unexpected"]
+            }
+            if scenario == "configuration-foreign-parent" && index == 0 { data["parentToolCallId"] = "child-call" }
+            var event: [String: Any] = [
+                "id": index == 0 ? firstID ?? UUID().uuidString : UUID().uuidString,
+                "type": kind, "data": data, "ephemeral": true,
+                "parentId": NSNull(), "timestamp": "2026-10-19T13:00:00.000Z",
+            ]
+            if index == 0 {
+                switch scenario {
+                case "configuration-malformed-id": event["id"] = ""
+                case "configuration-malformed-uuid-version": event["id"] = "11111111-1111-5111-8111-111111111111"
+                case "configuration-malformed-timestamp": event["timestamp"] = "not-a-timestamp"
+                case "configuration-malformed-parent": event["parentId"] = 1
+                case "configuration-malformed-ephemeral": event["ephemeral"] = 1
+                case "configuration-foreign-agent": event["agentId"] = "child"
+                default: break
+                }
+            }
+            let notification: [String: Any] = [
+                "jsonrpc": "2.0", "method": "session.event",
+                "params": ["sessionId": sessionID, "event": event],
+            ]
+            try send(notification)
+            if scenario == "configuration-duplicate" && index == 0 { try send(notification) }
+        }
     }
 
     static func send(_ value: [String: Any]) throws {

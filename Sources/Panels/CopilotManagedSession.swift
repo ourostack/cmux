@@ -51,6 +51,13 @@ final class CopilotManagedSession {
         case send(UUID)
         case work(CopilotManagedTurnLedger.WorkReadback, UUID)
 
+        var ownsConfigurationMutation: Bool {
+            switch self {
+            case .create, .options, .readback(.initializeTools): true
+            default: false
+            }
+        }
+
         var name: String {
             switch self {
             case .connect: "connect"
@@ -84,6 +91,7 @@ final class CopilotManagedSession {
     private var timeoutTask: Task<Void, Never>?
     private var bufferedEventBytes = 0
     private var startupEventID: UUID?
+    private var startupEventIDs: Set<UUID> = []
     private var verifiedReadbacks: Set<CopilotManagedConfiguration.Readback> = []
     private var turnLedger: CopilotManagedTurnLedger?
 
@@ -215,6 +223,17 @@ final class CopilotManagedSession {
             return
         }
         if event["type"] as? String != "session.start" {
+            if let kind = event["type"] as? String, [
+                "session.tools_updated", "session.skills_loaded", "session.custom_agents_updated",
+                "session.mcp_servers_loaded", "session.extensions_loaded",
+            ].contains(kind) {
+                receiveConfigurationEvent(event, body: body, kind: kind)
+                return
+            }
+            if let id = Self.uuidV4(event["id"]), startupEventIDs.contains(id) {
+                hold("replayedEvent")
+                return
+            }
             guard let turnLedger else {
                 hold("unsupportedNotification")
                 return
@@ -243,18 +262,73 @@ final class CopilotManagedSession {
             hold("duplicateStartupEvent")
             return
         }
-        guard bufferedEvents.count < 64, bufferedEventBytes + body.count <= 1_048_576 else {
-            hold("eventBufferOverflow")
+        guard let id = Self.uuidV4(event["id"]) else {
+            hold("invalidStartupEvent")
             return
         }
+        guard bufferStartupEvent(id, body: body, duplicateReason: "duplicateStartupEvent") else { return }
+        startupEventID = id
+    }
+
+    private func bufferStartupEvent(_ id: UUID, body: Data, duplicateReason: String) -> Bool {
+        guard !startupEventIDs.contains(id) else {
+            hold(duplicateReason)
+            return false
+        }
+        guard bufferedEvents.count < 64, bufferedEventBytes + body.count <= 1_048_576 else {
+            hold("eventBufferOverflow")
+            return false
+        }
+        startupEventIDs.insert(id)
         bufferedEvents.append(body)
         bufferedEventBytes += body.count
-        startupEventID = (event["id"] as? String).flatMap(UUID.init(uuidString:))
+        return true
+    }
+
+    private func receiveConfigurationEvent(_ event: [String: Any], body: Data, kind: String) {
+        guard (phase == .creating || phase == .configuring || phase == .awaitingReadback),
+              pending.values.contains(where: { $0.method.ownsConfigurationMutation }) else {
+            hold("configurationChanged")
+            return
+        }
+        guard event["agentId"] == nil,
+              (event["data"] as? [String: Any])?["parentToolCallId"] == nil else {
+            hold("foreignParticipant")
+            return
+        }
+        guard Set(event.keys) == ["id", "type", "data", "parentId", "timestamp", "ephemeral"],
+              let id = Self.uuidV4(event["id"]),
+              event["parentId"] is NSNull || Self.uuidV4(event["parentId"]) != nil,
+              let timestamp = event["timestamp"] as? String, Self.isTimestamp(timestamp),
+              Self.isTrue(event["ephemeral"]), let data = event["data"] as? [String: Any] else {
+            hold("invalidConfigurationEvent")
+            return
+        }
+        let accepted: Bool
+        switch kind {
+        case "session.tools_updated":
+            accepted = Set(data.keys) == ["model"]
+                && (data["model"] as? String).map(ShepherdManagedSessionIdentity.validIdentifier) == true
+        case "session.skills_loaded":
+            accepted = CopilotManagedConfiguration.acceptsEmptyInventories(data, keys: ["skills"])
+        case "session.custom_agents_updated":
+            accepted = CopilotManagedConfiguration.acceptsEmptyInventories(data, keys: ["agents", "errors", "warnings"])
+        case "session.mcp_servers_loaded":
+            accepted = CopilotManagedConfiguration.Readback.mcp.accepts(data)
+        case "session.extensions_loaded":
+            accepted = CopilotManagedConfiguration.Readback.extensions.accepts(data)
+        default:
+            accepted = false
+        }
+        guard accepted else {
+            hold("configurationMismatch")
+            return
+        }
+        _ = bufferStartupEvent(id, body: body, duplicateReason: "replayedConfigurationEvent")
     }
 
     private func validateStartupEvent(_ event: [String: Any]) -> Bool {
-        guard let textID = event["id"] as? String, let eventID = UUID(uuidString: textID),
-              eventID.uuid.6 & 0xf0 == 0x40, eventID.uuid.8 & 0xc0 == 0x80,
+        guard Self.uuidV4(event["id"]) != nil,
               event["parentId"] is NSNull,
               let timestamp = event["timestamp"] as? String, Self.isTimestamp(timestamp),
               let data = event["data"] as? [String: Any],
@@ -287,6 +361,12 @@ final class CopilotManagedSession {
             return false
         }
         return true
+    }
+
+    private static func uuidV4(_ value: Any?) -> UUID? {
+        guard let text = value as? String, let id = UUID(uuidString: text),
+              id.uuid.6 & 0xf0 == 0x40, id.uuid.8 & 0xc0 == 0x80 else { return nil }
+        return id
     }
 
     private static func isTimestamp(_ value: String) -> Bool {
@@ -363,7 +443,7 @@ final class CopilotManagedSession {
                 return
             }
             phase = .awaitingReadback
-            requestReadback(.agents)
+            requestReadback(.initializeTools)
         case .readback(let readback):
             guard phase == .awaitingReadback, readback.accepts(response),
                   verifiedReadbacks.insert(readback).inserted else {
