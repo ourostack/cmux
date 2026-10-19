@@ -225,6 +225,97 @@ class ManagedCopilotTurnLedgerTests(unittest.TestCase):
                 self.assertFalse(rows[-1]["complete"])
                 self.assertEqual(rows[-1]["failure"], "rootNotSuccessful")
 
+    def test_streamed_message_requires_its_final_exact_root_and_all_work_readbacks(self):
+        events = root()
+        rows = self.run_ledger([
+            begin(), ack(), events[0],
+            event("assistant.message_start", {"messageId": "assistant-A", "phase": "final_answer"}, ephemeral=True),
+            event("assistant.message_delta", {"messageId": "assistant-A", "deltaContent": "Fin"}, ephemeral=True),
+            event("assistant.message_delta", {"messageId": "assistant-A", "deltaContent": "ished"}, ephemeral=True),
+            *events[1:], *clean_work(),
+        ])
+        self.assertTrue(all(row["accepted"] for row in rows), rows)
+        self.assertFalse(any(row["complete"] for row in rows[:-1]))
+        self.assertTrue(rows[-1]["complete"])
+
+    def test_reasoning_stream_is_display_activity_not_a_substitute_for_exact_root(self):
+        events = root()
+        rows = self.run_ledger([
+            begin(), ack(), events[0],
+            event("assistant.reasoning_delta", {"reasoningId": "reason-A", "deltaContent": "Thinking"}, ephemeral=True),
+            event("assistant.reasoning", {"reasoningId": "reason-A", "content": "Thinking complete"}),
+            *events[1:], *clean_work(),
+        ])
+        self.assertTrue(all(row["accepted"] for row in rows), rows)
+        self.assertFalse(any(row["complete"] for row in rows[:-1]))
+        self.assertTrue(rows[-1]["complete"])
+
+    def test_streaming_display_without_a_final_root_never_permits_work_readback(self):
+        rows = self.run_ledger([
+            begin(), ack(), root()[0],
+            event("assistant.message_start", {"messageId": "assistant-A"}, ephemeral=True),
+            event("assistant.message_delta", {"messageId": "assistant-A", "deltaContent": "Done"}, ephemeral=True),
+            {"op": "beginWork"},
+        ])
+        self.assertTrue(all(row["accepted"] for row in rows[:-1]), rows)
+        self.assertFalse(rows[-1]["accepted"])
+        self.assertFalse(any(row["complete"] for row in rows))
+
+    def test_streamed_payload_requires_typed_content_and_current_message_identity(self):
+        for kind, data, reason in (
+            ("assistant.message_start", {"messageId": "assistant-A", "phase": None}, "invalidStreamingEvent"),
+            ("assistant.message_delta", {"messageId": "assistant-A"}, "invalidStreamingEvent"),
+            ("assistant.message_delta", {"messageId": "foreign", "deltaContent": "x"}, "unmatchedStream"),
+            ("assistant.reasoning_delta", {"reasoningId": "", "deltaContent": "x"}, "invalidStreamingEvent"),
+            ("assistant.reasoning", {"reasoningId": "reason-A", "content": None}, "invalidStreamingEvent"),
+        ):
+            with self.subTest(kind=kind, data=data):
+                rows = self.run_ledger([
+                    begin(), ack(), root()[0],
+                    event("assistant.message_start", {"messageId": "assistant-A"}, ephemeral=True),
+                    event(kind, data, ephemeral=True), *root()[1:], *clean_work(),
+                ])
+                self.assertEqual(rows[-1]["failure"], reason)
+                self.assertFalse(rows[-1]["complete"])
+
+    def test_unfinished_display_stream_blocks_an_otherwise_successful_root(self):
+        for kind, data in (
+            ("assistant.message_start", {"messageId": "unfinished-message"}),
+            ("assistant.reasoning_delta", {"reasoningId": "unfinished-reason", "deltaContent": "thinking"}),
+        ):
+            with self.subTest(kind=kind):
+                events = root()
+                rows = self.run_ledger([
+                    begin(), ack(), events[0], event(kind, data, ephemeral=True),
+                    *events[1:], *clean_work(),
+                ])
+                self.assertEqual(rows[-1]["failure"], "unfinishedStream")
+                self.assertFalse(rows[-1]["complete"])
+
+    def test_streaming_requires_a_live_single_root_turn_and_true_transient_metadata(self):
+        for actions, reason in (
+            ([event("assistant.message_start", {"messageId": "assistant-A"}, ephemeral=True)], "unmatchedStream"),
+            ([root()[0], event("assistant.message_start", {"messageId": "assistant-A"})], "invalidStreamingEvent"),
+            ([root()[0], event("assistant.reasoning_delta", {"reasoningId": "reason-A", "deltaContent": "x"},
+                              ephemeral=1)], "invalidStreamingEvent"),
+        ):
+            with self.subTest(reason=reason, actions=actions):
+                rows = self.run_ledger([begin(), ack(), *actions])
+                self.assertEqual(rows[-1]["failure"], reason)
+                self.assertFalse(rows[-1]["complete"])
+
+    def test_finalized_stream_identity_cannot_be_reopened_by_a_later_event(self):
+        events = root()
+        rows = self.run_ledger([
+            begin(), ack(), events[0],
+            event("assistant.message_start", {"messageId": "assistant-A"}, ephemeral=True),
+            events[1],
+            event("assistant.message_start", {"messageId": "assistant-A"}, ephemeral=True),
+            *events[2:], *clean_work(),
+        ])
+        self.assertEqual(rows[-1]["failure"], "replayedStream")
+        self.assertFalse(rows[-1]["complete"])
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)

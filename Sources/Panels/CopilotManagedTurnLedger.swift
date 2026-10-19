@@ -33,6 +33,10 @@ final class CopilotManagedTurnLedger {
     private var earlyEventBytes = 0
     private var retainedEventIDs: Set<UUID> = []
     private var turns: [String: String] = [:]
+    private var messageStreams: [String: String] = [:]
+    private var reasoningStreams: [String: String] = [:]
+    private var closedMessageIDs: Set<String> = []
+    private var closedReasoningIDs: Set<String> = []
     private var candidate: Root?
     private var completedRoot: Root?
     private var eventRevision = UUID()
@@ -53,6 +57,8 @@ final class CopilotManagedTurnLedger {
         earlyEvents.removeAll()
         earlyEventBytes = 0
         turns.removeAll()
+        messageStreams.removeAll()
+        reasoningStreams.removeAll()
         candidate = nil
         completedRoot = nil
         return true
@@ -185,6 +191,65 @@ final class CopilotManagedTurnLedger {
             }
             turns[turn] = eventID
             candidate = nil
+        case "assistant.message_start":
+            guard Self.boolean(event["ephemeral"]) == true,
+                  let message = identifier(data["messageId"]),
+                  data["phase"] == nil || data["phase"] is String else {
+                fail("invalidStreamingEvent")
+                return
+            }
+            guard !closedMessageIDs.contains(message), messageStreams[message] == nil else {
+                fail("replayedStream")
+                return
+            }
+            guard turns.count == 1, let turn = turns.keys.first else {
+                fail("unmatchedStream")
+                return
+            }
+            messageStreams[message] = turn
+        case "assistant.message_delta":
+            guard Self.boolean(event["ephemeral"]) == true,
+                  let message = identifier(data["messageId"]), data["deltaContent"] is String else {
+                fail("invalidStreamingEvent")
+                return
+            }
+            guard let turn = messageStreams[message], turns[turn] != nil else {
+                fail("unmatchedStream")
+                return
+            }
+        case "assistant.reasoning_delta":
+            guard Self.boolean(event["ephemeral"]) == true,
+                  let reasoning = identifier(data["reasoningId"]), data["deltaContent"] is String else {
+                fail("invalidStreamingEvent")
+                return
+            }
+            guard !closedReasoningIDs.contains(reasoning) else {
+                fail("replayedStream")
+                return
+            }
+            guard turns.count == 1, let turn = turns.keys.first,
+                  reasoningStreams[reasoning] == nil || reasoningStreams[reasoning] == turn else {
+                fail("unmatchedStream")
+                return
+            }
+            reasoningStreams[reasoning] = turn
+        case "assistant.reasoning":
+            guard let reasoning = identifier(data["reasoningId"]), data["content"] is String,
+                  data["rte"] == nil || Self.boolean(data["rte"]) != nil else {
+                fail("invalidStreamingEvent")
+                return
+            }
+            guard !closedReasoningIDs.contains(reasoning) else {
+                fail("replayedStream")
+                return
+            }
+            guard turns.count == 1, let turn = turns.keys.first,
+                  reasoningStreams[reasoning] == nil || reasoningStreams[reasoning] == turn else {
+                fail("unmatchedStream")
+                return
+            }
+            reasoningStreams.removeValue(forKey: reasoning)
+            closedReasoningIDs.insert(reasoning)
         case "assistant.message":
             guard let originatingID = identifier(data["originatingMessageId"]),
                   let owner = state.inputID(matchingProviderInputID: originatingID),
@@ -193,7 +258,7 @@ final class CopilotManagedTurnLedger {
                 return
             }
             guard let turn = identifier(data["turnId"]), turns[turn] != nil,
-                  identifier(data["messageId"]) != nil, data["content"] is String else {
+                  let message = identifier(data["messageId"]), data["content"] is String else {
                 fail("rootAttributionUnavailable")
                 return
             }
@@ -203,6 +268,16 @@ final class CopilotManagedTurnLedger {
                     return
                 }
             }
+            guard !closedMessageIDs.contains(message) else {
+                fail("replayedStream")
+                return
+            }
+            guard messageStreams[message] == nil || messageStreams[message] == turn else {
+                fail("unmatchedStream")
+                return
+            }
+            messageStreams.removeValue(forKey: message)
+            closedMessageIDs.insert(message)
             candidate = Root(input: owner, providerInputID: originatingID, turnID: turn)
         case "assistant.turn_end":
             guard let turn = identifier(data["turnId"]), let activity = turns.removeValue(forKey: turn),
@@ -213,8 +288,12 @@ final class CopilotManagedTurnLedger {
             if candidate?.turnID == turn { candidate?.ended = true }
         case "session.idle":
             guard data["mode"] == nil || data["mode"] as? String == "interactive",
-                  data["aborted"] == nil || Self.isFalse(data["aborted"]) else {
+                  data["aborted"] == nil || Self.boolean(data["aborted"]) == false else {
                 fail("rootNotSuccessful")
+                return
+            }
+            guard messageStreams.isEmpty, reasoningStreams.isEmpty else {
+                fail("unfinishedStream")
                 return
             }
             guard let candidate, candidate.ended, turns.isEmpty,
@@ -243,9 +322,9 @@ final class CopilotManagedTurnLedger {
         return value
     }
 
-    private static func isFalse(_ value: Any?) -> Bool {
-        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
-        return !number.boolValue
+    private static func boolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
     }
 
     @discardableResult
