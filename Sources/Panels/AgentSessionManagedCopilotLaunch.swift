@@ -12,6 +12,7 @@ final class AgentSessionManagedCopilotLaunch {
             expected: AgentPIDProcessIdentity?, observed: AgentPIDProcessIdentity?, processReportsRunning: Bool
         )
         case supervisorCleanupUnverified(expected: AgentPIDProcessIdentity?, terminationStatus: Int32)
+        case commandWorkUnsettled(outstanding: Int)
     }
 
     struct Scope: Equatable {
@@ -313,6 +314,9 @@ final class AgentSessionManagedCopilotLaunch {
             failure = CloseError.supervisorCleanupUnverified(
                 expected: supervisor, terminationStatus: process.terminationStatus
             )
+        }
+        if let codingAuthority, codingAuthority.outstandingWorkCount != 0, failure == nil {
+            failure = CloseError.commandWorkUnsettled(outstanding: codingAuthority.outstandingWorkCount)
         }
         if let failure { throw failure }
     }

@@ -45,8 +45,19 @@ enum ManagedCopilotStartupFixture {
                     ),
                 ]
             }
-            let result = try await exercise(scenario, launch: launch, callbackFile: callbackFile)
+            var result = try await exercise(scenario, launch: launch, callbackFile: callbackFile)
             if scenario == "launch-supervisor-killed" { return result }
+            if scenario == "owner-tool-revoked" {
+                do {
+                    try await launch.close()
+                    result["cleanupVerified"] = true
+                } catch AgentSessionManagedCopilotLaunch.CloseError.commandWorkUnsettled(let outstanding) {
+                    result["cleanupVerified"] = false
+                    result["cleanupError"] = "commandWorkUnsettled"
+                    result["cleanupOutstandingCommandWork"] = outstanding
+                }
+                return result
+            }
             try await launch.close()
             return result
         } catch {
@@ -153,7 +164,8 @@ enum ManagedCopilotStartupFixture {
             }
             let deadline = ContinuousClock.now.advanced(by: .seconds(scenario.hasPrefix("owner-tool-") ? 8 : 2))
             while adapter.phase != .held && !adapter.hasCompleteWorkEvidence && ContinuousClock.now < deadline {
-                if scenario == "owner-tool-revoked", adapter.phase == .executingCallback { authority?.revoke() }
+                if scenario == "owner-tool-revoked", adapter.phase == .executingCallback,
+                   authority?.outstandingWorkCount == 1 { authority?.revoke() }
                 try await Task.sleep(for: .milliseconds(5))
             }
             if ["owner-next-input", "owner-reused-host", "owner-reused-provider", "owner-late-prior-root"]
@@ -644,6 +656,7 @@ enum ManagedCopilotStartupFixture {
         if scenario == "owner-tool-known-failure" {
             scripts[0] += "; printf 'known failure\\n' >&2; exit 7"
         }
+        if scenario == "owner-tool-uncertain-command" { scripts[0] = "exit 254" }
         if scenario == "owner-tool-large-result" {
             scripts[0] = "printf 'read\\n' >> \"$1.executions\"; i=0; while [ $i -lt 20000 ]; do printf '\\001'; printf '\\002' >&2; i=$((i+1)); done"
         }

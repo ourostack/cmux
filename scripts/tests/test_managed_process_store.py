@@ -219,6 +219,52 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
             for event in result["nativeLifecycleEvents"]
         ), result)
 
+    def test_unknown_cleanup_survives_store_release_and_cannot_be_evaded_with_a_fresh_store(self):
+        result = self.run_store("host-held-retention")
+        self.assertEqual(result["originalStartError"], "", result)
+        self.assertTrue(result["originalCleanupUnverified"], result)
+        self.assertTrue(result["heldStoreRetained"], result)
+        self.assertEqual(result["freshStartError"], "managedCleanupUnverified", result)
+        self.assertFalse(result["freshPeerStarted"], result)
+        self.assertFalse(result["freshWireSendObserved"], result)
+        self.assertTrue(result["fixtureBackendsAbsent"], result)
+
+    def test_verified_cleanup_releases_the_host_owned_store_reference(self):
+        result = self.run_store("host-verified-release")
+        self.assertEqual(result["originalStartError"], "", result)
+        self.assertTrue(result["originalStopped"], result)
+        self.assertFalse(result["storeRetainedAfterVerifiedCleanup"], result)
+
+    def test_healthy_stores_can_coexist_and_only_unsettled_cleanup_fences_a_fresh_launch(self):
+        result = self.run_store("host-healthy-concurrency")
+        self.assertTrue(result["twoHealthyStoresActive"], result)
+        self.assertEqual(result["pendingCleanupStartError"], "managedCleanupUnverified", result)
+        self.assertFalse(result["pendingCleanupPeerStarted"], result)
+        self.assertTrue(result["freshStartAfterVerifiedCleanup"], result)
+        self.assertTrue(result["allStopped"], result)
+
+    def test_owner_authorization_cannot_make_the_host_cleanup_fence_stale(self):
+        result = self.run_store("host-fence-after-owner-callback")
+        self.assertEqual(result["startError"], "managedCleanupUnverified", result)
+        self.assertFalse(result["peerStarted"], result)
+        self.assertTrue(result["controlledChildrenAbsent"], result)
+
+    def test_cleanup_becoming_unverified_during_preparation_prevents_backend_launch(self):
+        result = self.run_store("host-fence-before-backend-launch")
+        self.assertEqual(result["startError"], "managedCleanupUnverified", result)
+        self.assertFalse(result["peerStarted"], result)
+        self.assertTrue(result["controlledChildrenAbsent"], result)
+
+    def test_a_held_kept_command_survives_provider_shutdown_and_fences_a_fresh_store(self):
+        result = self.run_store("host-command-held")
+        self.assertEqual(result["originalStartError"], "", result)
+        self.assertTrue(result["commandHeldUncertain"], result)
+        self.assertTrue(result["originalCleanupUnverified"], result)
+        self.assertTrue(result["heldStoreRetained"], result)
+        self.assertEqual(result["freshStartError"], "managedCleanupUnverified", result)
+        self.assertFalse(result["freshPeerStarted"], result)
+        self.assertTrue(result["fixtureBackendsAbsent"], result)
+
     def test_close_during_preparation_never_launches_a_late_backend(self):
         result = self.run_store("cancel-preparation")
         self.assertTrue(result["observedReservation"], result)

@@ -4,6 +4,16 @@ import CmuxSettings
 
 @MainActor
 final class AgentSessionProcessStore {
+    enum ManagedStartError: Error {
+        case managedCleanupUnverified
+    }
+
+    private static var retainedManagedWork: [ObjectIdentifier: AgentSessionProcessStore] = [:]
+
+    private static var hasUnsettledManagedCleanup: Bool {
+        retainedManagedWork.values.contains { $0.managedCopilot?.isClosing == true }
+    }
+
     var eventSink: (([String: Any]) -> Void)?
     var activeProviderSink: ((Bool) -> Void)? {
         didSet {
@@ -58,6 +68,9 @@ final class AgentSessionProcessStore {
         guard !hasActiveProviderSession else {
             throw AgentSessionBridgeError.sessionAlreadyRunning
         }
+        guard !Self.hasUnsettledManagedCleanup else {
+            throw ManagedStartError.managedCleanupUnverified
+        }
         if let codingProjectMandate {
             guard let nativeCodingOwner,
                   nativeCodingOwner.consume(
@@ -69,8 +82,13 @@ final class AgentSessionProcessStore {
             nativeCodingOwner?.revoke()
             throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-native-authorization")
         }
+        guard !Self.hasUnsettledManagedCleanup else {
+            nativeCodingOwner?.revoke()
+            throw ManagedStartError.managedCleanupUnverified
+        }
         let owner = ManagedCopilotOwner(nativeCodingOwner: nativeCodingOwner)
         managedCopilot = owner
+        Self.retainedManagedWork[ObjectIdentifier(self)] = self
         do {
             if let nativeCodingOwner {
                 guard nativeCodingOwner.installRevocationSink(for: self, { [weak self, weak owner] in
@@ -90,6 +108,9 @@ final class AgentSessionProcessStore {
             try Task.checkCancellation()
             guard managedCopilot === owner, !owner.isClosing,
                   nativeCodingOwner?.authorizes(launch.lifetime) != false else { throw CancellationError() }
+            guard !Self.hasUnsettledManagedCleanup else {
+                throw ManagedStartError.managedCleanupUnverified
+            }
             try launch.launchBackend()
             while launch.lifetime.phase == .awaitingBootstrap {
                 try Task.checkCancellation()
@@ -147,12 +168,18 @@ final class AgentSessionProcessStore {
                 try await owner.cleanup?.value
             } else if managedCopilot === owner {
                 nativeCodingOwner?.revoke()
-                managedCopilot = nil
+                releaseManagedWork(owner)
                 emitActiveProviderStateIfNeeded()
                 emitManagedCopilotExit(owner)
             }
             throw original
         }
+    }
+
+    private func releaseManagedWork(_ owner: ManagedCopilotOwner) {
+        guard managedCopilot === owner else { return }
+        managedCopilot = nil
+        Self.retainedManagedWork.removeValue(forKey: ObjectIdentifier(self))
     }
 
     private func emitNativeSessionState(_ owner: ManagedCopilotOwner) {
@@ -194,7 +221,7 @@ final class AgentSessionProcessStore {
             do {
                 try await cleanup.value
                 guard self.managedCopilot === owner else { return }
-                self.managedCopilot = nil
+                self.releaseManagedWork(owner)
                 self.emitActiveProviderStateIfNeeded()
                 self.emitManagedCopilotExit(owner)
             } catch {

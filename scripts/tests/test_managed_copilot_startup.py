@@ -167,6 +167,10 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
         self.assertFalse(result["workEvidence"], result)
         self.assertEqual(result["callbackFile"], "before\n")
         self.assertEqual(result["callbackExecutions"], "")
+        self.assertEqual(result["nativeOutstanding"], 1, result)
+        self.assertFalse(result["cleanupVerified"], result)
+        self.assertEqual(result["cleanupError"], "commandWorkUnsettled", result)
+        self.assertEqual(result["cleanupOutstandingCommandWork"], 1, result)
 
     def test_known_nonzero_exit_is_an_explicit_failure_result_not_unknown_completion(self):
         result = self.startup("owner-tool-known-failure")

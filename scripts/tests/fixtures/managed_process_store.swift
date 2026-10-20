@@ -59,6 +59,9 @@ struct ManagedProcessStoreFixture {
             : scenario == "post-start-protocol-hold" ? "owner-configuration-changed" : "owner-early-root"
         try JSONSerialization.data(withJSONObject: ["scenario": peerScenario, "callbackFile": ""])
             .write(to: directory.appendingPathComponent(".cmux-controlled-copilot-scenario"))
+        if scenario.hasPrefix("host-") {
+            return try await runHostRetention(scenario, executable: executable, directory: directory)
+        }
         let store = AgentSessionProcessStore()
         var events: [[String: Any]] = []
         store.eventSink = { events.append($0) }
@@ -349,6 +352,185 @@ struct ManagedProcessStoreFixture {
         ]
     }
 
+    @MainActor static func runHostRetention(
+        _ scenario: String, executable: URL, directory: URL
+    ) async throws -> [String: Any] {
+        if scenario == "host-healthy-concurrency" || scenario.hasPrefix("host-fence-") {
+            var stores: [AgentSessionProcessStore] = []
+            defer { stores.forEach { $0.closeAll() } }
+            func start(
+                _ name: String, onAuthorization: (() -> Void)? = nil, onReservation: (() -> Void)? = nil
+            ) async throws -> AgentSessionProcessStore {
+                let project = directory.appendingPathComponent(name, isDirectory: true)
+                try FileManager.default.createDirectory(
+                    at: project, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]
+                )
+                let file = project.appendingPathComponent("controlled-project.txt")
+                try Data("before\n".utf8).write(to: file)
+                try JSONSerialization.data(withJSONObject: [
+                    "scenario": "owner-tool-native-coding", "callbackFile": file.path,
+                ]).write(to: project.appendingPathComponent(".cmux-controlled-copilot-scenario"))
+                let store = AgentSessionProcessStore()
+                stores.append(store)
+                store.activeProviderSink = { if $0 { onReservation?() } }
+                var constructed = false
+                guard let owner = AgentSessionManagedCopilotLaunch.NativeCodingOwner(
+                    newPanelID: UUID(), workspaceID: UUID(), rendererID: "react",
+                    workingDirectory: project.path, owningStore: store, isCurrentOwner: {
+                        if constructed { onAuthorization?() }
+                        return true
+                    }
+                ) else { throw POSIXError(.EINVAL) }
+                constructed = true
+                _ = try await store.startManagedCopilot(
+                    scope: owner.scope, executableURL: executable, workingDirectory: owner.workingDirectory,
+                    codingProjectMandate: owner.projectMandate, nativeCodingOwner: owner,
+                    launcher: .init(supervisorExecutableURL: executable)
+                )
+                return store
+            }
+            let first = try await start("first")
+            if scenario.hasPrefix("host-fence-") {
+                let pidFile = directory.appendingPathComponent("first/.cmux-controlled-backend-pid")
+                guard let pid = Int32(try String(contentsOf: pidFile, encoding: .utf8)),
+                      let backend = AgentPIDProcessIdentity.processSnapshot(pid: pid),
+                      let supervisor = AgentPIDProcessIdentity.processSnapshot(pid: backend.parentPID),
+                      supervisor.parentPID == getpid() else { throw POSIXError(.ESRCH) }
+                defer {
+                    if AgentPIDProcessIdentity(pid: pid) == backend.identity { _ = kill(pid, SIGKILL) }
+                }
+                var killFailure: Int32 = 0
+                var startError = ""
+                do {
+                    _ = try await start(
+                        "candidate",
+                        onAuthorization: scenario == "host-fence-after-owner-callback" ? { first.closeAll() } : nil,
+                        onReservation: scenario == "host-fence-before-backend-launch" ? {
+                            if kill(supervisor.identity.pid, SIGKILL) != 0 { killFailure = errno }
+                            first.closeAll()
+                        } : nil
+                    )
+                } catch { startError = String(describing: error) }
+                guard killFailure == 0 else { throw POSIXError(POSIXErrorCode(rawValue: killFailure) ?? .EIO) }
+                let peerStarted = FileManager.default.fileExists(
+                    atPath: directory.appendingPathComponent("candidate/.cmux-controlled-backend-pid").path
+                )
+                stores.forEach { $0.closeAll() }
+                if scenario == "host-fence-before-backend-launch",
+                   AgentPIDProcessIdentity(pid: pid) == backend.identity {
+                    guard kill(pid, SIGKILL) == 0 else { throw POSIXError(.ESRCH) }
+                }
+                let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+                while ContinuousClock.now < deadline {
+                    let othersClosed = stores.filter { $0 !== first }.allSatisfy { !$0.hasActiveProviderSession }
+                    let originalClosed = scenario == "host-fence-before-backend-launch" ||
+                        !first.hasActiveProviderSession
+                    if othersClosed && originalClosed &&
+                        AgentPIDProcessIdentity(pid: pid) != backend.identity &&
+                        AgentPIDProcessIdentity(pid: supervisor.identity.pid) != supervisor.identity { break }
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+                let controlledChildrenAbsent = AgentPIDProcessIdentity(pid: pid) != backend.identity &&
+                    AgentPIDProcessIdentity(pid: supervisor.identity.pid) != supervisor.identity &&
+                    stores.filter { $0 !== first }.allSatisfy { !$0.hasActiveProviderSession }
+                guard controlledChildrenAbsent else { throw POSIXError(.EBUSY) }
+                return [
+                    "startError": startError, "peerStarted": peerStarted,
+                    "controlledChildrenAbsent": controlledChildrenAbsent,
+                ]
+            }
+            let second = try await start("second")
+            let twoHealthyStoresActive = first.hasActiveProviderSession && second.hasActiveProviderSession
+            first.closeAll()
+            var pendingCleanupStartError = ""
+            do { _ = try await start("pending-cleanup") }
+            catch { pendingCleanupStartError = String(describing: error) }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+            while first.hasActiveProviderSession, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            guard !first.hasActiveProviderSession else { throw POSIXError(.EBUSY) }
+            let third = try await start("after-verified-cleanup")
+            let freshStartAfterVerifiedCleanup = second.hasActiveProviderSession && third.hasActiveProviderSession
+            stores.forEach { $0.closeAll() }
+            let closeDeadline = ContinuousClock.now.advanced(by: .seconds(6))
+            while stores.contains(where: \.hasActiveProviderSession), ContinuousClock.now < closeDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            guard !stores.contains(where: \.hasActiveProviderSession) else { throw POSIXError(.EBUSY) }
+            return [
+                "twoHealthyStoresActive": twoHealthyStoresActive,
+                "pendingCleanupStartError": pendingCleanupStartError,
+                "pendingCleanupPeerStarted": FileManager.default.fileExists(
+                    atPath: directory.appendingPathComponent("pending-cleanup/.cmux-controlled-backend-pid").path
+                ),
+                "freshStartAfterVerifiedCleanup": freshStartAfterVerifiedCleanup,
+                "allStopped": true,
+            ]
+        }
+        var originalStore: AgentSessionProcessStore? = AgentSessionProcessStore()
+        weak var originalReference = originalStore
+        let original = try await runNativeCoding(
+            scenario == "host-command-held" ? "native-coding-command-held" :
+                scenario == "host-held-retention" ? "native-coding-cleanup-unknown" : "native-coding-owner-check",
+            store: originalStore!, executable: executable, directory: directory
+        )
+        originalStore = nil
+        for _ in 0..<20 { await Task.yield() }
+        if scenario == "host-verified-release" {
+            return [
+                "originalStartError": original["startError"] ?? "missing",
+                "originalStopped": original["stopped"] ?? false,
+                "storeRetainedAfterVerifiedCleanup": originalReference != nil,
+            ]
+        }
+        let freshDirectory = directory.appendingPathComponent("fresh-owner", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: freshDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]
+        )
+        let freshProject = freshDirectory.appendingPathComponent("controlled-project.txt")
+        try Data("before\n".utf8).write(to: freshProject)
+        try JSONSerialization.data(withJSONObject: [
+            "scenario": "owner-tool-native-coding", "callbackFile": freshProject.path,
+        ]).write(to: freshDirectory.appendingPathComponent(".cmux-controlled-copilot-scenario"))
+        let freshStore = AgentSessionProcessStore()
+        guard let owner = AgentSessionManagedCopilotLaunch.NativeCodingOwner(
+            newPanelID: UUID(), workspaceID: UUID(), rendererID: "solid",
+            workingDirectory: freshDirectory.path, owningStore: freshStore, isCurrentOwner: { true }
+        ) else { throw POSIXError(.EINVAL) }
+        var freshStartError = ""
+        do {
+            _ = try await freshStore.startManagedCopilot(
+                scope: owner.scope, executableURL: executable, workingDirectory: owner.workingDirectory,
+                codingProjectMandate: owner.projectMandate, nativeCodingOwner: owner,
+                launcher: .init(supervisorExecutableURL: executable)
+            )
+        } catch {
+            freshStartError = (error as? AgentSessionBridgeError)?.code ?? String(describing: error)
+        }
+        let peerFile = freshDirectory.appendingPathComponent(".cmux-controlled-backend-pid")
+        let freshPeerStarted = FileManager.default.fileExists(atPath: peerFile.path)
+        freshStore.closeAll()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+        while freshStore.hasActiveProviderSession, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        guard !freshStore.hasActiveProviderSession else { throw POSIXError(.EBUSY) }
+        let traceFile = freshDirectory.appendingPathComponent(".cmux-controlled-copilot-trace")
+        let trace = FileManager.default.fileExists(atPath: traceFile.path)
+            ? try String(contentsOf: traceFile, encoding: .utf8) : ""
+        return [
+            "originalStartError": original["startError"] ?? "missing",
+            "originalCleanupUnverified": original["failureReported"] ?? false,
+            "commandHeldUncertain": original["commandHeldUncertain"] ?? false,
+            "heldStoreRetained": originalReference != nil,
+            "freshStartError": freshStartError, "freshPeerStarted": freshPeerStarted,
+            "freshWireSendObserved": trace.split(separator: "\n").contains("session.send"),
+            "fixtureBackendsAbsent": original["fixtureBackendAbsent"] as? Bool == true &&
+                !freshStore.hasActiveProviderSession,
+        ]
+    }
+
     @MainActor static func runNativeCoding(
         _ scenario: String, store: AgentSessionProcessStore, executable: URL, directory: URL
     ) async throws -> [String: Any] {
@@ -357,7 +539,8 @@ struct ManagedProcessStoreFixture {
         let projectFile = directory.appendingPathComponent("controlled-project.txt")
         try Data("before\n".utf8).write(to: projectFile)
         try JSONSerialization.data(withJSONObject: [
-            "scenario": "owner-tool-native-coding", "callbackFile": projectFile.path,
+            "scenario": scenario == "native-coding-command-held" ? "owner-tool-uncertain-command" :
+                "owner-tool-native-coding", "callbackFile": projectFile.path,
         ]).write(to: directory.appendingPathComponent(".cmux-controlled-copilot-scenario"))
         var currentOwner = true
         var closeDuringOwnerCheck = false
@@ -377,8 +560,8 @@ struct ManagedProcessStoreFixture {
         var workingDirectory = nativeOwner.workingDirectory
         let targetStore = scenario == "native-coding-other-store" ? AgentSessionProcessStore() : store
         var reservedSnapshot: [String: Any] = [:]
-        store.activeProviderSink = { active in
-            guard active else { return }
+        store.activeProviderSink = { [weak store] active in
+            guard active, let store else { return }
             reservedSnapshot = store.nativeManagedSessionSnapshot ?? [:]
             if scenario == "native-coding-owner-lost-before-launch" {
                 Task { @MainActor in currentOwner = false }
@@ -470,7 +653,7 @@ struct ManagedProcessStoreFixture {
                     } catch { return true }
                 }
                 nativeOwner.revoke()
-            } else if ["native-coding-input", "native-coding-owner-lost"].contains(scenario) {
+            } else if ["native-coding-input", "native-coding-owner-lost", "native-coding-command-held"].contains(scenario) {
                 do {
                     try await targetStore.writeLine(sessionId: sessionID, text: acceptedOwnerPrompt)
                 } catch {
@@ -485,6 +668,30 @@ struct ManagedProcessStoreFixture {
                         try await Task.sleep(for: .milliseconds(5))
                     }
                 }
+            }
+            if scenario == "native-coding-command-held" {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+                while !nativeEvents.contains(where: {
+                    $0["type"] as? String == "provider.exit" ||
+                        ($0["text"] as? String)?.contains("cleanup is unverified") == true
+                }), ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+                targetStore.closeAll()
+                let pidFile = directory.appendingPathComponent(".cmux-controlled-backend-pid")
+                guard let pid = Int32(try String(contentsOf: pidFile, encoding: .utf8)) else {
+                    throw POSIXError(.ESRCH)
+                }
+                guard AgentPIDProcessIdentity(pid: pid) == nil else { throw POSIXError(.EBUSY) }
+                return [
+                    "startError": startError, "fixtureBackendAbsent": true,
+                    "failureReported": nativeEvents.contains {
+                        ($0["text"] as? String)?.contains("cleanup is unverified") == true
+                    },
+                    "commandHeldUncertain": nativeEvents.contains {
+                        ($0["text"] as? String)?.contains("commandHeld:uncertainTermination") == true
+                    },
+                ]
             }
         }
         targetStore.closeAll()
