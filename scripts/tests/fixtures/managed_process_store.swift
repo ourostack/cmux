@@ -643,6 +643,7 @@ struct ManagedProcessStoreFixture {
                     return ["leaseId": "lease-1", "render": "paint-2"]
                 case .validate: return true
                 case .release: return nil
+                case .consume: return true
                 }
             },
             onReleaseError: { error in fatalError("unexpected controlled release failure: \(error)") }

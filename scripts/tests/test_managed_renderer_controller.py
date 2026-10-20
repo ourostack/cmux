@@ -46,6 +46,9 @@ class ManagedRendererControllerTests(unittest.TestCase):
     def test_capture_is_bound_to_native_controller_and_current_context(self):
         self.scenario("snapshot-custody")
 
+    def test_capture_observing_context_loss_cannot_revive_an_older_snapshot(self):
+        self.scenario("capture-missing-context-ABA")
+
     def test_native_insertion_cannot_replace_a_captured_human_draft(self):
         for scenario in ["draft-refused", "draft-whitespace"]:
             with self.subTest(scenario=scenario):
@@ -71,6 +74,16 @@ class ManagedRendererControllerTests(unittest.TestCase):
     def test_original_observation_deadline_cannot_be_renewed_by_capture_or_insertion(self):
         for scenario in ["capture-late-reply", "capture-expired",
                          "capture-delayed-insertion", "capture-clipped-frame"]:
+            with self.subTest(scenario=scenario):
+                self.scenario(scenario)
+
+    def test_owned_editor_consumption_outlives_render_expiry_without_reviving_input_authority(self):
+        for scenario in ["consume-after-render", "consume-physical-ABA", "consume-context-ABA",
+                         "consume-foreign", "consume-context-reentry", "consume-reentry",
+                         "consume-nonboolean", "consume-false", "consume-invalidation", "consume-error",
+                         "consume-capture-context-ABA", "consume-capture-changed-ABA", "consume-capture-current",
+                         "consume-capture-during-cleanup", "consume-changed-during-cleanup",
+                         "consume-post-context-ABA", "consume-post-changed-ABA", "consume-newer-insertion"]:
             with self.subTest(scenario=scenario):
                 self.scenario(scenario)
 

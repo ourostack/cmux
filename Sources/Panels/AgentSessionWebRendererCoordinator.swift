@@ -95,7 +95,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
             )
         }
         processStore.eventSink = { [weak self] event in
-            self?.managedRendererController?.invalidate()
+            self?.managedRendererController?.invalidateRender()
             self?.turnNotifier?.observe(event)
             self?.sendEvent(event)
         }
@@ -597,6 +597,9 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         case .release(let leaseID):
             script = "window.cmuxAgentBridge?.managedComposer?.release(leaseID); return null;"
             arguments = ["leaseID": leaseID]
+        case .consume(let receipt):
+            script = "return window.cmuxAgentBridge?.managedComposer?.consume(receipt) ?? false;"
+            arguments = ["receipt": receipt]
         }
         return try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
     }
@@ -991,7 +994,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     private func sendEvent(_ event: [String: Any]) {
-        managedRendererController?.invalidate()
+        managedRendererController?.invalidateRender()
         guard let webView,
               let data = try? JSONSerialization.data(withJSONObject: event),
               let json = String(data: data, encoding: .utf8) else {

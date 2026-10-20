@@ -34,6 +34,15 @@ struct ManagedRendererControllerFixture {
             paintGeneration: 1, geometry: [0, 0, 800, 600]
         )
         let originalContext = context
+        func changeContext() {
+            guard let value = context else { return }
+            context = .init(
+                owner: value.owner, store: value.store, coordinator: value.coordinator, host: value.host,
+                webView: value.webView, window: value.window, responder: value.responder,
+                workspaceID: value.workspaceID, panelID: value.panelID, renderer: value.renderer,
+                document: value.document, paintGeneration: value.paintGeneration + 1, geometry: value.geometry
+            )
+        }
         var captureReply: Any? = ["editorText": "", "editVersion": "edit-1", "render": "paint-1",
                                  "screen": "Visible output\n  exact spacing \n"]
         var receiptReply: Any? = ["leaseId": "lease-1", "render": "paint-2"]
@@ -43,6 +52,9 @@ struct ManagedRendererControllerFixture {
         var releaseErrors = 0
         var reservedText: String?
         var validations = 0
+        var consumeReply: Any? = true
+        var consumeCalls = 0
+        var consumeHook: (() async throws -> Void)?
         var contextHook: (() -> Void)?
         let bridge: (Controller.Operation) async throws -> Any? = { operation in
             try hook?(operation)
@@ -63,6 +75,12 @@ struct ManagedRendererControllerFixture {
             case .release(let leaseID):
                 released.append(leaseID)
                 return nil
+            case .consume(let receipt):
+                consumeCalls += 1
+                try check(receipt == ["leaseId": "lease-1", "render": "paint-2"],
+                          "wrong owned editor consumption receipt")
+                try await consumeHook?()
+                return consumeReply
             }
         }
         let controller = Controller(
@@ -130,6 +148,15 @@ struct ManagedRendererControllerFixture {
                             "screen": "Visible output\n  exact spacing \n"]
         }
         guard let snapshot = try await controller.capture() else { throw Failure.assertion("missing capture") }
+        if scenario == "capture-missing-context-ABA" {
+            context = nil
+            let lost = try await controller.capture()
+            try check(lost == nil, "missing native context supplied a capture")
+            context = originalContext
+            let insertion = try await controller.insert(snapshot, text: "stale capture")
+            try check(insertion == nil && reservedText == nil, "capture-observed context loss revived an old snapshot")
+            return
+        }
         if scenario == "capture-expired" {
             now = began.advanced(by: .seconds(2))
             let insertion = try await controller.insert(snapshot, text: "expired observation")
@@ -207,6 +234,111 @@ struct ManagedRendererControllerFixture {
             throw Failure.assertion("missing insertion")
         }
         try check(reservedText == "literal\n<script>", "text was not passed literally")
+        if scenario.hasPrefix("consume-") {
+            if ["consume-post-context-ABA", "consume-post-changed-ABA", "consume-newer-insertion"].contains(scenario) {
+                var concurrentSnapshot: Controller.Snapshot?
+                var newerInsertion: Controller.Insertion?
+                consumeHook = {
+                    concurrentSnapshot = try await controller.capture()
+                    if scenario == "consume-newer-insertion", let concurrentSnapshot {
+                        newerInsertion = try await controller.insert(concurrentSnapshot, text: "New owned literal")
+                    } else if scenario == "consume-post-context-ABA" {
+                        context = nil
+                    } else {
+                        changeContext()
+                    }
+                }
+                let consumed = try await controller.consume(insertion)
+                try check(!consumed && consumeCalls == 1, "old editor cleanup survived a changed generation")
+                context = originalContext
+                consumeHook = nil
+                if scenario == "consume-newer-insertion" {
+                    guard let newerInsertion,
+                          let frame = try await controller.prepareFrame(newerInsertion) else {
+                        throw Failure.assertion("old cleanup invalidated a newer insertion")
+                    }
+                    try check(frame.validate(), "new insertion lost native frame authority")
+                } else {
+                    guard let concurrentSnapshot else { throw Failure.assertion("missing concurrent capture") }
+                    let revived = try await controller.insert(concurrentSnapshot, text: "Stale concurrent capture")
+                    try check(revived == nil, "post-cleanup observed context loss revived a concurrent capture")
+                }
+                return
+            }
+            if scenario == "consume-foreign" {
+                let foreign = Controller(
+                    context: { context }, operation: bridge, now: { now },
+                    sleep: { _ in }, onReleaseError: { _ in }
+                )
+                let consumed = try await foreign.consume(insertion)
+                try check(!consumed && consumeCalls == 0, "foreign controller invoked editor consumption")
+                return
+            }
+            if scenario == "consume-physical-ABA" {
+                controller.invalidate()
+                context = originalContext
+            } else if scenario == "consume-context-ABA" {
+                context = nil
+                let lost = try await controller.consume(insertion)
+                try check(!lost && consumeCalls == 0, "lost native context invoked editor consumption")
+                context = originalContext
+            } else if scenario == "consume-context-reentry" {
+                contextHook = { controller.invalidate() }
+            } else if scenario == "consume-after-render" {
+                controller.invalidateRender()
+                now = began.advanced(by: .seconds(3))
+            } else if ["consume-capture-context-ABA", "consume-capture-changed-ABA",
+                       "consume-capture-current"].contains(scenario) {
+                controller.invalidateRender()
+                if scenario == "consume-capture-context-ABA" { context = nil }
+                if scenario == "consume-capture-changed-ABA" { changeContext() }
+                _ = try await controller.capture()
+                context = originalContext
+            } else if ["consume-capture-during-cleanup", "consume-changed-during-cleanup"].contains(scenario) {
+                consumeHook = {
+                    if scenario == "consume-capture-during-cleanup" {
+                        context = nil
+                    } else {
+                        changeContext()
+                    }
+                    _ = try await controller.capture()
+                    context = originalContext
+                }
+            } else if scenario == "consume-nonboolean" {
+                consumeReply = NSNumber(value: 1)
+            } else if scenario == "consume-false" {
+                consumeReply = false
+            } else if scenario == "consume-invalidation" {
+                consumeHook = { controller.invalidate() }
+            } else if scenario == "consume-reentry" {
+                consumeHook = {
+                    let duplicate = try await controller.consume(insertion)
+                    try check(!duplicate && consumeCalls == 1, "reentrant consumption invoked editor twice")
+                }
+            } else if scenario == "consume-error" {
+                consumeHook = { throw Failure.bridge }
+                do {
+                    _ = try await controller.consume(insertion)
+                    throw Failure.assertion("editor consumption error swallowed")
+                } catch Failure.bridge {}
+                consumeHook = nil
+                let retried = try await controller.consume(insertion)
+                try check(!retried && consumeCalls == 1, "uncertain consumption was retried")
+                return
+            }
+            let consumed = try await controller.consume(insertion)
+            let expected = ["consume-after-render", "consume-reentry", "consume-capture-current"].contains(scenario)
+            try check(consumed == expected, "incorrect editor consumption disposition: \(scenario)")
+            let invoked = ["consume-physical-ABA", "consume-context-ABA", "consume-context-reentry",
+                           "consume-capture-context-ABA", "consume-capture-changed-ABA"]
+                .contains(scenario) ? 0 : 1
+            try check(consumeCalls == invoked, "unsafe or missing editor consumption invocation")
+            let duplicate = try await controller.consume(insertion)
+            try check(!duplicate && consumeCalls == invoked, "old insertion was consumed twice")
+            let frame = try await controller.prepareFrame(insertion)
+            try check(frame == nil, "editor consumption retained input frame authority")
+            return
+        }
         if scenario.hasPrefix("submission-") {
             let inputID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
             if scenario == "submission-custody" {

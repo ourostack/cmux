@@ -182,6 +182,7 @@ enum AgentSessionManagedCopilotLaunch {
                 case .reserve: return ["leaseId": "lease-1", "render": "render-2"]
                 case .validate: return true
                 case .release: return nil
+                case .consume: return true
                 }
             }, now: { now }, sleep: { now = now.advanced(by: $0) },
             onReleaseError: { error in fatalError("unexpected renderer release: \(error)") }

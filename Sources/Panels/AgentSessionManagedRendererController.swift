@@ -25,6 +25,7 @@ final class AgentSessionManagedRendererController {
         case reserve(snapshot: [String: String], text: String)
         case validate(receipt: [String: String])
         case release(leaseID: String)
+        case consume(receipt: [String: String])
     }
 
     final class Snapshot {
@@ -58,6 +59,7 @@ final class AgentSessionManagedRendererController {
         fileprivate let inserted: ContinuousClock.Instant
         fileprivate let deadline: ContinuousClock.Instant
         fileprivate var claimed = false
+        fileprivate var cleanupClaimed = false
 
         fileprivate init(
             snapshot: Snapshot, text: String, ticket: AgentSessionManagedRendererReservation.Ticket,
@@ -114,6 +116,8 @@ final class AgentSessionManagedRendererController {
     private let onReleaseError: @MainActor (Error) -> Void
     private var activeContext: Context?
     private var activeInsertion: Insertion?
+    private var ownedInsertion: Insertion?
+    private var editorEpoch: UInt64 = 0
     private lazy var reservation = AgentSessionManagedRendererReservation(
         isCurrentHost: { [weak self] in
             guard let self, let expected = self.activeContext else { return false }
@@ -136,12 +140,22 @@ final class AgentSessionManagedRendererController {
     }
 
     func capture() async throws -> Snapshot? {
-        if let insertion = activeInsertion, now() >= insertion.deadline { invalidate() }
+        if let insertion = activeInsertion, now() >= insertion.deadline { invalidateRender() }
         guard activeContext == nil else { return nil }
         let began = now()
         let deadline = began.advanced(by: .seconds(2))
         let epoch = self.epoch
-        guard let context = context(), self.epoch == epoch else { return nil }
+        let editorEpoch = self.editorEpoch
+        let ownedInsertion = self.ownedInsertion
+        let current = context()
+        let lostOwnedContext = ownedInsertion.map {
+            self.ownedInsertion === $0 && current != $0.snapshot.context
+        } ?? false
+        if self.editorEpoch == editorEpoch, current == nil || lostOwnedContext {
+            invalidate()
+            return nil
+        }
+        guard let context = current, self.epoch == epoch else { return nil }
         do {
             let reply = try await operation(.capture)
             guard matches(context, epoch: epoch),
@@ -162,6 +176,8 @@ final class AgentSessionManagedRendererController {
         guard snapshot.origin == identity, snapshot.editorText.isEmpty, Self.bounded(text, maximum: 256 * 1024),
               activeContext == nil, matches(snapshot.context, epoch: snapshot.epoch),
               now() < snapshot.deadline else { return nil }
+        ownedInsertion = nil
+        editorEpoch &+= 1
         activeContext = snapshot.context
         let deadline = snapshot.deadline
         guard let ticket = reservation.begin(expiresAt: deadline) else {
@@ -187,6 +203,7 @@ final class AgentSessionManagedRendererController {
                 snapshot: snapshot, text: text, ticket: ticket, receipt: receipt, inserted: now(), deadline: deadline
             )
             activeInsertion = insertion
+            ownedInsertion = insertion
             return insertion
         } catch {
             revokeIfCurrent(snapshot.epoch)
@@ -229,6 +246,12 @@ final class AgentSessionManagedRendererController {
     }
 
     func invalidate() {
+        editorEpoch &+= 1
+        ownedInsertion = nil
+        invalidateRender()
+    }
+
+    func invalidateRender() {
         epoch &+= 1
         reservation.invalidate()
         let leaseID = activeInsertion?.receipt.leaseID
@@ -238,7 +261,37 @@ final class AgentSessionManagedRendererController {
     }
 
     func finish(_ insertion: Insertion) {
-        if activeInsertion === insertion { invalidate() }
+        if activeInsertion === insertion { invalidateRender() }
+    }
+
+    func consume(_ insertion: Insertion) async throws -> Bool {
+        guard ownedInsertion === insertion, !insertion.cleanupClaimed else { return false }
+        let editorEpoch = self.editorEpoch
+        guard matchesEditor(insertion, epoch: editorEpoch),
+              ownedInsertion === insertion, !insertion.cleanupClaimed else {
+            if ownedInsertion === insertion { invalidate() }
+            return false
+        }
+        insertion.cleanupClaimed = true
+        defer { if ownedInsertion === insertion { ownedInsertion = nil } }
+        invalidateRender()
+        let reply = try await operation(.consume(receipt: [
+            "leaseId": insertion.receipt.leaseID, "render": insertion.receipt.render,
+        ]))
+        guard matchesEditor(insertion, epoch: editorEpoch),
+              let boolean = reply as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID() else { return false }
+        return boolean.boolValue
+    }
+
+    private func matchesEditor(_ insertion: Insertion, epoch: UInt64) -> Bool {
+        guard editorEpoch == epoch else { return false }
+        let current = context()
+        guard editorEpoch == epoch else { return false }
+        guard current == insertion.snapshot.context else {
+            invalidate()
+            return false
+        }
+        return true
     }
 
     private func matches(_ expected: Context, epoch: UInt64) -> Bool {
