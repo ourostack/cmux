@@ -17,6 +17,7 @@ final class CopilotManagedSession {
     private(set) var bufferedEvents: [Data] = []
     private(set) var diagnostics = Data()
     private(set) var closeFailures: [String] = []
+    var failureSink: ((String) -> Void)?
 
     var hasCompleteWorkEvidence: Bool {
         phase == .workObserved && lifetime.transportIsLive(launchID: lifetime.launchID)
@@ -605,5 +606,6 @@ final class CopilotManagedSession {
         codingAuthority?.revoke()
         do { try writer.close() } catch { closeFailures.append("stdin: \(error)") }
         do { try lifetime.abandon() } catch { closeFailures.append("output: \(error)") }
+        failureSink?(reason)
     }
 }

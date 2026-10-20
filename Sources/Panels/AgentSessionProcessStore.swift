@@ -11,14 +11,130 @@ final class AgentSessionProcessStore {
         }
     }
     var hasActiveProviderSession: Bool {
-        !sessions.isEmpty
+        !sessions.isEmpty || managedCopilot != nil
     }
     private var sessions: [String: AgentSessionRunningSession] = [:]
+    private final class ManagedCopilotOwner {
+        let sessionID = UUID().uuidString
+        var launch: AgentSessionManagedCopilotLaunch?
+        var isClosing = false
+        var stopRequested = false
+        var failed = false
+        var cleanup: Task<Void, any Error>?
+    }
+    private var managedCopilot: ManagedCopilotOwner?
     private var lastEmittedHasActiveProviderSession: Bool?
     private static let terminationEscalationInterval: DispatchTimeInterval = .seconds(3)
 
-    func start(plan: AgentSessionLaunchPlan, workingDirectory: String?) async throws -> AgentSessionStartedSession {
-        guard sessions.isEmpty else {
+    func startManagedCopilot(
+        scope: AgentSessionManagedCopilotLaunch.Scope, executableURL: URL, workingDirectory: String,
+        codingProjectMandate: UUID?, launcher: AgentSessionOwnedProcessLauncher = .init()
+    ) async throws -> AgentSessionStartedSession {
+        guard !hasActiveProviderSession else {
+            throw AgentSessionBridgeError.sessionAlreadyRunning
+        }
+        let owner = ManagedCopilotOwner()
+        managedCopilot = owner
+        emitActiveProviderStateIfNeeded()
+        do {
+            try Task.checkCancellation()
+            guard !owner.isClosing else { throw CancellationError() }
+            let launch = try await AgentSessionManagedCopilotLaunch.prepare(
+                scope: scope, executableURL: executableURL, workingDirectory: workingDirectory,
+                codingProjectMandate: codingProjectMandate, launcher: launcher
+            )
+            owner.launch = launch
+            try Task.checkCancellation()
+            guard managedCopilot === owner, !owner.isClosing else { throw CancellationError() }
+            try launch.launchBackend()
+            while launch.lifetime.phase == .awaitingBootstrap {
+                try Task.checkCancellation()
+                guard !owner.isClosing else { throw CancellationError() }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            guard launch.lifetime.phase == .awaitingProvider, !owner.isClosing else {
+                throw AgentSessionBridgeError.providerNotReady("Copilot")
+            }
+            launch.adapter.start(launchID: launch.lifetime.launchID)
+            while launch.adapter.phase != .configurationObserved && launch.adapter.phase != .held {
+                try Task.checkCancellation()
+                guard !owner.isClosing else { throw CancellationError() }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            guard launch.adapter.phase == .configurationObserved, !owner.isClosing else {
+                throw AgentSessionBridgeError.providerNotReady("Copilot")
+            }
+            launch.adapter.failureSink = { [weak self, weak owner] reason in
+                guard let self, let owner else { return }
+                self.failManagedCopilot(owner, reason: reason)
+            }
+            eventSink?([
+                "type": "provider.started", "sessionId": owner.sessionID, "providerId": "copilot",
+                "executablePath": executableURL.path, "arguments": launch.backendArguments,
+            ])
+            try Task.checkCancellation()
+            guard !owner.isClosing else { throw CancellationError() }
+            return AgentSessionStartedSession(sessionId: owner.sessionID)
+        } catch {
+            let original = error
+            if !owner.stopRequested {
+                owner.failed = true
+                let reason = owner.launch?.adapter.holdReason ?? String(describing: error)
+                eventSink?([
+                    "type": "provider.output", "sessionId": owner.sessionID, "providerId": "copilot",
+                    "stream": "stderr", "text": "Managed Copilot failed to start: \(reason)\n",
+                ])
+            }
+            if owner.launch != nil {
+                beginManagedCopilotClose(owner)
+                try await owner.cleanup?.value
+            } else if managedCopilot === owner {
+                managedCopilot = nil
+                emitActiveProviderStateIfNeeded()
+            }
+            throw original
+        }
+    }
+
+    private func failManagedCopilot(_ owner: ManagedCopilotOwner, reason: String) {
+        guard managedCopilot === owner, !owner.isClosing else { return }
+        owner.failed = true
+        beginManagedCopilotClose(owner)
+        eventSink?([
+            "type": "provider.output", "sessionId": owner.sessionID, "providerId": "copilot",
+            "stream": "stderr", "text": "Managed Copilot failed: \(reason)\n",
+        ])
+    }
+
+    private func beginManagedCopilotClose(_ owner: ManagedCopilotOwner) {
+        owner.isClosing = true
+        guard owner.cleanup == nil, let launch = owner.launch else { return }
+        let cleanup = launch.beginClose()
+        owner.cleanup = Task {
+            do {
+                try await cleanup.value
+                guard self.managedCopilot === owner else { return }
+                self.managedCopilot = nil
+                self.emitActiveProviderStateIfNeeded()
+                self.eventSink?([
+                    "type": "provider.exit", "sessionId": owner.sessionID, "providerId": "copilot",
+                    "status": owner.failed ? 1 : 0, "stopRequested": owner.stopRequested,
+                ])
+            } catch {
+                self.eventSink?([
+                    "type": "provider.output", "sessionId": owner.sessionID, "providerId": "copilot",
+                    "stream": "stderr", "text": "Managed Copilot cleanup is unverified: \(error)\n",
+                ])
+                throw error
+            }
+        }
+    }
+
+    func start(
+        plan: AgentSessionLaunchPlan, workingDirectory: String?,
+        launcher: AgentSessionOwnedProcessLauncher = .init()
+    ) async throws -> AgentSessionStartedSession {
+        guard !hasActiveProviderSession else {
             throw AgentSessionBridgeError.sessionAlreadyRunning
         }
         let sessionId = UUID().uuidString
@@ -32,7 +148,7 @@ final class AgentSessionProcessStore {
             launchEnvironment["TMPDIR"] = scratchDirectory.path
             launchEnvironment["CMUX_AGENT_ARTIFACT_ROOT"] = scratchDirectory.path
         }
-        let process = try AgentSessionOwnedProcessLauncher().prepare(
+        let process = try launcher.prepare(
             plan: plan, workingDirectory: workingDirectory, environment: launchEnvironment
         )
 
@@ -127,6 +243,19 @@ final class AgentSessionProcessStore {
         permissionMode: AgentSessionPermissionMode = .standard,
         text: String
     ) async throws {
+        if let owner = managedCopilot, owner.sessionID == sessionId {
+            guard !owner.isClosing, let launch = owner.launch else {
+                throw AgentSessionBridgeError.providerNotReady("Copilot")
+            }
+            guard permissionMode == .standard else {
+                failManagedCopilot(owner, reason: "unsupportedPermissionMode")
+                throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-permission-mode")
+            }
+            guard launch.adapter.submitOwnerInput(UUID(), prompt: text, launchID: launch.lifetime.launchID) else {
+                throw AgentSessionBridgeError.providerNotReady("Copilot")
+            }
+            return
+        }
         guard let session = sessions[sessionId] else {
             throw AgentSessionBridgeError.sessionNotFound(sessionId)
         }
@@ -145,6 +274,11 @@ final class AgentSessionProcessStore {
     }
 
     func stop(sessionId: String) throws {
+        if let owner = managedCopilot, owner.sessionID == sessionId {
+            owner.stopRequested = true
+            beginManagedCopilotClose(owner)
+            return
+        }
         guard let session = sessions[sessionId] else {
             throw AgentSessionBridgeError.sessionNotFound(sessionId)
         }
@@ -153,6 +287,10 @@ final class AgentSessionProcessStore {
     }
 
     func closeAll() {
+        if let owner = managedCopilot {
+            owner.stopRequested = true
+            beginManagedCopilotClose(owner)
+        }
         for session in sessions.values {
             session.stopRequested = true
             requestTermination(for: session)

@@ -166,8 +166,8 @@ final class AgentSessionManagedCopilotLaunch {
         try lifetime.attach(supervisor: supervisor)
     }
 
-    func close() async throws {
-        if let closeTask { return try await closeTask.value }
+    func beginClose() -> Task<Void, any Error> {
+        if let closeTask { return closeTask }
         closed = true
         codingAuthority?.revoke()
         let initialFailure: (any Error)?
@@ -179,7 +179,11 @@ final class AgentSessionManagedCopilotLaunch {
         }
         let task = Task { try await self.finishClose(initialFailure: initialFailure) }
         closeTask = task
-        try await task.value
+        return task
+    }
+
+    func close() async throws {
+        try await beginClose().value
     }
 
     private func finishClose(initialFailure: (any Error)?) async throws {
