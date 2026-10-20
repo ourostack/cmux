@@ -230,6 +230,7 @@ enum ManagedCopilotStartupFixture {
         var configurationEventID: String?
         var callbackStep = 0
         var nativeToolAdvertised = false
+        var interruptedAutomaticFrame = false
         while true {
             let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
             if count == 0 {
@@ -240,7 +241,17 @@ enum ManagedCopilotStartupFixture {
                 if errno == EINTR { continue }
                 throw POSIXError(.EIO)
             }
-            for body in try framer.append(Data(bytes.prefix(count))) {
+            let bodies = try framer.append(Data(bytes.prefix(count)))
+            if scenario == "owner-tool-native-supervisor-backpressure",
+               sentInputs == 1, workStep == 4, !interruptedAutomaticFrame {
+                guard bodies.isEmpty, let plannedID else { throw POSIXError(.EPROTO) }
+                interruptedAutomaticFrame = true
+                try recordTrace("partial-supervisor-chunk:\(count)")
+                try sendEvent(sessionID: plannedID, type: "assistant.intent",
+                              data: ["intent": "New activity while input is partially admitted"])
+                usleep(100_000)
+            }
+            for body in bodies {
                 guard let request = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                       request["jsonrpc"] as? String == "2.0",
                       let id = request["id"] as? String,
@@ -480,18 +491,26 @@ enum ManagedCopilotStartupFixture {
                     }
                 case "session.send":
                     guard scenario.hasPrefix("owner-"), sentInputs == 0 || (
-                            sentInputs == 1 && ["owner-next-input", "owner-reused-provider", "owner-late-prior-root"]
+                            sentInputs == 1 && ["owner-next-input", "owner-reused-provider", "owner-late-prior-root",
+                                               "owner-tool-native-supervisor", "owner-tool-native-supervisor-missing-ack",
+                                               "owner-tool-native-supervisor-backpressure"]
                                 .contains(scenario)
                           ),
                           Set(params.keys) == ["sessionId", "prompt", "source", "agentMode", "mode"],
                           params["sessionId"] as? String == plannedID,
-                          params["prompt"] as? String == "Owner input: 雪 🐈",
+                          params["prompt"] as? String == (
+                            scenario == "owner-tool-native-supervisor-backpressure" && sentInputs == 1
+                                ? String(repeating: "x", count: 128 * 1024)
+                                : scenario.hasPrefix("owner-tool-native-supervisor") && sentInputs == 1
+                                ? "Continue authorized coding." : "Owner input: 雪 🐈"
+                          ),
                           params["source"] as? String == "user",
                           params["agentMode"] as? String == "interactive",
                           params["mode"] as? String == "enqueue",
                           let plannedID else { throw POSIXError(.EPROTO) }
                     sentInputs += 1
                     workStep = 0
+                    if scenario == "owner-tool-native-supervisor-missing-ack", sentInputs == 2 { continue }
                     if scenario == "owner-tool-before-send-ack" {
                         try sendTool(sessionID: plannedID, step: callbackStep, scenario: scenario)
                         usleep(40_000)
@@ -517,7 +536,9 @@ enum ManagedCopilotStartupFixture {
                     if scenario == "owner-configuration-changed" {
                         try sendConfiguration("configuration-before-start", sessionID: plannedID)
                     }
-                    if scenario.hasPrefix("owner-tool-") {
+                    if scenario.hasPrefix("owner-tool-native-supervisor"), sentInputs == 2 {
+                        try sendRoot(sessionID: plannedID, scenario: scenario, input: 2)
+                    } else if scenario.hasPrefix("owner-tool-") {
                         if scenario != "owner-tool-before-send-ack" {
                             try sendTool(sessionID: plannedID, step: callbackStep, scenario: scenario)
                         }

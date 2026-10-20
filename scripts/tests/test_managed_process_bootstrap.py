@@ -72,6 +72,8 @@ class ManagedProcessBootstrapTests(unittest.TestCase):
                      str(ROOT / "Sources/Panels/AgentSessionManagedCommand.swift"),
                      str(ROOT / "Sources/Panels/AgentSessionManagedCopilotLaunch.swift"),
                      str(ROOT / "Sources/Panels/AgentSessionManagedCommandService.swift"),
+                     str(ROOT / "Sources/Panels/AgentSessionManagedRendererController.swift"),
+                     str(ROOT / "Sources/Panels/AgentSessionManagedRendererReservation.swift"),
                      str(ROOT / "Sources/Panels/CopilotManagedSession.swift"),
                      str(ROOT / "Sources/Panels/CopilotManagedConfiguration.swift"),
                      str(ROOT / "Sources/Panels/CopilotManagedEventMetadata.swift"),

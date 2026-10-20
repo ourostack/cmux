@@ -36,6 +36,7 @@ public struct ShepherdManagedSessionState: Sendable {
     public static let maximumObservedWorkIDs = 256
     public let identity: ShepherdManagedSessionIdentity
     public private(set) var currentInputID: UUID?
+    public private(set) var currentInputOrigin: ShepherdManagedInputOrigin?
     public private(set) var activityRevision = UUID()
     public private(set) var eventRevision = UUID()
     private var providerInputID: String?
@@ -89,6 +90,7 @@ public struct ShepherdManagedSessionState: Sendable {
         }
         retainedInputIDs.insert(input)
         currentInputID = input
+        currentInputOrigin = origin
         providerInputID = nil
         ownerInputRequired = false
         invalidateWork()

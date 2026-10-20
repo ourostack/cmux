@@ -27,6 +27,55 @@ final class CopilotManagedSession {
     }
     var inputState: ShepherdManagedSessionState? { turnLedger?.state }
 
+    struct SupervisorInputProgress {
+        let inputID: UUID
+        let identity: ShepherdManagedSessionIdentity
+        let editorInserted = true
+        var backendWriteAdmitted = false
+        var providerInputID: String?
+        var failureReason: String?
+    }
+
+    private var supervisorInputs: [UUID: SupervisorInputProgress] = [:]
+
+    func supervisorInputProgress(_ inputID: UUID) -> SupervisorInputProgress? {
+        supervisorInputs[inputID]
+    }
+
+    @MainActor private struct AutomaticAdmission {
+        let submission: AgentSessionManagedRendererController.Submission
+        let nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+        let owningStore: AnyObject
+        let identity: ShepherdManagedSessionIdentity
+        let eventRevision: UUID
+        let activityRevision: UUID
+    }
+
+    /// Registers an operation, not a delivery receipt; byte admission and exact acknowledgement are separate.
+    func beginSupervisorInput(
+        _ submission: AgentSessionManagedRendererController.Submission,
+        nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner, owningStore: AnyObject
+    ) -> Bool {
+        guard phase == .workObserved, pending.isEmpty, supervisorInputs[submission.inputID] == nil,
+              hasCompleteWorkEvidence, let turnLedger, let identity = lifetime.identity,
+              turnLedger.state.identity == identity, nativeOwner.authorizes(lifetime),
+              submission.claim(owner: nativeOwner, store: owningStore),
+              phase == .workObserved, pending.isEmpty, hasCompleteWorkEvidence,
+              submission.validate(owner: nativeOwner, store: owningStore),
+              turnLedger.beginInput(submission.inputID, origin: .supervisor) else { return false }
+        let admission = AutomaticAdmission(
+            submission: submission, nativeOwner: nativeOwner, owningStore: owningStore, identity: identity,
+            eventRevision: turnLedger.state.eventRevision, activityRevision: turnLedger.state.activityRevision
+        )
+        supervisorInputs[submission.inputID] = SupervisorInputProgress(inputID: submission.inputID, identity: identity)
+        phase = .sending
+        request(.send(submission.inputID), params: [
+            "sessionId": sessionID, "prompt": submission.text, "source": "user",
+            "agentMode": "interactive", "mode": "enqueue",
+        ], automaticAdmission: admission)
+        return phase != .held
+    }
+
     func submitOwnerInput(_ inputID: UUID, prompt: String, launchID: UUID) -> Bool {
         guard launchID == lifetime.launchID,
               phase == .configurationObserved || phase == .workObserved,
@@ -153,7 +202,9 @@ final class CopilotManagedSession {
         request(.connect, params: ["supportedTaskKinds": ["agent", "client", "shell"]])
     }
 
-    private func request(_ method: Method, params: [String: Any]) {
+    private func request(
+        _ method: Method, params: [String: Any], automaticAdmission: AutomaticAdmission? = nil
+    ) {
         guard phase != .held, pending.isEmpty else {
             hold("requestLedgerConflict")
             return
@@ -173,14 +224,20 @@ final class CopilotManagedSession {
         let launchID = lifetime.launchID
         writeTask = Task { [weak self] in
             guard let self, self.phase != .held else { return }
-            let result = await self.writer.write(frame, deadline: .now.advanced(by: .seconds(2))) {
+            let result = await self.writer.write(
+                frame, deadline: automaticAdmission?.submission.deadline ?? .now.advanced(by: .seconds(2))
+            ) {
                 self.phase != .held && self.lifetime.transportIsLive(launchID: launchID)
                     && (!method.requiresCommandAuthority || self.commandAuthorityIsLive)
+                    && (automaticAdmission.map { self.automaticAdmissionIsCurrent($0) } ?? true)
             }
             guard self.phase != .held else { return }
             guard result == .complete(frame.count), self.pending[id] != nil else {
                 self.hold("writeUnavailable")
                 return
+            }
+            if let automaticAdmission {
+                self.supervisorInputs[automaticAdmission.submission.inputID]?.backendWriteAdmitted = true
             }
             self.pending[id]?.admitted = true
             self.completeIfProven(id)
@@ -195,6 +252,20 @@ final class CopilotManagedSession {
             guard let self, self.pending[id] != nil else { return }
             self.hold("responseTimeout")
         }
+    }
+
+    private func automaticAdmissionIsCurrent(_ admission: AutomaticAdmission) -> Bool {
+        guard phase == .sending, let turnLedger,
+              turnLedger.state.currentInputID == admission.submission.inputID,
+              turnLedger.state.currentInputOrigin == .supervisor,
+              turnLedger.state.eventRevision == admission.eventRevision,
+              turnLedger.state.activityRevision == admission.activityRevision,
+              admission.nativeOwner.authorizes(lifetime),
+              admission.submission.validate(owner: admission.nativeOwner, store: admission.owningStore),
+              lifetime.identity == admission.identity else { return false }
+        return phase == .sending && turnLedger.state.currentInputID == admission.submission.inputID &&
+            turnLedger.state.eventRevision == admission.eventRevision &&
+            turnLedger.state.activityRevision == admission.activityRevision
     }
 
     private func receive(stream: String, bytes: Data, launchID: UUID) {
@@ -490,8 +561,16 @@ final class CopilotManagedSession {
                 hold("invalidSendAcknowledgement")
                 return
             }
-            guard let turnLedger, turnLedger.acknowledgeInput(inputID, providerInputID: messageID) else {
-                hold(turnLedger?.failureReason ?? "inputLedgerConflict")
+            guard let turnLedger else {
+                hold("inputLedgerConflict")
+                return
+            }
+            let acknowledged = turnLedger.acknowledgeInput(inputID, providerInputID: messageID)
+            if turnLedger.state.inputID(matchingProviderInputID: messageID) == inputID {
+                supervisorInputs[inputID]?.providerInputID = messageID
+            }
+            guard acknowledged else {
+                hold(turnLedger.failureReason ?? "inputLedgerConflict")
                 return
             }
             guard publishLedgerProjections() else { return }
@@ -631,6 +710,9 @@ final class CopilotManagedSession {
         guard phase != .held else { return }
         phase = .held
         holdReason = reason
+        for id in supervisorInputs.keys where supervisorInputs[id]?.providerInputID == nil {
+            supervisorInputs[id]?.failureReason = reason
+        }
         pending.removeAll()
         writeTask?.cancel()
         timeoutTask?.cancel()

@@ -219,9 +219,22 @@ import Testing
     @Test func anAutomaticInputCannotStartAnUnobservedOrBusyRoot() throws {
         var state = ShepherdManagedSessionState(identity: try managedIdentity())
         expectManaged(!state.beginInput(UUID(), origin: .supervisor))
+        #expect(state.currentInputOrigin == nil)
         expectManaged(state.beginInput(UUID(), origin: .owner))
         expectManaged(!state.beginInput(UUID(), origin: .owner))
         expectManaged(!state.beginInput(UUID(), origin: .supervisor))
+        #expect(state.currentInputOrigin == .owner)
+    }
+
+    @Test func onlyAnAdmittedInputCanChangeTheRecordedNativeOrigin() throws {
+        var state = try settledManagedState()
+        let input = UUID()
+        expectManaged(state.beginInput(input, origin: .supervisor))
+        #expect(state.currentInputID == input)
+        #expect(state.currentInputOrigin == .supervisor)
+        expectManaged(!state.beginInput(UUID(), origin: .owner))
+        #expect(state.currentInputID == input)
+        #expect(state.currentInputOrigin == .supervisor)
     }
 
     @Test(arguments: ["jobs", "wakeups"])

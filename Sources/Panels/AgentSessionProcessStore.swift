@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import CmuxSettings
+import CmuxControlSocket
 
 @MainActor
 final class AgentSessionProcessStore {
@@ -57,6 +58,34 @@ final class AgentSessionProcessStore {
         guard candidate.authorizes(launch.lifetime) else { return false }
         return managedCopilot === owner && owner.launch === launch &&
             owner.started && !owner.isClosing && !owner.failed
+    }
+
+    func managedCodingState(
+        for candidate: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+    ) -> ShepherdManagedSessionState? {
+        guard ownsManagedCodingOwner(candidate), let owner = managedCopilot,
+              owner.nativeCodingOwner === candidate, let launch = owner.launch,
+              let state = launch.adapter.inputState, state.identity == launch.lifetime.identity,
+              managedCopilot === owner, owner.launch === launch,
+              owner.started, !owner.isClosing, !owner.failed else { return nil }
+        return state
+    }
+
+    func beginManagedSupervisorInput(
+        sessionId: String, submission: AgentSessionManagedRendererController.Submission,
+        nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+    ) -> Bool {
+        guard ownsManagedCodingOwner(nativeOwner), let owner = managedCopilot,
+              owner.sessionID == sessionId, owner.nativeCodingOwner === nativeOwner,
+              let launch = owner.launch else { return false }
+        return launch.adapter.beginSupervisorInput(submission, nativeOwner: nativeOwner, owningStore: self)
+    }
+
+    func managedSupervisorInputProgress(
+        sessionId: String, inputID: UUID
+    ) -> CopilotManagedSession.SupervisorInputProgress? {
+        guard let owner = managedCopilot, owner.sessionID == sessionId else { return nil }
+        return owner.launch?.adapter.supervisorInputProgress(inputID)
     }
 
     func startManagedCopilot(

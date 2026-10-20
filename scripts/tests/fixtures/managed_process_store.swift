@@ -605,6 +605,117 @@ struct ManagedProcessStoreFixture {
         ]
     }
 
+    @MainActor static func runSupervisorInput(
+        _ scenario: String, store: AgentSessionProcessStore,
+        nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner,
+        sessionID: String, directory: URL
+    ) async throws -> [String: Any] {
+        if scenario != "native-coding-supervisor-unready" {
+            try await store.writeLine(sessionId: sessionID, text: acceptedOwnerPrompt)
+            let firstDeadline = ContinuousClock.now.advanced(by: .seconds(8))
+            while store.managedCodingState(for: nativeOwner)?.hasCompleteWorkEvidence != true {
+                guard ContinuousClock.now < firstDeadline else { throw POSIXError(.ETIMEDOUT) }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        let before = store.managedCodingState(for: nativeOwner)
+        let host = NSObject()
+        var invalidateRenderer = false
+        var insertions = 0
+        let controller = AgentSessionManagedRendererController(
+            context: {
+                guard !invalidateRenderer, store.ownsManagedCodingOwner(nativeOwner) else { return nil }
+                return .init(
+                    owner: ObjectIdentifier(nativeOwner), store: ObjectIdentifier(store),
+                    coordinator: ObjectIdentifier(host), host: ObjectIdentifier(host),
+                    webView: ObjectIdentifier(host), window: ObjectIdentifier(host), responder: ObjectIdentifier(host),
+                    workspaceID: nativeOwner.scope.workspaceID, panelID: nativeOwner.scope.surfaceID,
+                    renderer: "react", document: "file:///controlled/mock-managed.html",
+                    paintGeneration: 1, geometry: [0, 0, 800, 600]
+                )
+            },
+            operation: { operation in
+                switch operation {
+                case .capture: return ["editorText": "", "editVersion": "edit-1", "render": "paint-1"]
+                case .reserve:
+                    insertions += 1
+                    return ["leaseId": "lease-1", "render": "paint-2"]
+                case .validate: return true
+                case .release: return nil
+                }
+            },
+            onReleaseError: { error in fatalError("unexpected controlled release failure: \(error)") }
+        )
+        let inputID = UUID()
+        let literal = scenario == "native-coding-supervisor-backpressure"
+            ? String(repeating: "x", count: 128 * 1024) : "Continue authorized coding."
+        guard let snapshot = try await controller.capture(),
+              let insertion = try await controller.insert(snapshot, text: literal),
+              let submission = try await controller.prepareSubmission(insertion, inputID: inputID) else {
+            throw POSIXError(.EPROTO)
+        }
+        var recordedProgress = store.managedSupervisorInputProgress(sessionId: sessionID, inputID: inputID)
+        store.eventSink = { [weak store] _ in
+            if let progress = store?.managedSupervisorInputProgress(sessionId: sessionID, inputID: inputID) {
+                recordedProgress = progress
+            }
+        }
+        let foreignStore = AgentSessionProcessStore()
+        let target = scenario == "native-coding-supervisor-foreign-store" ? foreignStore : store
+        let candidate = scenario == "native-coding-supervisor-foreign-owner"
+            ? AgentSessionManagedCopilotLaunch.NativeCodingOwner(
+                newPanelID: UUID(), workspaceID: nativeOwner.scope.workspaceID, rendererID: "react",
+                workingDirectory: directory.path, owningStore: store, isCurrentOwner: { true }
+              )! : nativeOwner
+        if scenario == "native-coding-supervisor-expired" { try await Task.sleep(for: .milliseconds(2010)) }
+        let registered = target.beginManagedSupervisorInput(
+            sessionId: sessionID, submission: submission, nativeOwner: candidate
+        )
+        if scenario == "native-coding-supervisor-revoke-before-byte" { invalidateRenderer = true }
+        let expectedHold = ["native-coding-supervisor-revoke-before-byte", "native-coding-supervisor-missing-ack",
+                            "native-coding-supervisor-backpressure"]
+            .contains(scenario)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while registered && (expectedHold ? store.hasActiveProviderSession
+            : store.managedCodingState(for: nativeOwner)?.hasCompleteWorkEvidence != true) {
+            guard ContinuousClock.now < deadline else { throw POSIXError(.ETIMEDOUT) }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let after = store.managedCodingState(for: nativeOwner)
+        let progress = store.managedSupervisorInputProgress(sessionId: sessionID, inputID: inputID) ?? recordedProgress
+        let duplicateRegistered = scenario == "native-coding-supervisor-duplicate" &&
+            store.beginManagedSupervisorInput(sessionId: sessionID, submission: submission, nativeOwner: nativeOwner)
+        store.closeAll()
+        let closeDeadline = ContinuousClock.now.advanced(by: .seconds(6))
+        while store.hasActiveProviderSession, ContinuousClock.now < closeDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let trace = try String(
+            contentsOf: directory.appendingPathComponent(".cmux-controlled-copilot-trace"), encoding: .utf8
+        )
+        let executionFile = directory.appendingPathComponent("controlled-project.txt.executions")
+        let executions = FileManager.default.fileExists(atPath: executionFile.path)
+            ? try String(contentsOf: executionFile, encoding: .utf8) : ""
+        return [
+            "registered": registered,
+            "duplicateRegistered": duplicateRegistered,
+            "hasProgress": progress != nil, "failureReason": progress?.failureReason ?? "",
+            "editorInsertionCount": insertions,
+            "firstOrigin": before?.currentInputOrigin.map { "\($0)" } ?? "",
+            "lastOrigin": after?.currentInputOrigin.map { "\($0)" } ?? "",
+            "inputIDMatches": after?.currentInputID == inputID,
+            "workEvidence": after?.hasCompleteWorkEvidence == true,
+            "editorInserted": progress?.editorInserted == true,
+            "backendWriteAdmitted": progress?.backendWriteAdmitted == true,
+            "providerInputID": progress?.providerInputID ?? "",
+            "identityMatches": progress?.identity == after?.identity,
+            "sendCount": trace.split(separator: "\n").filter { $0 == "session.send" }.count,
+            "partialChunkObserved": trace.contains("partial-supervisor-chunk:"),
+            "commandExecutions": executions,
+            "stopped": !store.hasActiveProviderSession,
+        ]
+    }
+
     @MainActor static func runNativeCoding(
         _ scenario: String, store: AgentSessionProcessStore, executable: URL, directory: URL
     ) async throws -> [String: Any] {
@@ -626,8 +737,11 @@ struct ManagedProcessStoreFixture {
         let projectFile = directory.appendingPathComponent("controlled-project.txt")
         try Data("before\n".utf8).write(to: projectFile)
         try JSONSerialization.data(withJSONObject: [
-            "scenario": scenario == "native-coding-command-held" ? "owner-tool-uncertain-command" :
-                "owner-tool-native-coding", "callbackFile": projectFile.path,
+            "scenario": scenario == "native-coding-supervisor-backpressure" ? "owner-tool-native-supervisor-backpressure"
+                : scenario == "native-coding-supervisor-missing-ack" ? "owner-tool-native-supervisor-missing-ack"
+                : scenario.hasPrefix("native-coding-supervisor") ? "owner-tool-native-supervisor"
+                : scenario == "native-coding-command-held" ? "owner-tool-uncertain-command"
+                : "owner-tool-native-coding", "callbackFile": projectFile.path,
         ]).write(to: directory.appendingPathComponent(".cmux-controlled-copilot-scenario"))
         var currentOwner = true
         var closeDuringOwnerCheck = false
@@ -693,6 +807,11 @@ struct ManagedProcessStoreFixture {
         closeDuringOwnerCheck = scenario == "native-coding-owner-check-reentrant"
         let ownerAcceptedWhileRunning = targetStore.ownsManagedCodingOwner(nativeOwner)
         let foreignStoreAcceptedOwner = AgentSessionProcessStore().ownsManagedCodingOwner(nativeOwner)
+        if scenario.hasPrefix("native-coding-supervisor"), startError.isEmpty {
+            return try await runSupervisorInput(
+                scenario, store: targetStore, nativeOwner: nativeOwner, sessionID: sessionID, directory: directory
+            )
+        }
         if scenario == "native-coding-cleanup-unknown", !sessionID.isEmpty {
             let pidFile = directory.appendingPathComponent(".cmux-controlled-backend-pid")
             guard let pid = Int32(try String(contentsOf: pidFile, encoding: .utf8)),
@@ -787,6 +906,7 @@ struct ManagedProcessStoreFixture {
                     },
                 ]
             }
+
         }
         targetStore.closeAll()
         let ownerAcceptedWhileClosing = targetStore.ownsManagedCodingOwner(nativeOwner)

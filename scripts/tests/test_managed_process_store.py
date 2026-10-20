@@ -35,6 +35,8 @@ class ManagedProcessStoreTests(unittest.TestCase):
             "Sources/Panels/CodexAppServerQueuedInput.swift", "Sources/Panels/AgentSessionOwnedProcessLauncher.swift",
             "Sources/Panels/AgentSessionManagedSession.swift", "Sources/Panels/AgentSessionManagedCommand.swift",
             "Sources/Panels/AgentSessionManagedCopilotLaunch.swift",
+            "Sources/Panels/AgentSessionManagedRendererController.swift",
+            "Sources/Panels/AgentSessionManagedRendererReservation.swift",
             "Sources/Panels/AgentSessionManagedCommandService.swift", "Sources/Panels/CopilotManagedSession.swift",
             "Sources/Panels/CopilotManagedConfiguration.swift", "Sources/Panels/CopilotManagedEventMetadata.swift",
             "Sources/Panels/CopilotManagedTurnLedger.swift",
@@ -181,6 +183,69 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
                 self.assertFalse(result["workReadbacksObserved"], result)
                 self.assertFalse(any(event["type"] == "provider.turnComplete"
                                      for event in result["nativeEvents"]), result)
+
+    def test_supervisor_input_uses_exact_bound_literal_distinct_origin_and_provider_ack(self):
+        result = self.run_store("native-coding-supervisor")
+        self.assertTrue(result["registered"], result)
+        self.assertEqual(result["firstOrigin"], "owner", result)
+        self.assertEqual(result["lastOrigin"], "supervisor", result)
+        self.assertTrue(result["inputIDMatches"], result)
+        self.assertTrue(result["editorInserted"], result)
+        self.assertTrue(result["backendWriteAdmitted"], result)
+        self.assertEqual(result["providerInputID"], "server-input-two", result)
+        self.assertTrue(result["workEvidence"], result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertEqual(result["commandExecutions"], "read\nedit\nvalidate\n", result)
+        self.assertTrue(result["identityMatches"], result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_input_requires_complete_work_exact_native_custody_and_unexpired_editor_evidence(self):
+        for suffix, sends in [("unready", 0), ("foreign-owner", 1), ("foreign-store", 1), ("expired", 1)]:
+            with self.subTest(suffix=suffix):
+                result = self.run_store(f"native-coding-supervisor-{suffix}")
+                self.assertFalse(result["registered"], result)
+                self.assertFalse(result["hasProgress"], result)
+                self.assertEqual(result["editorInsertionCount"], 1, result)
+                self.assertEqual(result["sendCount"], sends, result)
+                self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_input_revalidates_before_first_actual_adapter_pipe_byte(self):
+        result = self.run_store("native-coding-supervisor-revoke-before-byte")
+        self.assertTrue(result["registered"], result)
+        self.assertFalse(result["backendWriteAdmitted"], result)
+        self.assertEqual(result["providerInputID"], "", result)
+        self.assertEqual(result["failureReason"], "writeUnavailable", result)
+        self.assertEqual(result["sendCount"], 1, result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_input_cannot_turn_byte_admission_without_ack_into_accepted_delivery(self):
+        result = self.run_store("native-coding-supervisor-missing-ack")
+        self.assertTrue(result["registered"], result)
+        self.assertTrue(result["backendWriteAdmitted"], result)
+        self.assertEqual(result["providerInputID"], "", result)
+        self.assertEqual(result["failureReason"], "responseTimeout", result)
+        self.assertFalse(result["workEvidence"], result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_input_duplicate_native_uuid_cannot_enqueue_a_second_write(self):
+        result = self.run_store("native-coding-supervisor-duplicate")
+        self.assertTrue(result["registered"], result)
+        self.assertFalse(result["duplicateRegistered"], result)
+        self.assertEqual(result["providerInputID"], "server-input-two", result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_input_provider_activity_after_a_partial_frame_stops_the_next_adapter_syscall(self):
+        result = self.run_store("native-coding-supervisor-backpressure")
+        self.assertTrue(result["registered"], result)
+        self.assertTrue(result["partialChunkObserved"], result)
+        self.assertFalse(result["backendWriteAdmitted"], result)
+        self.assertEqual(result["providerInputID"], "", result)
+        self.assertEqual(result["failureReason"], "writeUnavailable", result)
+        self.assertEqual(result["sendCount"], 1, result)
+        self.assertFalse(result["workEvidence"], result)
+        self.assertTrue(result["stopped"], result)
 
     def test_production_native_owner_requires_an_immutable_qualified_profile_before_launch(self):
         for renderer in ["react", "solid"]:
