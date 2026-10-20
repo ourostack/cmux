@@ -5,6 +5,7 @@ export type ManagedComposerSnapshot = {
   editorText: string;
   editVersion: string;
   render: string;
+  screen: string;
 };
 
 export type ManagedComposerReceipt = { leaseId: string; render: string };
@@ -111,7 +112,8 @@ export class ManagedComposer {
     if (typeof text !== "string" || text.length === 0 || text.length > 256 * 1024) return null;
     const current = this.capture();
     if (!current || !snapshot || current.render !== snapshot.render ||
-        current.editVersion !== snapshot.editVersion || current.editorText !== snapshot.editorText) return null;
+        current.editVersion !== snapshot.editVersion || current.editorText !== snapshot.editorText ||
+        current.screen !== snapshot.screen) return null;
     const binding = this.binding;
     const window = binding?.element()?.ownerDocument.defaultView;
     if (!binding || !window) return null;
@@ -213,11 +215,13 @@ export class ManagedComposer {
           rect.left >= window.innerWidth || rect.top >= window.innerHeight) return null;
     }
     const editorText = binding.text();
+    const screen = document.body.innerText;
+    if (typeof screen !== "string" || screen.length > 256 * 1024) return null;
     const outside = canonicalDOM(document.body, editor, window);
     if (outside === null) return null;
     const selection = document.getSelection();
     const render = JSON.stringify({
-      identity: this.identity, editVersion: this.editVersion, editorText, outside,
+      identity: this.identity, editVersion: this.editVersion, editorText, outside, screen,
       editorDOM: editor instanceof window.HTMLTextAreaElement ? editor.value : editor.innerHTML,
       focused: document.hasFocus(),
       activeElement: document.activeElement ? nodePath(document.activeElement, document.documentElement) : null,
@@ -228,7 +232,7 @@ export class ManagedComposer {
           selection?.anchorNode ? nodePath(selection.anchorNode, editor) : null,
           selection?.focusNode ? nodePath(selection.focusNode, editor) : null],
     });
-    return render.length > 256 * 1024 ? null : { editorText, editVersion: this.editVersion, render };
+    return render.length > 256 * 1024 ? null : { editorText, editVersion: this.editVersion, render, screen };
   }
 
   private outsideComposer(): string | null {

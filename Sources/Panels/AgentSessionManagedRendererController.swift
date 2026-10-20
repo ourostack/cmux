@@ -29,6 +29,7 @@ final class AgentSessionManagedRendererController {
 
     final class Snapshot {
         let editorText: String
+        let screen: String
         fileprivate let origin: UUID
         fileprivate let epoch: UInt64
         fileprivate let context: Context
@@ -40,6 +41,7 @@ final class AgentSessionManagedRendererController {
             self.context = context
             self.values = values
             editorText = values["editorText"]!
+            screen = values["screen"]!
         }
     }
 
@@ -136,9 +138,10 @@ final class AgentSessionManagedRendererController {
         do {
             let reply = try await operation(.capture)
             guard matches(context, epoch: epoch),
-                  let values = Self.strings(reply, keys: ["editorText", "editVersion", "render"]),
+                  let values = Self.strings(reply, keys: ["editorText", "editVersion", "render", "screen"]),
                   Self.bounded(values["editorText"], maximum: 1024 * 1024, allowEmpty: true),
                   Self.bounded(values["editVersion"], maximum: 128),
+                  Self.bounded(values["screen"], maximum: 1024 * 1024, allowEmpty: true),
                   Self.bounded(values["render"], maximum: 1024 * 1024) else { return nil }
             return Snapshot(origin: identity, epoch: epoch, context: context, values: values)
         } catch {

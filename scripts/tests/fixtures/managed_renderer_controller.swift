@@ -34,7 +34,8 @@ struct ManagedRendererControllerFixture {
             paintGeneration: 1, geometry: [0, 0, 800, 600]
         )
         let originalContext = context
-        var captureReply: Any? = ["editorText": "", "editVersion": "edit-1", "render": "paint-1"]
+        var captureReply: Any? = ["editorText": "", "editVersion": "edit-1", "render": "paint-1",
+                                 "screen": "Visible output\n  exact spacing \n"]
         var receiptReply: Any? = ["leaseId": "lease-1", "render": "paint-2"]
         var validationReply: Any? = true
         var hook: ((Controller.Operation) throws -> Void)?
@@ -50,7 +51,8 @@ struct ManagedRendererControllerFixture {
             case .reserve(let snapshot, let text):
                 try check(snapshot == ["editorText": scenario == "draft-whitespace" ? " \n\t"
                                         : scenario == "draft-refused" ? "human draft" : "",
-                                       "editVersion": "edit-1", "render": "paint-1"],
+                                       "editVersion": "edit-1", "render": "paint-1",
+                                       "screen": "Visible output\n  exact spacing \n"],
                           "controller changed captured renderer evidence")
                 reservedText = text
                 return receiptReply
@@ -79,18 +81,28 @@ struct ManagedRendererControllerFixture {
         }
         if scenario == "strict-dictionaries" {
             let badSnapshots: [Any] = [
-                ["editorText": "", "editVersion": "edit-1", "render": "paint-1", "extra": "unbound"],
-                ["editorText": 1, "editVersion": "edit-1", "render": "paint-1"],
-                ["editorText": "", "editVersion": "", "render": "paint-1"],
-                ["editorText": "", "editVersion": "edit-1", "render": ""],
-                ["editorText": "", "editVersion": "edit-1", "render": String(repeating: "x", count: 1_048_577)],
+                ["editorText": "", "editVersion": "edit-1", "render": "paint-1", "screen": "visible",
+                 "extra": "unbound"],
+                ["editorText": 1, "editVersion": "edit-1", "render": "paint-1", "screen": "visible"],
+                ["editorText": "", "editVersion": "", "render": "paint-1", "screen": "visible"],
+                ["editorText": "", "editVersion": "edit-1", "render": "", "screen": "visible"],
+                ["editorText": "", "editVersion": "edit-1", "render": String(repeating: "x", count: 1_048_577),
+                 "screen": "visible"],
+                ["editorText": "", "editVersion": "edit-1", "render": "paint-1"],
+                ["editorText": "", "editVersion": "edit-1", "render": "paint-1", "screen": 1],
+                ["editorText": "", "editVersion": "edit-1", "render": "paint-1",
+                 "screen": String(repeating: "x", count: 1_048_577)],
             ]
             for bad in badSnapshots {
                 captureReply = bad
                 let snapshot = try await controller.capture()
                 try check(snapshot == nil, "malformed snapshot admitted")
             }
-            captureReply = ["editorText": "", "editVersion": "edit-1", "render": "paint-1"]
+            captureReply = ["editorText": "", "editVersion": "edit-1", "render": "paint-1", "screen": ""]
+            let emptyScreen = try await controller.capture()
+            try check(emptyScreen?.screen == "", "native snapshot refused an exact empty visible screen")
+            captureReply = ["editorText": "", "editVersion": "edit-1", "render": "paint-1",
+                            "screen": "Visible output\n  exact spacing \n"]
             let badReceipts: [Any] = [
                 ["leaseId": "", "render": "paint-2"],
                 ["leaseId": "lease-1", "render": "paint-2", "extra": "unbound"],
@@ -98,6 +110,8 @@ struct ManagedRendererControllerFixture {
             ]
             for bad in badReceipts {
                 guard let snapshot = try await controller.capture() else { throw Failure.assertion("missing capture") }
+                try check(snapshot.screen == "Visible output\n  exact spacing \n",
+                          "native snapshot normalized or substituted visible plaintext")
                 receiptReply = bad
                 let insertion = try await controller.insert(snapshot, text: "literal")
                 try check(insertion == nil, "malformed receipt admitted")
@@ -106,7 +120,8 @@ struct ManagedRendererControllerFixture {
         }
         if scenario.hasPrefix("draft-") {
             captureReply = ["editorText": scenario == "draft-whitespace" ? " \n\t" : "human draft",
-                            "editVersion": "edit-1", "render": "paint-1"]
+                            "editVersion": "edit-1", "render": "paint-1",
+                            "screen": "Visible output\n  exact spacing \n"]
         }
         guard let snapshot = try await controller.capture() else { throw Failure.assertion("missing capture") }
         if scenario.hasPrefix("draft-") {

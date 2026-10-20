@@ -111,7 +111,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
 }
 
-type ComposerSnapshot = { editorText: string; editVersion: string; render: string };
+type ComposerSnapshot = { editorText: string; editVersion: string; render: string; screen: string };
 type ComposerReceipt = { leaseId: string; render: string };
 type ManagedComposer = {
   capture(): ComposerSnapshot | null;
@@ -134,7 +134,11 @@ function paintedFixture(renderer: RendererKind) {
     providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
     executionDisclosure: disclosure,
   });
-  // JSDOM has no layout engine or OS focus; only those environmental facts are controlled.
+  // JSDOM has no layout/innerText engine or OS focus; only those platform facts are controlled.
+  Object.defineProperty(fixture.dom.window.document.body, "innerText", {
+    configurable: true,
+    get() { return this.textContent ?? ""; },
+  });
   fixture.dom.window.document.hasFocus = () => true;
   fixture.dom.window.HTMLElement.prototype.getBoundingClientRect = () =>
     new fixture.dom.window.DOMRect(10, 10, 300, 100);
@@ -191,6 +195,89 @@ async function editActualComposer(fixture: ReturnType<typeof mount>, text: strin
 }
 
 for (const renderer of ["react", "solid"] as const) {
+  test(`actual ${renderer} captures platform-visible plaintext in the painted snapshot`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      const document = fixture.dom.window.document;
+      Object.defineProperty(document.body, "innerText", {
+        configurable: true,
+        get: () => "Visible coding output\n  exact spacing \n",
+      });
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const snapshot = await paintedCapture(composer(fixture));
+      expect(snapshot.screen).toBe("Visible coding output\n  exact spacing \n");
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
+  test(`actual ${renderer} refuses stale visible plaintext even when the DOM is unchanged`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      const document = fixture.dom.window.document;
+      let visibleText = "First painted output";
+      Object.defineProperty(document.body, "innerText", { configurable: true, get: () => visibleText });
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const lane = composer(fixture);
+      const snapshot = await paintedCapture(lane);
+      const domBefore = document.body.innerHTML;
+      expect(await lane.reserve({ ...snapshot, screen: "Unbound plaintext" }, "Do not insert.")).toBeNull();
+      visibleText = "Second painted output";
+      expect(await lane.reserve(snapshot, "Continue the authorized task.")).toBeNull();
+      expect(document.body.innerHTML).toBe(domBefore);
+      const fresh = await paintedCapture(lane);
+      expect(fresh.screen).toBe("Second painted output");
+      expect(fresh.render).not.toBe(snapshot.render);
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
+  test(`actual ${renderer} refuses unavailable or oversized platform-visible plaintext`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      const document = fixture.dom.window.document;
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const lane = composer(fixture);
+      await paintedCapture(lane);
+      for (const visibleText of [undefined, 1, "x".repeat(256 * 1024 + 1)]) {
+        Object.defineProperty(document.body, "innerText", { configurable: true, get: () => visibleText });
+        expect(lane.capture()).toBeNull();
+      }
+      Object.defineProperty(document.body, "innerText", { configurable: true, get: () => "" });
+      expect((await paintedCapture(lane)).screen).toBe("");
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
+  test(`actual ${renderer} revokes an inserted reservation when only visible plaintext changes`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      const document = fixture.dom.window.document;
+      let visibleText = "Stable painted output";
+      Object.defineProperty(document.body, "innerText", { configurable: true, get: () => visibleText });
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const lane = composer(fixture);
+      const receipt = await lane.reserve(await paintedCapture(lane), "Continue the authorized task.");
+      if (!receipt) throw new Error("Missing plaintext-bound insertion receipt.");
+      fixture.advance(150);
+      expect(lane.validate(receipt)).toBe(true);
+      const domBefore = document.body.innerHTML;
+      visibleText = "New platform-visible output";
+      expect(lane.validate(receipt)).toBe(false);
+      expect(document.body.innerHTML).toBe(domBefore);
+      visibleText = "Stable painted output";
+      expect(lane.validate(receipt)).toBe(false);
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
   test(`actual ${renderer} reserves a visible unfocused composer without taking focus`, async () => {
     const fixture = paintedFixture(renderer);
     try {

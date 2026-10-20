@@ -636,7 +636,8 @@ struct ManagedProcessStoreFixture {
             },
             operation: { operation in
                 switch operation {
-                case .capture: return ["editorText": "", "editVersion": "edit-1", "render": "paint-1"]
+                case .capture: return ["editorText": "", "editVersion": "edit-1", "render": "paint-1",
+                                       "screen": "Visible output"]
                 case .reserve:
                     insertions += 1
                     return ["leaseId": "lease-1", "render": "paint-2"]
