@@ -10,6 +10,7 @@ final class AgentSessionPanel: Panel {
     let rendererKind: AgentSessionRendererKind
     let initialProviderID: AgentSessionProviderID
     private(set) var workingDirectory: String?
+    private(set) var isClosed = false
     let rendererSession = AgentSessionWebRendererSession()
 
     private(set) var currentProviderID: AgentSessionProviderID
@@ -65,14 +66,21 @@ final class AgentSessionPanel: Panel {
     }
 
     func close() {
+        guard !isClosed else { return }
+        rendererSession.revokeNativeCodingStart()
+        isClosed = true
         rendererSession.close()
     }
 
     func updateWorkspaceId(_ newWorkspaceId: UUID) {
+        guard workspaceId != newWorkspaceId else { return }
+        rendererSession.revokeNativeCodingStart()
         workspaceId = newWorkspaceId
     }
 
     func clearWorkingDirectory() {
+        guard workingDirectory != nil else { return }
+        rendererSession.revokeNativeCodingStart()
         workingDirectory = nil
     }
 
@@ -84,6 +92,7 @@ final class AgentSessionPanel: Panel {
 
     private func setCurrentProviderID(_ providerID: AgentSessionProviderID) {
         guard currentProviderID != providerID else { return }
+        rendererSession.revokeNativeCodingStart()
         currentProviderID = providerID
         displayTitle = Self.title(provider: providerID, rendererKind: rendererKind)
         emitDisplayStateChanged()

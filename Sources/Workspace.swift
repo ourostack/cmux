@@ -2825,6 +2825,9 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
     // session persistence no longer honor per-workspace scrollbar overrides.
     @Published private(set) var terminalScrollBarHidden: Bool = false
     @Published var currentDirectory: String {
+        willSet {
+            if newValue != currentDirectory { revokeManagedNativeCodingPanels() }
+        }
         didSet {
             let oldDirectory = oldValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let newDirectory = currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3240,6 +3243,7 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
     @Published var surfaceListeningPorts: [UUID: [Int]] = [:]
     var agentListeningPorts: [Int] = []
     @Published var remoteConfiguration: WorkspaceRemoteConfiguration? {
+        willSet { revokeManagedNativeCodingPanels() }
         didSet {
             // Window titles append the host (`hostLabel`); refresh them only when
             // an input of that label changed, not on every lease or relay update.
@@ -3261,6 +3265,7 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
         get { cloudBindingState.binding }
         set {
             let previous = cloudBindingState.binding
+            if previous != newValue { revokeManagedNativeCodingPanels() }
             cloudBindingState.binding = newValue
             guard previous != newValue else { return }
             (owningTabManager ?? AppDelegate.shared?.tabManagerFor(tabId: id))?
@@ -3328,7 +3333,11 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
     var remoteTerminalAttemptIDsBySurfaceId: [UUID: UUID] = [:]
     var endedRemoteTerminalLifecycleIDsBySurfaceId: [UUID: UUID] = [:]
     private(set) var remoteDirectoryTrustRequiredPanelIds: Set<UUID> = []
-    private(set) var remoteDirectoryReportPanelIds: Set<UUID> = []
+    private(set) var remoteDirectoryReportPanelIds: Set<UUID> = [] {
+        willSet {
+            if newValue != remoteDirectoryReportPanelIds { revokeManagedNativeCodingPanels() }
+        }
+    }
     var endedPersistentRemotePTYAttachSurfaceIds: Set<UUID> = []
     var remotePTYSessionIDsByPanelId: [UUID: String] = [:]
     /// Daemon-side PTY sessions replaced by a respawn whose close is still
@@ -11020,6 +11029,53 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
         return agentPanel
     }
 
+    @discardableResult
+    func newManagedCopilotSessionSurface(
+        inPane paneId: PaneID, rendererKind: AgentSessionRendererKind, executableURL: URL,
+        currentWorkspace: @escaping @MainActor () -> Workspace?
+    ) throws -> AgentSessionPanel {
+        guard currentWorkspace() === self, !isRetiredFromOwningTabManager,
+              !isRemoteWorkspace, !usesRemoteDirectoryProvenance, cloudVMBinding == nil,
+              remoteDirectoryReportPanelIds.isEmpty else {
+            throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-local-project")
+        }
+        let directory = try AgentSessionManagedCopilotLaunch.canonicalPath(currentDirectory)
+        guard try URL(fileURLWithPath: directory).resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+            throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-project-directory")
+        }
+        guard let panel = newAgentSessionSurface(
+            inPane: paneId, providerID: .copilot, rendererKind: rendererKind,
+            workingDirectory: directory, focus: true
+        ) else { throw AgentSessionBridgeError.invalidRequest }
+        do {
+            try panel.rendererSession.prepareNativeCodingStart(
+                panelId: panel.id, workspaceId: id, rendererKind: rendererKind,
+                workingDirectory: directory, executableURL: executableURL,
+                isCurrentOwner: { [weak self, weak panel] in
+                    guard let self, let panel else { return false }
+                    return currentWorkspace() === self && !self.isRetiredFromOwningTabManager &&
+                        !self.isRemoteWorkspace && !self.usesRemoteDirectoryProvenance &&
+                        self.cloudVMBinding == nil && self.remoteDirectoryReportPanelIds.isEmpty &&
+                        self.panels[panel.id] === panel && !panel.isClosed &&
+                        panel.workspaceId == self.id && panel.rendererKind == rendererKind &&
+                        panel.currentProviderID == .copilot && panel.workingDirectory == directory &&
+                        (try? AgentSessionManagedCopilotLaunch.canonicalPath(self.currentDirectory)) == directory
+                }
+            )
+            return panel
+        } catch {
+            panel.close()
+            _ = closePanel(panel.id, force: true)
+            throw error
+        }
+    }
+
+    func revokeManagedNativeCodingPanels() {
+        for panel in panels.values {
+            (panel as? AgentSessionPanel)?.rendererSession.revokeNativeCodingStart()
+        }
+    }
+
     /// Binds composer command routing to this workspace's current ownership.
     private func installAgentSessionCommandRouting(_ agentPanel: AgentSessionPanel) {
         agentPanel.onRunCommand = { [weak self, weak agentPanel] command in
@@ -11130,6 +11186,7 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
     /// Permanently retires this workspace before releasing its runtime resources.
     func retireFromOwningTabManager() {
         guard !isRetiredFromOwningTabManager else { return }
+        revokeManagedNativeCodingPanels()
         isRetiredFromOwningTabManager = true
         // Workspace retirement is the shared ownership boundary used by
         // window-close, stale-registration, and rejected-window cleanup. A

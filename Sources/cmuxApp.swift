@@ -659,7 +659,9 @@ struct cmuxApp: App {
 
                 IrohAndAgentSessionDebugMenuButtons(
                     openReact: { appDelegate.openDebugAgentSessionReact(nil) },
-                    openSolid: { appDelegate.openDebugAgentSessionSolid(nil) }
+                    openSolid: { appDelegate.openDebugAgentSessionSolid(nil) },
+                    openManagedReact: { appDelegate.openDebugManagedCopilotReact(nil) },
+                    openManagedSolid: { appDelegate.openDebugManagedCopilotSolid(nil) }
                 )
 
                 Button("Open Workspaces for All Workspace Colors") {

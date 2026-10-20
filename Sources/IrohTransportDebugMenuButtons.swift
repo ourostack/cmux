@@ -6,12 +6,16 @@ import SwiftUI
 struct IrohAndAgentSessionDebugMenuButtons: View {
     let openReact: () -> Void
     let openSolid: () -> Void
+    let openManagedReact: () -> Void
+    let openManagedSolid: () -> Void
 
     var body: some View {
         IrohTransportDebugMenuButtons()
         AgentSessionDebugMenuButtons(
             openReact: openReact,
-            openSolid: openSolid
+            openSolid: openSolid,
+            openManagedReact: openManagedReact,
+            openManagedSolid: openManagedSolid
         )
         NotificationDebugMenuButtons()
     }

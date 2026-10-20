@@ -44,6 +44,21 @@ final class AgentSessionWebRendererSession {
         ownedCoordinator.focus()
     }
 
+    func prepareNativeCodingStart(
+        panelId: UUID, workspaceId: UUID, rendererKind: AgentSessionRendererKind,
+        workingDirectory: String, executableURL: URL,
+        isCurrentOwner: @escaping @MainActor () -> Bool
+    ) throws {
+        try ownedCoordinator.prepareNativeCodingStart(
+            panelId: panelId, workspaceId: workspaceId, rendererKind: rendererKind,
+            workingDirectory: workingDirectory, executableURL: executableURL, isCurrentOwner: isCurrentOwner
+        )
+    }
+
+    func revokeNativeCodingStart() {
+        ownedCoordinator.revokeNativeCodingStart()
+    }
+
     func unfocus() {
         ownedCoordinator.unfocus()
     }

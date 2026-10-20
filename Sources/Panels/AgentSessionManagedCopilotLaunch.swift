@@ -42,6 +42,10 @@ final class AgentSessionManagedCopilotLaunch {
         }
         private static let qualifiedNativeProfiles: Set<QualifiedNativeProfile> = []
 
+        static func hasQualifiedNativeProfile(rendererID: String) -> Bool {
+            qualifiedNativeProfiles.contains { $0.rendererID == rendererID }
+        }
+
         static let executionDisclosure =
             "General-purpose foreground coding commands run as your OS account, with no sandbox " +
             "and no per-call SDK permission prompt. They can access or change files and use the network " +
@@ -304,7 +308,7 @@ final class AgentSessionManagedCopilotLaunch {
         self.workingDirectory = workingDirectory
     }
 
-    nonisolated private static func canonicalPath(_ path: String) throws -> String {
+    nonisolated static func canonicalPath(_ path: String) throws -> String {
         guard path.hasPrefix("/"), !path.utf8.contains(0), let resolved = realpath(path, nil) else {
             throw CocoaError(.fileReadInvalidFileName)
         }

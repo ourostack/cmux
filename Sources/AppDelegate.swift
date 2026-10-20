@@ -11900,6 +11900,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         openDebugAgentSession(rendererKind: .solid)
     }
 
+    @objc func openDebugManagedCopilotReact(_ sender: Any?) {
+        openDebugManagedCopilot(rendererKind: .react)
+    }
+
+    @objc func openDebugManagedCopilotSolid(_ sender: Any?) {
+        openDebugManagedCopilot(rendererKind: .solid)
+    }
+
+    private func openDebugManagedCopilot(rendererKind: AgentSessionRendererKind) {
+        guard AgentSessionManagedCopilotLaunch.NativeCodingOwner.hasQualifiedNativeProfile(
+            rendererID: rendererKind.rawValue
+        ), let manager = activeTabManagerForCommands(), let workspace = manager.selectedWorkspace else { return }
+        let disclosure = NSAlert()
+        disclosure.messageText = String(
+            localized: "agentSession.managedCoding.confirmTitle", defaultValue: "Start a Managed Copilot Coding Session?"
+        )
+        disclosure.informativeText = AgentSessionManagedCopilotLaunch.NativeCodingOwner.executionDisclosure
+        disclosure.addButton(withTitle: String(
+            localized: "agentSession.managedCoding.confirmStart", defaultValue: "Start Coding Session"
+        ))
+        disclosure.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        guard disclosure.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            guard activeTabManagerForCommands() === manager, manager.selectedWorkspace === workspace,
+                  let paneId = workspace.bonsplitController.focusedPaneId ??
+                    workspace.bonsplitController.allPaneIds.first else {
+                throw AgentSessionBridgeError.invalidRequest
+            }
+            let plan = try AgentExecutableResolver(
+                configuredExecutablePaths: AgentExecutableResolver.cmuxConfiguredExecutablePaths()
+            ).resolve(.copilot)
+            _ = try workspace.newManagedCopilotSessionSurface(
+                inPane: paneId, rendererKind: rendererKind, executableURL: plan.executableURL,
+                currentWorkspace: { [weak self, weak manager] in
+                    guard let self, let manager, self.activeTabManagerForCommands() === manager else { return nil }
+                    return manager.selectedWorkspace
+                }
+            )
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
     private func openDebugAgentSession(rendererKind: AgentSessionRendererKind) {
         guard let manager = activeTabManagerForCommands(),
               let workspace = manager.selectedWorkspace,

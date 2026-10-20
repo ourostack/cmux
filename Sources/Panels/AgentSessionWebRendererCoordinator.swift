@@ -26,6 +26,10 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     private var isClosed = false
     private var isProviderStartPending = false
     private var processStore = AgentSessionProcessStore()
+    private var nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?
+    private var pendingNativeCodingExecutable: URL?
+    private var nativeCodingStartTask: Task<Void, Never>?
+    private var nativeContextRequested = false
     private var managedRendererOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?
     private var managedRendererController: AgentSessionManagedRendererController?
     /// Posts the panel's finished turns and provider failures (cx-sg1qz).
@@ -52,6 +56,11 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         theme: AgentSessionWebTheme,
         isFocused: Bool
     ) {
+        if self.panelId != panelId || self.workspaceId != workspaceId ||
+            self.rendererKind != rendererKind || self.initialProviderID != initialProviderID ||
+            self.workingDirectory != workingDirectory {
+            revokeNativeCodingStart()
+        }
         if self.panelId != panelId || self.workspaceId != workspaceId ||
             self.rendererKind != rendererKind || self.initialProviderID != initialProviderID ||
             self.workingDirectory != workingDirectory || self.theme != theme || isPanelFocused != isFocused {
@@ -186,6 +195,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func close() {
+        revokeNativeCodingStart()
         managedRendererController?.invalidate()
         managedRendererController = nil
         managedRendererOwner = nil
@@ -243,6 +253,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         cmuxDebugLog("agentSession.web.didFinish renderer=\(rendererKind.rawValue)")
 #endif
         hasFinishedNavigation = true
+        startPendingNativeCodingIfReady()
         applyThemeToLoadedPage()
         if isPanelFocused {
             focus()
@@ -251,6 +262,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        revokeNativeCodingStart()
         resetVisiblePaintState()
         hasFinishedNavigation = false
 #if DEBUG
@@ -262,6 +274,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        revokeNativeCodingStart()
         resetVisiblePaintState()
         hasFinishedNavigation = false
 #if DEBUG
@@ -273,11 +286,15 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if nativeContextRequested || nativeCodingStartTask != nil {
+            revokeNativeCodingStart()
+        }
         resetVisiblePaintState()
         hasFinishedNavigation = false
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        revokeNativeCodingStart()
         resetVisiblePaintState()
         hasFinishedNavigation = false
     }
@@ -412,6 +429,81 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         return Self.isTrustedShellURL(frameInfo.request.url, expected: trustedShellURL)
     }
 
+    func prepareNativeCodingStart(
+        panelId: UUID, workspaceId: UUID, rendererKind: AgentSessionRendererKind,
+        workingDirectory: String, executableURL: URL,
+        isCurrentOwner: @escaping @MainActor () -> Bool
+    ) throws {
+        guard !isClosed, webView == nil, nativeCodingOwner == nil, !isProviderStartPending,
+              !processStore.hasActiveProviderSession else { throw AgentSessionBridgeError.invalidRequest }
+        guard let owner = AgentSessionManagedCopilotLaunch.NativeCodingOwner.issueForFreshNativePanel(
+            newPanelID: panelId, workspaceID: workspaceId, rendererID: rendererKind.rawValue,
+            workingDirectory: workingDirectory, owningStore: processStore, isCurrentOwner: isCurrentOwner
+        ) else { throw AgentSessionBridgeError.invalidRequest }
+        guard !isClosed, webView == nil, nativeCodingOwner == nil, !isProviderStartPending,
+              !processStore.hasActiveProviderSession, owner.workingDirectory == workingDirectory else {
+            owner.revoke()
+            throw AgentSessionBridgeError.invalidRequest
+        }
+        self.panelId = panelId
+        self.workspaceId = workspaceId
+        self.rendererKind = rendererKind
+        self.initialProviderID = .copilot
+        self.workingDirectory = owner.workingDirectory
+        nativeCodingOwner = owner
+        pendingNativeCodingExecutable = executableURL
+        nativeContextRequested = false
+        isProviderStartPending = true
+    }
+
+    func revokeNativeCodingStart() {
+        managedRendererController?.invalidate()
+        guard nativeCodingOwner != nil || pendingNativeCodingExecutable != nil ||
+            nativeCodingStartTask != nil else { return }
+        nativeCodingOwner?.revoke()
+        nativeCodingOwner = nil
+        pendingNativeCodingExecutable = nil
+        nativeContextRequested = false
+        nativeCodingStartTask?.cancel()
+        nativeCodingStartTask = nil
+        isProviderStartPending = false
+    }
+
+    private func startPendingNativeCodingIfReady() {
+        guard nativeContextRequested, hasFinishedNavigation, !isClosed,
+              let webView, Self.isTrustedShellURL(webView.url, expected: trustedShellURL),
+              let owner = nativeCodingOwner, let executableURL = pendingNativeCodingExecutable else { return }
+        guard owner.isCurrent else {
+            revokeNativeCodingStart()
+            return
+        }
+        pendingNativeCodingExecutable = nil
+        nativeCodingStartTask = Task { @MainActor [weak self, weak owner] in
+            guard let self, let owner else { return }
+            defer {
+                if self.nativeCodingOwner === owner {
+                    self.nativeCodingStartTask = nil
+                    self.isProviderStartPending = false
+                }
+            }
+            do {
+                try Task.checkCancellation()
+                guard !self.isClosed, self.nativeCodingOwner === owner, owner.isCurrent else {
+                    throw CancellationError()
+                }
+                self.providerWorkingDirectory = owner.workingDirectory
+                _ = try await self.processStore.startManagedCopilot(
+                    scope: owner.scope, executableURL: executableURL, workingDirectory: owner.workingDirectory,
+                    codingProjectMandate: owner.projectMandate, nativeCodingOwner: owner
+                )
+                _ = self.managedRenderer(for: owner)
+            } catch {
+                NSLog("agentSession.nativeCoding.start.failed: %@", String(describing: error))
+                owner.revoke()
+            }
+        }
+    }
+
     /// Native-only renderer custody. No browser method can install this lane or mint its owner.
     func managedRenderer(
         for owner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
@@ -536,6 +628,8 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     private func handle(_ request: AgentSessionBridgeRequest) async throws -> Any {
         switch request.method {
         case "app.context":
+            nativeContextRequested = true
+            startPendingNativeCodingIfReady()
             var context: [String: Any] = [
                 "panelId": panelId.uuidString,
                 "workspaceId": workspaceId.uuidString,
