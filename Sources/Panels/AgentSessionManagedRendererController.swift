@@ -45,6 +45,7 @@ final class AgentSessionManagedRendererController {
 
     final class Insertion {
         fileprivate let snapshot: Snapshot
+        fileprivate let text: String
         fileprivate let ticket: AgentSessionManagedRendererReservation.Ticket
         fileprivate let receipt: AgentSessionManagedRendererReservation.Receipt
         fileprivate let inserted: ContinuousClock.Instant
@@ -52,15 +53,48 @@ final class AgentSessionManagedRendererController {
         fileprivate var claimed = false
 
         fileprivate init(
-            snapshot: Snapshot, ticket: AgentSessionManagedRendererReservation.Ticket,
+            snapshot: Snapshot, text: String, ticket: AgentSessionManagedRendererReservation.Ticket,
             receipt: AgentSessionManagedRendererReservation.Receipt, inserted: ContinuousClock.Instant,
             deadline: ContinuousClock.Instant
         ) {
             self.snapshot = snapshot
+            self.text = text
             self.ticket = ticket
             self.receipt = receipt
             self.inserted = inserted
             self.deadline = deadline
+        }
+    }
+
+    @MainActor final class Submission {
+        let inputID: UUID
+        let text: String
+        let deadline: ContinuousClock.Instant
+        private let frame: AgentSessionManagedRendererReservation.Frame
+        private let owner: ObjectIdentifier
+        private let store: ObjectIdentifier
+        private var claimed = false
+
+        fileprivate init(
+            inputID: UUID, insertion: Insertion, frame: AgentSessionManagedRendererReservation.Frame
+        ) {
+            self.inputID = inputID
+            text = insertion.text
+            deadline = min(insertion.deadline, frame.deadline)
+            self.frame = frame
+            owner = insertion.snapshot.context.owner
+            store = insertion.snapshot.context.store
+        }
+
+        func claim(owner: AnyObject, store: AnyObject) -> Bool {
+            guard !claimed, self.owner == ObjectIdentifier(owner), self.store == ObjectIdentifier(store),
+                  frame.validate(), !claimed else { return false }
+            claimed = true
+            return true
+        }
+
+        func validate(owner: AnyObject, store: AnyObject) -> Bool {
+            claimed && self.owner == ObjectIdentifier(owner) && self.store == ObjectIdentifier(store) && frame.validate()
         }
     }
 
@@ -114,7 +148,7 @@ final class AgentSessionManagedRendererController {
     }
 
     func insert(_ snapshot: Snapshot, text: String) async throws -> Insertion? {
-        guard snapshot.origin == identity, Self.bounded(text, maximum: 256 * 1024),
+        guard snapshot.origin == identity, snapshot.editorText.isEmpty, Self.bounded(text, maximum: 256 * 1024),
               activeContext == nil, matches(snapshot.context, epoch: snapshot.epoch) else { return nil }
         activeContext = snapshot.context
         let deadline = now().advanced(by: .seconds(2))
@@ -138,7 +172,7 @@ final class AgentSessionManagedRendererController {
                 return nil
             }
             let insertion = Insertion(
-                snapshot: snapshot, ticket: ticket, receipt: receipt, inserted: now(), deadline: deadline
+                snapshot: snapshot, text: text, ticket: ticket, receipt: receipt, inserted: now(), deadline: deadline
             )
             activeInsertion = insertion
             return insertion
@@ -146,6 +180,11 @@ final class AgentSessionManagedRendererController {
             revokeIfCurrent(snapshot.epoch)
             throw error
         }
+    }
+
+    func prepareSubmission(_ insertion: Insertion, inputID: UUID) async throws -> Submission? {
+        guard let frame = try await prepareFrame(insertion), frame.validate() else { return nil }
+        return Submission(inputID: inputID, insertion: insertion, frame: frame)
     }
 
     func prepareFrame(_ insertion: Insertion) async throws -> AgentSessionManagedRendererReservation.Frame? {

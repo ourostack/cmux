@@ -46,6 +46,25 @@ class ManagedRendererControllerTests(unittest.TestCase):
     def test_capture_is_bound_to_native_controller_and_current_context(self):
         self.scenario("snapshot-custody")
 
+    def test_native_insertion_cannot_replace_a_captured_human_draft(self):
+        for scenario in ["draft-refused", "draft-whitespace"]:
+            with self.subTest(scenario=scenario):
+                self.scenario(scenario)
+
+    def test_submission_binds_the_exact_inserted_literal_input_uuid_and_native_custody(self):
+        for scenario in ["submission-literal", "submission-custody"]:
+            with self.subTest(scenario=scenario):
+                self.scenario(scenario)
+
+    def test_revoked_or_expired_bound_submission_cannot_admit_a_real_pipe_byte(self):
+        for scenario in ["submission-revoked", "submission-expired",
+                         "submission-foreign-owner", "submission-foreign-store"]:
+            with self.subTest(scenario=scenario):
+                self.scenario(scenario)
+
+    def test_reentrant_native_validation_cannot_claim_the_same_submission_twice(self):
+        self.scenario("submission-claim-reentry")
+
     def test_invalidated_capture_reply_cannot_create_a_snapshot(self):
         self.scenario("capture-reentry")
 

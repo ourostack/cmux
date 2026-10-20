@@ -42,12 +42,15 @@ struct ManagedRendererControllerFixture {
         var releaseErrors = 0
         var reservedText: String?
         var validations = 0
+        var contextHook: (() -> Void)?
         let bridge: (Controller.Operation) async throws -> Any? = { operation in
             try hook?(operation)
             switch operation {
             case .capture: return captureReply
             case .reserve(let snapshot, let text):
-                try check(snapshot == ["editorText": "", "editVersion": "edit-1", "render": "paint-1"],
+                try check(snapshot == ["editorText": scenario == "draft-whitespace" ? " \n\t"
+                                        : scenario == "draft-refused" ? "human draft" : "",
+                                       "editVersion": "edit-1", "render": "paint-1"],
                           "controller changed captured renderer evidence")
                 reservedText = text
                 return receiptReply
@@ -61,7 +64,7 @@ struct ManagedRendererControllerFixture {
             }
         }
         let controller = Controller(
-            context: { context }, operation: bridge, now: { now },
+            context: { contextHook?(); return context }, operation: bridge, now: { now },
             sleep: { duration in
                 if scenario == "cancelled-separation" { throw CancellationError() }
                 now = now.advanced(by: duration)
@@ -101,7 +104,16 @@ struct ManagedRendererControllerFixture {
             }
             return
         }
+        if scenario.hasPrefix("draft-") {
+            captureReply = ["editorText": scenario == "draft-whitespace" ? " \n\t" : "human draft",
+                            "editVersion": "edit-1", "render": "paint-1"]
+        }
         guard let snapshot = try await controller.capture() else { throw Failure.assertion("missing capture") }
+        if scenario.hasPrefix("draft-") {
+            let insertion = try await controller.insert(snapshot, text: "automatic literal")
+            try check(insertion == nil && reservedText == nil, "native automatic insertion replaced a human draft")
+            return
+        }
         if scenario == "snapshot-custody" {
             let foreign = Controller(
                 context: { context }, operation: bridge, now: { now },
@@ -143,6 +155,71 @@ struct ManagedRendererControllerFixture {
             throw Failure.assertion("missing insertion")
         }
         try check(reservedText == "literal\n<script>", "text was not passed literally")
+        if scenario.hasPrefix("submission-") {
+            let inputID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+            if scenario == "submission-custody" {
+                let other = Controller(
+                    context: { context }, operation: bridge, now: { now },
+                    sleep: { _ in }, onReleaseError: { _ in }
+                )
+                let foreign = try await other.prepareSubmission(insertion, inputID: inputID)
+                try check(foreign == nil, "foreign controller rebound an insertion")
+            }
+            guard let submission = try await controller.prepareSubmission(insertion, inputID: inputID) else {
+                throw Failure.assertion("missing bound submission")
+            }
+            try check(submission.inputID == inputID && submission.text == "literal\n<script>",
+                      "submission lost its exact native UUID or inserted literal")
+            let repeated = try await controller.prepareSubmission(insertion, inputID: UUID())
+            try check(repeated == nil, "one insertion minted a second input binding")
+            let foreignOwner = NSObject()
+            let foreignStore = NSObject()
+            if scenario == "submission-claim-reentry" {
+                var innerClaim: Bool?
+                contextHook = {
+                    contextHook = nil
+                    innerClaim = submission.claim(owner: owner, store: host)
+                }
+                let outerClaim = submission.claim(owner: owner, store: host)
+                try check(innerClaim == true && !outerClaim, "reentrant validation claimed the same input twice")
+                return
+            }
+            try check(!submission.claim(owner: foreignOwner, store: host), "foreign owner claimed renderer evidence")
+            try check(!submission.claim(owner: owner, store: foreignStore), "foreign store claimed renderer evidence")
+            try check(!submission.validate(owner: owner, store: host), "unclaimed input evidence was usable")
+            try check(submission.claim(owner: owner, store: host), "exact native owner/store could not claim evidence")
+            try check(!submission.claim(owner: owner, store: host), "submission input binding was reusable")
+            if scenario == "submission-revoked" { context = nil }
+            if scenario == "submission-expired" { now = began.advanced(by: .seconds(2)) }
+            let pipe = Pipe()
+            let writer = try ShepherdManagedPipeWriter(takingOwnershipOf: pipe.fileHandleForWriting)
+            defer {
+                try? writer.close()
+                try? pipe.fileHandleForReading.close()
+            }
+            let bytes = Data(submission.text.utf8)
+            let result = await writer.write(bytes, deadline: submission.deadline) {
+                submission.validate(
+                    owner: scenario == "submission-foreign-owner" ? foreignOwner : owner,
+                    store: scenario == "submission-foreign-store" ? foreignStore : host
+                )
+            }
+            if ["submission-revoked", "submission-expired", "submission-foreign-owner", "submission-foreign-store"]
+                .contains(scenario) {
+                try check(result == .notWritten(.guardInvalidated), "stale bound submission admitted a byte")
+                let flags = fcntl(pipe.fileHandleForReading.fileDescriptor, F_GETFL, 0)
+                try check(flags >= 0 && fcntl(pipe.fileHandleForReading.fileDescriptor, F_SETFL, flags | O_NONBLOCK) == 0,
+                          "could not inspect actual pipe admission")
+                var byte: UInt8 = 0
+                let count = Darwin.read(pipe.fileHandleForReading.fileDescriptor, &byte, 1)
+                try check(count == -1 && errno == EAGAIN, "refused bound submission left bytes in the actual pipe")
+            } else {
+                try check(result == .complete(bytes.count), "bound writer refused current exact literal: \(result)")
+                let actual = try pipe.fileHandleForReading.read(upToCount: bytes.count)
+                try check(actual == Data("literal\n<script>".utf8), "actual pipe literal differs from editor insertion")
+            }
+            return
+        }
         if scenario == "finish-custody" || scenario == "release-error" {
             if scenario == "release-error" {
                 hook = { if case .release = $0 { throw Failure.bridge } }
