@@ -26,6 +26,8 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     private var isClosed = false
     private var isProviderStartPending = false
     private var processStore = AgentSessionProcessStore()
+    private var managedRendererOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?
+    private var managedRendererController: AgentSessionManagedRendererController?
     /// Posts the panel's finished turns and provider failures (cx-sg1qz).
     private var turnNotifier: AgentSessionTurnNotifier?
     private var turnNotifierPanelId: UUID?
@@ -50,6 +52,11 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         theme: AgentSessionWebTheme,
         isFocused: Bool
     ) {
+        if self.panelId != panelId || self.workspaceId != workspaceId ||
+            self.rendererKind != rendererKind || self.initialProviderID != initialProviderID ||
+            self.workingDirectory != workingDirectory || self.theme != theme || isPanelFocused != isFocused {
+            managedRendererController?.invalidate()
+        }
         self.panelId = panelId
         let workspaceChanged = self.workspaceId != workspaceId
         self.workspaceId = workspaceId
@@ -79,6 +86,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
             )
         }
         processStore.eventSink = { [weak self] event in
+            self?.managedRendererController?.invalidate()
             self?.turnNotifier?.observe(event)
             self?.sendEvent(event)
         }
@@ -90,7 +98,10 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     /// Records the host currently displaying this retained renderer session.
     func attach(to host: AgentSessionWebHostView) {
         guard attachedHost !== host else { return }
+        managedRendererController?.invalidate()
+        attachedHost?.onManagedRendererInvalidation = nil
         attachedHost = host
+        host.onManagedRendererInvalidation = { [weak self] in self?.managedRendererController?.invalidate() }
         if hasAttachedHost {
             invalidateVisiblePaintAfterReattachment()
         }
@@ -126,6 +137,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
 #endif
         }
         self.webView = webView
+        installManagedRendererObservation()
         return webView
     }
 
@@ -136,6 +148,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         guard let webView, webView.window != nil else {
             return
         }
+        managedRendererController?.invalidate()
         guard let resourceDirectoryURL = Bundle.main.resourceURL else {
             return
         }
@@ -157,11 +170,13 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func focus() {
+        managedRendererController?.invalidate()
         guard let webView else { return }
         _ = webView.window?.makeFirstResponder(webView)
     }
 
     func unfocus() {
+        managedRendererController?.invalidate()
         guard let webView,
               let window = webView.window,
               Self.responderChainContains(window.firstResponder, target: webView) else {
@@ -171,9 +186,14 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func close() {
+        managedRendererController?.invalidate()
+        managedRendererController = nil
+        managedRendererOwner = nil
+        attachedHost?.onManagedRendererInvalidation = nil
         isClosed = true
         processStore.closeAll()
         if let webView {
+            webView.observeManagedRendererChanges(nil)
             webView.removeFromSuperview()
             webView.stopLoading()
             webView.configuration.userContentController.removeScriptMessageHandler(
@@ -218,6 +238,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        managedRendererController?.invalidate()
 #if DEBUG
         cmuxDebugLog("agentSession.web.didFinish renderer=\(rendererKind.rawValue)")
 #endif
@@ -230,6 +251,8 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        resetVisiblePaintState()
+        hasFinishedNavigation = false
 #if DEBUG
         cmuxDebugLog(
             "agentSession.web.didFail renderer=\(rendererKind.rawValue) " +
@@ -239,6 +262,8 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        resetVisiblePaintState()
+        hasFinishedNavigation = false
 #if DEBUG
         cmuxDebugLog(
             "agentSession.web.didFailProvisional renderer=\(rendererKind.rawValue) " +
@@ -247,11 +272,22 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
 #endif
     }
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        resetVisiblePaintState()
+        hasFinishedNavigation = false
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        resetVisiblePaintState()
+        hasFinishedNavigation = false
+    }
+
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
+        if navigationAction.targetFrame?.isMainFrame ?? true { managedRendererController?.invalidate() }
         let decisionHandler = BrowserNavigationActionDecisionHandler(
             decisionHandler,
             fallbackPolicy: WKNavigationActionPolicy.cancel,
@@ -322,6 +358,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     private func resetVisiblePaintState() {
+        managedRendererController?.invalidate()
         visiblePaintGeneration &+= 1
         isVisiblePaintFlushInFlight = false
         hasCompletedVisiblePaintFlush = false
@@ -347,6 +384,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     private func applyThemeToLoadedPage() {
+        managedRendererController?.invalidate()
         guard let webView,
               let data = try? JSONSerialization.data(withJSONObject: theme.dictionary),
               let json = String(data: data, encoding: .utf8) else {
@@ -372,6 +410,103 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
             return false
         }
         return Self.isTrustedShellURL(frameInfo.request.url, expected: trustedShellURL)
+    }
+
+    /// Native-only renderer custody. No browser method can install this lane or mint its owner.
+    func managedRenderer(
+        for owner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+    ) -> AgentSessionManagedRendererController? {
+        guard !isClosed, processStore.ownsManagedCodingOwner(owner),
+              owner.scope.surfaceID == panelId, owner.scope.workspaceID == workspaceId,
+              owner.rendererID == rendererKind.rawValue, owner.workingDirectory == workingDirectory else { return nil }
+        if managedRendererOwner === owner { return managedRendererController }
+        managedRendererController?.invalidate()
+        managedRendererOwner = owner
+        let controller = AgentSessionManagedRendererController(
+            context: { [weak self, weak owner] in
+                guard let self, let owner else { return nil }
+                return self.currentManagedRendererContext(for: owner)
+            },
+            operation: { [weak self] operation in
+                guard let self else { throw CancellationError() }
+                return try await self.performManagedRendererOperation(operation)
+            },
+            onReleaseError: { error in
+                NSLog("agentSession.managedRenderer.release.failed: %@", String(describing: error))
+            }
+        )
+        managedRendererController = controller
+        installManagedRendererObservation()
+        return controller
+    }
+
+    private func installManagedRendererObservation() {
+        guard managedRendererController != nil else { return }
+        webView?.observeManagedRendererChanges { [weak self] in self?.managedRendererController?.invalidate() }
+    }
+
+    private func currentManagedRendererContext(
+        for owner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+    ) -> AgentSessionManagedRendererController.Context? {
+        guard processStore.ownsManagedCodingOwner(owner), managedRendererOwner === owner,
+              !isClosed, isPanelFocused, hasFinishedNavigation, hasCompletedVisiblePaintFlush,
+              owner.scope.surfaceID == panelId, owner.scope.workspaceID == workspaceId,
+              owner.rendererID == rendererKind.rawValue, owner.workingDirectory == workingDirectory,
+              let host = attachedHost, let webView, let window = webView.window,
+              host.window === window, webView.superview === host, NSApp.isActive, window.isKeyWindow,
+              window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible),
+              !host.isHiddenOrHasHiddenAncestor, !webView.isHiddenOrHasHiddenAncestor,
+              !host.visibleRect.isEmpty, !webView.visibleRect.isEmpty, !webView.isLoading,
+              let responder = window.firstResponder, Self.responderChainContains(responder, target: webView),
+              Self.isTrustedShellURL(webView.url, expected: trustedShellURL),
+              let document = Self.normalizedTrustedFileURL(webView.url)?.absoluteString else { return nil }
+        var geometry: [Double] = []
+        for view in [host as NSView, webView as NSView] {
+            var ancestor: NSView? = view
+            while let current = ancestor {
+                guard current.alphaValue > 0, !current.isHidden else { return nil }
+                ancestor = current.superview
+            }
+            for rect in [view.frame, view.bounds, view.visibleRect, view.convert(view.bounds, to: nil)] {
+                geometry += [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height)]
+            }
+        }
+        for rect in [window.frame, window.contentLayoutRect] {
+            geometry += [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height)]
+        }
+        geometry.append(Double(window.backingScaleFactor))
+        guard geometry.allSatisfy(\.isFinite) else { return nil }
+        return .init(
+            owner: ObjectIdentifier(owner), store: ObjectIdentifier(processStore),
+            coordinator: ObjectIdentifier(self), host: ObjectIdentifier(host), webView: ObjectIdentifier(webView),
+            window: ObjectIdentifier(window), responder: ObjectIdentifier(responder),
+            workspaceID: workspaceId, panelID: panelId, renderer: rendererKind.rawValue, document: document,
+            paintGeneration: visiblePaintGeneration, geometry: geometry
+        )
+    }
+
+    private func performManagedRendererOperation(
+        _ operation: AgentSessionManagedRendererController.Operation
+    ) async throws -> Any? {
+        guard !isClosed, let webView, hasFinishedNavigation,
+              Self.isTrustedShellURL(webView.url, expected: trustedShellURL) else { throw CancellationError() }
+        let script: String
+        let arguments: [String: Any]
+        switch operation {
+        case .capture:
+            script = "return window.cmuxAgentBridge?.managedComposer?.capture() ?? null;"
+            arguments = [:]
+        case .reserve(let snapshot, let text):
+            script = "return await window.cmuxAgentBridge?.managedComposer?.reserve(snapshot, text) ?? null;"
+            arguments = ["snapshot": snapshot, "text": text]
+        case .validate(let receipt):
+            script = "return window.cmuxAgentBridge?.managedComposer?.validate(receipt) ?? false;"
+            arguments = ["receipt": receipt]
+        case .release(let leaseID):
+            script = "window.cmuxAgentBridge?.managedComposer?.release(leaseID); return null;"
+            arguments = ["leaseID": leaseID]
+        }
+        return try await webView.callAsyncJavaScript(script, arguments: arguments, in: nil, contentWorld: .page)
     }
 
     nonisolated static func shellURL(
@@ -762,6 +897,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
 
     private func sendEvent(_ event: [String: Any]) {
+        managedRendererController?.invalidate()
         guard let webView,
               let data = try? JSONSerialization.data(withJSONObject: event),
               let json = String(data: data, encoding: .utf8) else {

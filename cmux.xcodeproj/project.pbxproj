@@ -220,6 +220,8 @@
 		B11401000000000000000001 /* AgentSessionManagedCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11401000000000000000002 /* AgentSessionManagedCommand.swift */; };
 		B11391000000000000000001 /* AgentSessionManagedCommandService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11391000000000000000002 /* AgentSessionManagedCommandService.swift */; };
 		B11402000000000000000001 /* AgentSessionManagedCopilotLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */; };
+		B11403000000000000000001 /* AgentSessionManagedRendererController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11403000000000000000002 /* AgentSessionManagedRendererController.swift */; };
+		B11404000000000000000001 /* AgentSessionManagedRendererReservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11404000000000000000002 /* AgentSessionManagedRendererReservation.swift */; };
 		B11371000000000000000023 /* AgentSessionManagedSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11371000000000000000024 /* AgentSessionManagedSession.swift */; };
 		A9F20000000000000000000E /* AgentSessionOutputLineBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F10000000000000000000E /* AgentSessionOutputLineBuffer.swift */; };
 		B11371000000000000000021 /* AgentSessionOwnedProcessLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11371000000000000000022 /* AgentSessionOwnedProcessLauncher.swift */; };
@@ -4978,6 +4980,8 @@
 		B11401000000000000000002 /* AgentSessionManagedCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCommand.swift; sourceTree = "<group>"; };
 		B11391000000000000000002 /* AgentSessionManagedCommandService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCommandService.swift; sourceTree = "<group>"; };
 		B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCopilotLaunch.swift; sourceTree = "<group>"; };
+		B11403000000000000000002 /* AgentSessionManagedRendererController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedRendererController.swift; sourceTree = "<group>"; };
+		B11404000000000000000002 /* AgentSessionManagedRendererReservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedRendererReservation.swift; sourceTree = "<group>"; };
 		B11371000000000000000024 /* AgentSessionManagedSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedSession.swift; sourceTree = "<group>"; };
 		A9F10000000000000000000E /* AgentSessionOutputLineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionOutputLineBuffer.swift; sourceTree = "<group>"; };
 		B11371000000000000000022 /* AgentSessionOwnedProcessLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionOwnedProcessLauncher.swift; sourceTree = "<group>"; };
@@ -11683,6 +11687,8 @@
 				B11391000000000000000002 /* AgentSessionManagedCommandService.swift */,
 				B11401000000000000000002 /* AgentSessionManagedCommand.swift */,
 				B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */,
+				B11403000000000000000002 /* AgentSessionManagedRendererController.swift */,
+				B11404000000000000000002 /* AgentSessionManagedRendererReservation.swift */,
 				A9E010000000000000000009 /* AgentSessionProcessStore.swift */,
 				A9E01000000000000000000A /* AgentSessionStreamAccumulators.swift */,
 				A9E01000000000000000000E /* CodexAppServerSession.swift */,
@@ -14941,6 +14947,8 @@
 				B11401000000000000000001 /* AgentSessionManagedCommand.swift in Sources */,
 				B11391000000000000000001 /* AgentSessionManagedCommandService.swift in Sources */,
 				B11402000000000000000001 /* AgentSessionManagedCopilotLaunch.swift in Sources */,
+				B11403000000000000000001 /* AgentSessionManagedRendererController.swift in Sources */,
+				B11404000000000000000001 /* AgentSessionManagedRendererReservation.swift in Sources */,
 				B11371000000000000000023 /* AgentSessionManagedSession.swift in Sources */,
 				A9F20000000000000000000E /* AgentSessionOutputLineBuffer.swift in Sources */,
 				B11371000000000000000021 /* AgentSessionOwnedProcessLauncher.swift in Sources */,
