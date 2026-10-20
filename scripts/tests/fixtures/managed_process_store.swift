@@ -360,10 +360,18 @@ struct ManagedProcessStoreFixture {
             "scenario": "owner-tool-native-coding", "callbackFile": projectFile.path,
         ]).write(to: directory.appendingPathComponent(".cmux-controlled-copilot-scenario"))
         var currentOwner = true
+        var closeDuringOwnerCheck = false
         guard let nativeOwner = AgentSessionManagedCopilotLaunch.NativeCodingOwner(
             newPanelID: UUID(), workspaceID: UUID(), rendererID: "react",
-            workingDirectory: directory.path, owningStore: store, isCurrentOwner: { currentOwner }
+            workingDirectory: directory.path, owningStore: store, isCurrentOwner: { [weak store] in
+                if closeDuringOwnerCheck {
+                    closeDuringOwnerCheck = false
+                    store?.closeAll()
+                }
+                return currentOwner
+            }
         ) else { return ["nativeOwnerAvailable": false] }
+        let ownerAcceptedBeforeStart = store.ownsManagedCodingOwner(nativeOwner)
         var scope = nativeOwner.scope
         var mandate = nativeOwner.projectMandate
         var workingDirectory = nativeOwner.workingDirectory
@@ -412,6 +420,9 @@ struct ManagedProcessStoreFixture {
         }
         let active = targetStore.hasActiveProviderSession
         let runningSnapshot = targetStore.nativeManagedSessionSnapshot ?? [:]
+        closeDuringOwnerCheck = scenario == "native-coding-owner-check-reentrant"
+        let ownerAcceptedWhileRunning = targetStore.ownsManagedCodingOwner(nativeOwner)
+        let foreignStoreAcceptedOwner = AgentSessionProcessStore().ownsManagedCodingOwner(nativeOwner)
         if scenario == "native-coding-cleanup-unknown", !sessionID.isEmpty {
             let pidFile = directory.appendingPathComponent(".cmux-controlled-backend-pid")
             guard let pid = Int32(try String(contentsOf: pidFile, encoding: .utf8)),
@@ -477,6 +488,7 @@ struct ManagedProcessStoreFixture {
             }
         }
         targetStore.closeAll()
+        let ownerAcceptedWhileClosing = targetStore.ownsManagedCodingOwner(nativeOwner)
         let queuedInputRejected = await queuedInput?.value ?? false
         let deadline = ContinuousClock.now.advanced(by: .seconds(6))
         while targetStore.hasActiveProviderSession, ContinuousClock.now < deadline {
@@ -505,6 +517,14 @@ struct ManagedProcessStoreFixture {
         let executionFile = URL(fileURLWithPath: projectFile.path + ".executions")
         return [
             "nativeOwnerAvailable": true, "startError": startError, "activeAfterStart": active,
+            "ownerAcceptedBeforeStart": ownerAcceptedBeforeStart,
+            "ownerAcceptedWhileRunning": ownerAcceptedWhileRunning,
+            "foreignStoreAcceptedOwner": foreignStoreAcceptedOwner,
+            "ownerAcceptedWhileClosing": ownerAcceptedWhileClosing,
+            "ownerAcceptedAfterClose": targetStore.ownsManagedCodingOwner(nativeOwner),
+            "nativeFailureEvents": nativeEvents.filter {
+                $0["type"] as? String == "provider.output" && $0["stream"] as? String == "stderr"
+            },
             "sessionID": sessionID, "reservedSnapshot": reservedSnapshot, "runningSnapshot": runningSnapshot,
             "snapshotCleared": targetStore.nativeManagedSessionSnapshot == nil,
             "inputError": inputError, "queuedInputRejected": queuedInputRejected,

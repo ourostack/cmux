@@ -140,6 +140,29 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         self.assertTrue(result["snapshotCleared"], result)
         self.assertTrue(result["stopped"], result)
 
+    def test_renderer_owner_checks_require_this_stores_current_running_native_owner(self):
+        result = self.run_store("native-coding-owner-check")
+        self.assertTrue(result["nativeOwnerAvailable"], result)
+        self.assertEqual(result["startError"], "", result)
+        self.assertFalse(result["ownerAcceptedBeforeStart"], result)
+        self.assertTrue(result["ownerAcceptedWhileRunning"], result)
+        self.assertFalse(result["foreignStoreAcceptedOwner"], result)
+        self.assertFalse(result["ownerAcceptedWhileClosing"], result)
+        self.assertFalse(result["ownerAcceptedAfterClose"], result)
+        self.assertFalse(result["wireSendObserved"], result)
+        self.assertEqual(result["projectContents"], "before\n", result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_renderer_owner_check_rejects_synchronous_close_inside_owner_callback(self):
+        result = self.run_store("native-coding-owner-check-reentrant")
+        self.assertEqual(result["startError"], "", result)
+        self.assertFalse(result["ownerAcceptedWhileRunning"], result)
+        self.assertFalse(result["ownerAcceptedWhileClosing"], result)
+        self.assertFalse(result["ownerAcceptedAfterClose"], result)
+        self.assertFalse(result["wireSendObserved"], result)
+        self.assertEqual(result["projectContents"], "before\n", result)
+        self.assertTrue(result["stopped"], result)
+
     def test_revoked_or_foreign_native_coding_owners_never_launch_a_child(self):
         for scenario in [
             "revoked", "other-store", "wrong-workspace", "wrong-surface", "wrong-generation",

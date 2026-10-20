@@ -41,6 +41,14 @@ final class AgentSessionProcessStore {
     private var lastEmittedHasActiveProviderSession: Bool?
     private static let terminationEscalationInterval: DispatchTimeInterval = .seconds(3)
 
+    func ownsManagedCodingOwner(_ candidate: AgentSessionManagedCopilotLaunch.NativeCodingOwner) -> Bool {
+        guard let owner = managedCopilot, owner.nativeCodingOwner === candidate,
+              owner.started, !owner.isClosing, !owner.failed, let launch = owner.launch else { return false }
+        guard candidate.authorizes(launch.lifetime) else { return false }
+        return managedCopilot === owner && owner.launch === launch &&
+            owner.started && !owner.isClosing && !owner.failed
+    }
+
     func startManagedCopilot(
         scope: AgentSessionManagedCopilotLaunch.Scope, executableURL: URL, workingDirectory: String,
         codingProjectMandate: UUID?,
