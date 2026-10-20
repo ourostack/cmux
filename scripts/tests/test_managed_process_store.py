@@ -140,6 +140,33 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         self.assertTrue(result["snapshotCleared"], result)
         self.assertTrue(result["stopped"], result)
 
+    def test_production_native_owner_requires_an_immutable_qualified_profile_before_launch(self):
+        for renderer in ["react", "solid"]:
+            with self.subTest(renderer=renderer):
+                result = self.run_store("native-coding-production-" + renderer)
+                self.assertEqual(result["startError"], "nativeProfileUnqualified", result)
+                self.assertFalse(result["activeAfterAttempt"], result)
+                self.assertFalse(result["peerStarted"], result)
+                self.assertFalse(result["wireTraceExists"], result)
+                self.assertTrue(result["failureReported"], result)
+                self.assertFalse(result["productionStartedEvent"], result)
+                self.assertEqual(result["fixtureRetryError"], "", result)
+                self.assertTrue(result["fixtureRetryStarted"], result)
+                self.assertTrue(result["stopped"], result)
+
+    def test_prepared_production_native_launch_cannot_bypass_the_profile_gate(self):
+        for renderer in ["react", "solid"]:
+            with self.subTest(renderer=renderer):
+                result = self.run_store("native-coding-production-direct-" + renderer)
+                self.assertEqual(result["startError"], "nativeProfileUnqualified", result)
+                self.assertRegex(result["executableSHA256"], r"^[0-9a-f]{64}$", result)
+                self.assertRegex(result["profileSHA256"], r"^[0-9a-f]{64}$", result)
+                self.assertFalse(result["peerStarted"], result)
+                self.assertFalse(result["wireTraceExists"], result)
+                self.assertEqual(result["fixtureRetryError"], "", result)
+                self.assertTrue(result["fixtureRetryStarted"], result)
+                self.assertTrue(result["stopped"], result)
+
     def test_renderer_owner_checks_require_this_stores_current_running_native_owner(self):
         result = self.run_store("native-coding-owner-check")
         self.assertTrue(result["nativeOwnerAvailable"], result)

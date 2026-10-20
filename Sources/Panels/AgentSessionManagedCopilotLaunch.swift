@@ -7,6 +7,10 @@ import Foundation
 /// Owned source-candidate composition, never a runtime/profile qualification.
 @MainActor
 final class AgentSessionManagedCopilotLaunch {
+    enum StartError: Error {
+        case nativeProfileUnqualified
+    }
+
     enum CloseError: Error {
         case supervisorExitUnobserved(
             expected: AgentPIDProcessIdentity?, observed: AgentPIDProcessIdentity?, processReportsRunning: Bool
@@ -24,6 +28,20 @@ final class AgentSessionManagedCopilotLaunch {
 
     /// A native object capability, never decoded from bridge or provider data.
     @MainActor final class NativeCodingOwner {
+        private enum ProfileRequirement {
+            case qualifiedNativeProfile
+            #if SHEPHERD_SOURCE_TEST
+            case controlledSourceFixture
+            #endif
+        }
+
+        private struct QualifiedNativeProfile: Hashable {
+            let executableSHA256: String
+            let profileSHA256: String
+            let rendererID: String
+        }
+        private static let qualifiedNativeProfiles: Set<QualifiedNativeProfile> = []
+
         static let executionDisclosure =
             "General-purpose foreground coding commands run as your OS account, with no sandbox " +
             "and no per-call SDK permission prompt. They can access or change files and use the network " +
@@ -40,10 +58,36 @@ final class AgentSessionManagedCopilotLaunch {
         private var consumed = false
         private var revoked = false
         private var revocationSink: (() -> Void)?
+        private let profileRequirement: ProfileRequirement
 
-        init?(
+        static func issueForFreshNativePanel(
             newPanelID: UUID, workspaceID: UUID, rendererID: String, workingDirectory: String,
             owningStore: AnyObject, isCurrentOwner: @escaping @MainActor () -> Bool
+        ) -> NativeCodingOwner? {
+            NativeCodingOwner(
+                newPanelID: newPanelID, workspaceID: workspaceID, rendererID: rendererID,
+                workingDirectory: workingDirectory, owningStore: owningStore,
+                isCurrentOwner: isCurrentOwner, profileRequirement: .qualifiedNativeProfile
+            )
+        }
+
+        #if SHEPHERD_SOURCE_TEST
+        convenience init?(
+            newPanelID: UUID, workspaceID: UUID, rendererID: String, workingDirectory: String,
+            owningStore: AnyObject, isCurrentOwner: @escaping @MainActor () -> Bool
+        ) {
+            self.init(
+                newPanelID: newPanelID, workspaceID: workspaceID, rendererID: rendererID,
+                workingDirectory: workingDirectory, owningStore: owningStore,
+                isCurrentOwner: isCurrentOwner, profileRequirement: .controlledSourceFixture
+            )
+        }
+        #endif
+
+        private init?(
+            newPanelID: UUID, workspaceID: UUID, rendererID: String, workingDirectory: String,
+            owningStore: AnyObject, isCurrentOwner: @escaping @MainActor () -> Bool,
+            profileRequirement: ProfileRequirement
         ) {
             guard ["react", "solid"].contains(rendererID),
                   let host = AgentPIDProcessIdentity(pid: getpid()),
@@ -57,6 +101,7 @@ final class AgentSessionManagedCopilotLaunch {
             self.host = host
             self.owningStore = owningStore
             self.isCurrentOwner = isCurrentOwner
+            self.profileRequirement = profileRequirement
         }
 
         func consume(
@@ -97,6 +142,19 @@ final class AgentSessionManagedCopilotLaunch {
             consumed && self.lifetime === lifetime && isCurrent
         }
 
+        func requireQualifiedProfile(executableSHA256: String, profileSHA256: String) throws {
+            switch profileRequirement {
+            case .qualifiedNativeProfile:
+                guard Self.qualifiedNativeProfiles.contains(QualifiedNativeProfile(
+                    executableSHA256: executableSHA256, profileSHA256: profileSHA256, rendererID: rendererID
+                )) else { throw StartError.nativeProfileUnqualified }
+            #if SHEPHERD_SOURCE_TEST
+            case .controlledSourceFixture:
+                break
+            #endif
+            }
+        }
+
         func revoke() {
             guard !revoked else { return }
             revoked = true
@@ -115,6 +173,7 @@ final class AgentSessionManagedCopilotLaunch {
     private let process: Process
     private let executableURL: URL
     private let executableIdentity: ShepherdHookExecutableIdentity
+    private let nativeCodingOwner: NativeCodingOwner?
     private var supervisor: AgentPIDProcessIdentity?
     private var launched = false
     private var started = false
@@ -219,6 +278,7 @@ final class AgentSessionManagedCopilotLaunch {
         )
         return AgentSessionManagedCopilotLaunch(
             process: process, lifetime: lifetime, adapter: adapter, codingAuthority: authority,
+            nativeCodingOwner: nativeCodingOwner,
             executableURL: canonicalExecutable, executableIdentity: verified.1,
             executableSHA256: verified.2, profileSHA256: profileSHA256, profileManifest: profileData, workingDirectory: directory
         )
@@ -227,6 +287,7 @@ final class AgentSessionManagedCopilotLaunch {
     private init(
         process: Process, lifetime: AgentSessionManagedSession, adapter: CopilotManagedSession,
         codingAuthority: AgentSessionManagedCommandService.NativeCodingAuthority?,
+        nativeCodingOwner: NativeCodingOwner?,
         executableURL: URL, executableIdentity: ShepherdHookExecutableIdentity,
         executableSHA256: String, profileSHA256: String, profileManifest: Data, workingDirectory: String
     ) {
@@ -234,6 +295,7 @@ final class AgentSessionManagedCopilotLaunch {
         self.lifetime = lifetime
         self.adapter = adapter
         self.codingAuthority = codingAuthority
+        self.nativeCodingOwner = nativeCodingOwner
         self.executableURL = executableURL
         self.executableIdentity = executableIdentity
         self.executableSHA256 = executableSHA256
@@ -256,6 +318,9 @@ final class AgentSessionManagedCopilotLaunch {
             try lifetime.abandon()
             throw CocoaError(.fileReadCorruptFile)
         }
+        try nativeCodingOwner?.requireQualifiedProfile(
+            executableSHA256: executableSHA256, profileSHA256: profileSHA256
+        )
         guard try ShepherdHookExecutableIdentity.capture(path: executableURL.path) == executableIdentity else {
             throw CocoaError(.fileReadCorruptFile)
         }

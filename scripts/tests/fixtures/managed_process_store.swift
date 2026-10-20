@@ -65,6 +65,11 @@ struct ManagedProcessStoreFixture {
         let store = AgentSessionProcessStore()
         var events: [[String: Any]] = []
         store.eventSink = { events.append($0) }
+        if scenario.hasPrefix("native-coding-production-") {
+            return try await runProductionNativeCoding(
+                scenario, store: store, executable: executable, directory: directory
+            )
+        }
         if scenario.hasPrefix("native-coding-") {
             return try await runNativeCoding(scenario, store: store, executable: executable, directory: directory)
         }
@@ -528,6 +533,75 @@ struct ManagedProcessStoreFixture {
             "freshWireSendObserved": trace.split(separator: "\n").contains("session.send"),
             "fixtureBackendsAbsent": original["fixtureBackendAbsent"] as? Bool == true &&
                 !freshStore.hasActiveProviderSession,
+        ]
+    }
+
+    @MainActor static func runProductionNativeCoding(
+        _ scenario: String, store: AgentSessionProcessStore, executable: URL, directory: URL
+    ) async throws -> [String: Any] {
+        let renderer = scenario.hasSuffix("-solid") ? "solid" : "react"
+        var events: [[String: Any]] = []
+        store.eventSink = { events.append($0) }
+        guard let owner = AgentSessionManagedCopilotLaunch.NativeCodingOwner.issueForFreshNativePanel(
+            newPanelID: UUID(), workspaceID: UUID(), rendererID: renderer,
+            workingDirectory: directory.path, owningStore: store, isCurrentOwner: { true }
+        ) else { throw POSIXError(.EINVAL) }
+        var startError = ""
+        var executableSHA256 = ""
+        var profileSHA256 = ""
+        var prepared: AgentSessionManagedCopilotLaunch?
+        do {
+            if scenario.contains("-direct-") {
+                guard owner.consume(
+                    for: store, scope: owner.scope, workingDirectory: owner.workingDirectory,
+                    projectMandate: owner.projectMandate
+                ) else { throw POSIXError(.EPERM) }
+                let launch = try await AgentSessionManagedCopilotLaunch.prepare(
+                    scope: owner.scope, executableURL: executable, workingDirectory: owner.workingDirectory,
+                    codingProjectMandate: owner.projectMandate, nativeCodingOwner: owner,
+                    launcher: .init(supervisorExecutableURL: executable)
+                )
+                prepared = launch
+                executableSHA256 = launch.executableSHA256
+                profileSHA256 = launch.profileSHA256
+                try launch.launchBackend()
+            } else {
+                _ = try await store.startManagedCopilot(
+                    scope: owner.scope, executableURL: executable, workingDirectory: owner.workingDirectory,
+                    codingProjectMandate: owner.projectMandate, nativeCodingOwner: owner,
+                    launcher: .init(supervisorExecutableURL: executable)
+                )
+            }
+        } catch {
+            startError = String(describing: error)
+        }
+        let activeAfterAttempt = store.hasActiveProviderSession
+        if let prepared { try await prepared.close() }
+        store.closeAll()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+        while store.hasActiveProviderSession, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let peerStarted = FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent(".cmux-controlled-backend-pid").path
+        )
+        let traceExists = FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent(".cmux-controlled-copilot-trace").path
+        )
+        let retry = try await runNativeCoding(
+            "native-coding-owner-check", store: store, executable: executable, directory: directory
+        )
+        return [
+            "startError": startError, "activeAfterAttempt": activeAfterAttempt,
+            "peerStarted": peerStarted, "wireTraceExists": traceExists,
+            "executableSHA256": executableSHA256, "profileSHA256": profileSHA256,
+            "failureReported": events.contains {
+                ($0["text"] as? String)?.contains("nativeProfileUnqualified") == true
+            },
+            "productionStartedEvent": events.contains { $0["type"] as? String == "provider.started" },
+            "fixtureRetryError": retry["startError"] as? String ?? "missing",
+            "fixtureRetryStarted": retry["peerStarted"] as? Bool ?? false,
+            "stopped": !store.hasActiveProviderSession,
         ]
     }
 
