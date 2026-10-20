@@ -108,7 +108,7 @@ extension TerminalController {
         _ request: ControlRequest,
         shepherdPeer: ShepherdControlPeer?
     ) async throws -> String? {
-        if ShepherdControlRequest.Method(rawValue: request.method) != nil {
+        if Self.isShepherdMethod(request.method) {
             return await withSocketCommandPolicyAsync(
                 commandKey: request.method, isV2: true, params: request.params
             ) {

@@ -48,6 +48,9 @@ struct ManagedProcessStoreFixture {
     }
 
     @MainActor static func run(_ scenario: String) async throws -> [String: Any] {
+        if scenario.hasPrefix("managed-socket-") {
+            return try await ManagedShepherdRoutingFixture.run(scenario)
+        }
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("cmux-managed-store-\(UUID().uuidString)", isDirectory: true)
@@ -619,6 +622,11 @@ struct ManagedProcessStoreFixture {
             }
         }
         let before = store.managedCodingState(for: nativeOwner)
+        if scenario.hasPrefix("native-coding-supervisor-rpc-") {
+            return try await ManagedShepherdBoundaryFixture.run(
+                scenario, store: store, nativeOwner: nativeOwner, sessionID: sessionID, directory: directory
+            )
+        }
         let host = NSObject()
         var invalidateRenderer = false
         var insertions = 0
@@ -770,8 +778,10 @@ struct ManagedProcessStoreFixture {
         try Data("before\n".utf8).write(to: projectFile)
         try JSONSerialization.data(withJSONObject: [
             "scenario": scenario == "native-coding-supervisor-backpressure" ? "owner-tool-native-supervisor-backpressure"
-                : scenario == "native-coding-supervisor-missing-ack" ? "owner-tool-native-supervisor-missing-ack"
-                : scenario == "native-coding-supervisor-late-ack" ? "owner-tool-native-supervisor-late-ack"
+                : ["native-coding-supervisor-missing-ack", "native-coding-supervisor-rpc-missing-ack"].contains(scenario)
+                    ? "owner-tool-native-supervisor-missing-ack"
+                : ["native-coding-supervisor-late-ack", "native-coding-supervisor-rpc-late-ack"].contains(scenario)
+                    ? "owner-tool-native-supervisor-late-ack"
                 : scenario.hasPrefix("native-coding-supervisor") ? "owner-tool-native-supervisor"
                 : scenario == "native-coding-command-held" ? "owner-tool-uncertain-command"
                 : "owner-tool-native-coding", "callbackFile": projectFile.path,

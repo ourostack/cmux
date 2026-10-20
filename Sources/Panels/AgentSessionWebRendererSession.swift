@@ -40,6 +40,10 @@ final class AgentSessionWebRendererSession {
         return ownedCoordinator
     }
 
+    func managedShepherdTarget() -> AgentSessionManagedShepherdBoundary.Target? {
+        ownedCoordinator.managedShepherdTarget()
+    }
+
     func focus() {
         ownedCoordinator.focus()
     }

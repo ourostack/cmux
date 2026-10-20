@@ -49,6 +49,7 @@ final class AgentSessionManagedRendererController {
         let editorText: String
         let screen: String
         let deadline: ContinuousClock.Instant
+        var renderEvidence: String { values["render"]! }
         fileprivate let origin: UUID
         fileprivate let epoch: UInt64
         fileprivate let context: Context
@@ -100,33 +101,36 @@ final class AgentSessionManagedRendererController {
         private let owner: ObjectIdentifier
         private let store: ObjectIdentifier
         private let cancellation: AgentSessionManagedInputCancellation
+        private let now: @MainActor () -> ContinuousClock.Instant
         private var claimed = false
 
         fileprivate init(
             inputID: UUID, insertion: Insertion, frame: AgentSessionManagedRendererReservation.Frame,
-            cancellation: AgentSessionManagedInputCancellation
+            cancellation: AgentSessionManagedInputCancellation, expiresAt: ContinuousClock.Instant,
+            now: @escaping @MainActor () -> ContinuousClock.Instant
         ) {
             self.inputID = inputID
             text = insertion.text
-            deadline = min(insertion.deadline, frame.deadline)
+            deadline = min(insertion.deadline, frame.deadline, expiresAt)
             self.frame = frame
             owner = insertion.snapshot.context.owner
             store = insertion.snapshot.context.store
             self.cancellation = cancellation
+            self.now = now
         }
 
         func claim(owner: AnyObject, store: AnyObject) -> Bool {
-            guard !claimed, !cancellation.isCancelled,
+            guard !claimed, !cancellation.isCancelled, now() < deadline,
                   self.owner == ObjectIdentifier(owner), self.store == ObjectIdentifier(store),
-                  frame.validate(), !cancellation.isCancelled, !claimed else { return false }
+                  frame.validate(), !cancellation.isCancelled, now() < deadline, !claimed else { return false }
             claimed = true
             return true
         }
 
         func validate(owner: AnyObject, store: AnyObject) -> Bool {
-            claimed && !cancellation.isCancelled &&
+            claimed && !cancellation.isCancelled && now() < deadline &&
                 self.owner == ObjectIdentifier(owner) && self.store == ObjectIdentifier(store) &&
-                frame.validate() && !cancellation.isCancelled
+                frame.validate() && !cancellation.isCancelled && now() < deadline
         }
     }
 
@@ -236,11 +240,17 @@ final class AgentSessionManagedRendererController {
 
     func prepareSubmission(
         _ insertion: Insertion, inputID: UUID,
-        cancellation: AgentSessionManagedInputCancellation = AgentSessionManagedInputCancellation()
+        cancellation: AgentSessionManagedInputCancellation = AgentSessionManagedInputCancellation(),
+        expiresAt: ContinuousClock.Instant? = nil
     ) async throws -> Submission? {
-        guard !cancellation.isCancelled, let frame = try await prepareFrame(insertion),
-              !cancellation.isCancelled, frame.validate(), !cancellation.isCancelled else { return nil }
-        return Submission(inputID: inputID, insertion: insertion, frame: frame, cancellation: cancellation)
+        let deadline = min(insertion.deadline, expiresAt ?? insertion.deadline)
+        guard !cancellation.isCancelled, now() < deadline, let frame = try await prepareFrame(insertion),
+              !cancellation.isCancelled, now() < deadline, frame.validate(),
+              !cancellation.isCancelled, now() < deadline else { return nil }
+        return Submission(
+            inputID: inputID, insertion: insertion, frame: frame, cancellation: cancellation,
+            expiresAt: deadline, now: now
+        )
     }
 
     func prepareFrame(_ insertion: Insertion) async throws -> AgentSessionManagedRendererReservation.Frame? {

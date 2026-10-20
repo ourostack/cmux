@@ -211,6 +211,7 @@ class TerminalController {
     nonisolated let socketServer: SocketControlServer
     /// One boot identity and admission owner shared by all local socket clients.
     lazy var shepherdControlBoundary = makeShepherdControlBoundary()
+    lazy var managedShepherdControlBoundary = makeManagedShepherdControlBoundary()
     /// App-owned discovery marker store injected into the listener event seam.
     nonisolated let socketPathMarkerStore: SocketPathMarkerStore
     // Accepted-connection consumer; runs until process exit (singleton).
@@ -3426,6 +3427,11 @@ class TerminalController {
     ) -> V2MainHopOutcome {
         if ShepherdControlRequest.Method(rawValue: request.method) != nil {
             return .callResult(shepherdControlBoundary.handleSynchronously(request, peer: nil))
+        }
+        if AgentSessionManagedShepherdBoundary.Method(rawValue: request.method) != nil {
+            return .callResult(.err(
+                code: "access_denied", message: "Managed Shepherd requires an asynchronous verified local peer.", data: nil
+            ))
         }
         v2RefreshKnownRefs()
 

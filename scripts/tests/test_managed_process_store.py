@@ -1,6 +1,7 @@
 """Run the actual ProcessStore with owned controlled children, never providers or a GUI."""
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -40,13 +41,65 @@ class ManagedProcessStoreTests(unittest.TestCase):
             "Sources/Panels/AgentSessionManagedCommandService.swift", "Sources/Panels/CopilotManagedSession.swift",
             "Sources/Panels/CopilotManagedConfiguration.swift", "Sources/Panels/CopilotManagedEventMetadata.swift",
             "Sources/Panels/CopilotManagedTurnLedger.swift",
+            "Packages/macOS/CmuxRemoteWorkspace/Sources/CmuxRemoteWorkspace/Relay/RemoteRelayCommandPolicy.swift",
+            "Packages/macOS/CmuxRemoteWorkspace/Sources/CmuxRemoteWorkspace/Relay/RemoteRelayRoutingSchema.swift",
+            "Packages/macOS/CmuxRemoteWorkspace/Sources/CmuxRemoteWorkspace/Relay/RemoteRelayAuthorizationPolicy.swift",
             "scripts/tests/fixtures/managed_session_lifetime.swift",
             "scripts/tests/fixtures/managed_command_service.swift",
             "scripts/tests/fixtures/managed_copilot_startup.swift",
             "scripts/tests/fixtures/managed_process_store.swift",
+            "scripts/tests/fixtures/managed_shepherd_boundary.swift",
         ]
+        boundary = "Sources/Panels/AgentSessionManagedShepherdBoundary.swift"
+        if (ROOT / boundary).exists():
+            names.append(boundary)
         for name in names:
             shutil.copy2(ROOT / name, source)
+        routing = (ROOT / "scripts/tests/fixtures/managed_shepherd_routing.swift").read_text()
+        shepherd = (ROOT / "Sources/TerminalController+Shepherd.swift").read_text()
+        socket = (ROOT / "Sources/TerminalController+ControlSocketAsync.swift").read_text()
+        capabilities = (ROOT / "Sources/TerminalController+Capabilities.swift").read_text()
+        terminal = (ROOT / "Sources/TerminalController.swift").read_text()
+        sections = {
+            "__SHEPHERD_ROUTE__": shepherd.split("extension TerminalController {", 1)[1]
+                .split("    func makeShepherdControlBoundary(", 1)[0],
+            "__MANAGED_FACTORY__": "    func makeManagedShepherdControlBoundary("
+                + shepherd.split("    func makeManagedShepherdControlBoundary(", 1)[1]
+                .split("\n}\n\n@MainActor", 1)[0],
+            "__SOCKET_ROUTE__": "    private nonisolated func processV2CommandUsingSocketExecutionPolicyAsync("
+                + socket.split("    private nonisolated func processV2CommandUsingSocketExecutionPolicyAsync(", 1)[1]
+                .split("        let relayAuthorization =", 1)[0]
+                + '        return "relay_authorization_reached"\n    }\n',
+            "__CAPABILITIES__": "    nonisolated func v2CapabilitiesWithBrowserDesignMode("
+                + capabilities.split("    nonisolated func v2CapabilitiesWithBrowserDesignMode(", 1)[1]
+                .split("    private nonisolated func v2Capabilities(", 1)[0],
+            "__SYNC_ROUTE__": "    func v2MainActorResponse("
+                + terminal.split("    func v2MainActorResponse(", 1)[1]
+                .split("        v2RefreshKnownRefs()", 1)[0]
+                + '        return .callResult(.err(code: "legacy_route", message: "", data: nil))\n    }\n',
+        }
+        for marker, body in sections.items():
+            routing = routing.replace("// " + marker, body)
+        coordinator = (ROOT / "Sources/Panels/AgentSessionWebRendererCoordinator.swift").read_text()
+        session = (ROOT / "Sources/Panels/AgentSessionWebRendererSession.swift").read_text()
+        target_bodies = {
+            "__MANAGED_RENDERER__": "    func managedRenderer("
+                + coordinator.split("    func managedRenderer(", 1)[1]
+                .split("    private func installManagedRendererObservation(", 1)[0],
+            "__COORDINATOR_TARGET__": "    func managedShepherdTarget("
+                + coordinator.split("    func managedShepherdTarget(", 1)[1]
+                .split("    private func installManagedRendererObservation(", 1)[0],
+            "__SESSION_TARGET__": "    func managedShepherdTarget("
+                + session.split("    func managedShepherdTarget(", 1)[1]
+                .split("    func focus(", 1)[0],
+        }
+        # The accessor is inserted after managedRenderer; do not copy it twice.
+        target_bodies["__MANAGED_RENDERER__"] = target_bodies["__MANAGED_RENDERER__"].split(
+            "    func managedShepherdTarget(", 1
+        )[0]
+        for marker, body in target_bodies.items():
+            routing = routing.replace("// " + marker, body)
+        (source / "managed_shepherd_routing.swift").write_text(routing)
         packages = ["CmuxFoundation", "CmuxControlSocket", "CmuxSettings", "CMUXDebugLog"]
         dependencies = ",\n".join(
             f'.package(path: "{ROOT / "Packages/macOS" / name}")' for name in packages
@@ -85,6 +138,52 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         }, indent=2))
         self.assertEqual(result.returncode, 0, evidence.read_text())
         return json.loads(result.stdout)
+
+    def test_managed_socket_methods_bypass_relay_and_keep_the_classic_namespace_distinct(self):
+        result = self.run_store("managed-socket-route")
+        self.assertEqual(result["recognized"], [True, True, True, True, False, False], result)
+        self.assertEqual(result["managed"], ["invalid_params", "invalid_params", "invalid_params"], result)
+        self.assertEqual(result["classic"], "classic_boundary", result)
+        self.assertEqual(result["other"], "relay_authorization_reached", result)
+
+    def test_managed_socket_rejects_original_remote_provenance_before_any_native_boundary_lookup(self):
+        result = self.run_store("managed-socket-provenance")
+        self.assertEqual(result["errors"], ["access_denied"] * 12, result)
+        self.assertEqual(result["managedLookups"], 0, result)
+        self.assertEqual(result["classicLookups"], 0, result)
+
+    def test_managed_local_discovery_is_explicitly_unqualified_and_remote_discovery_does_not_advertise_it(self):
+        result = self.run_store("managed-socket-capabilities")
+        self.assertTrue(result["localManagedMethods"], result)
+        self.assertEqual(result["managed"], {
+            "protocol_version": 1, "state": "unqualified", "providers": [], "profiles": [],
+            "qualification_reason": "managed_native_runtime_unqualified",
+        }, result)
+        self.assertFalse(result["remoteManagedMethods"], result)
+        self.assertFalse(result["remoteManagedCapability"], result)
+        self.assertEqual(result["classicState"], "unqualified", result)
+        self.assertEqual(result["classicReason"], "claude_native_input_attribution_unavailable", result)
+
+    def test_synchronous_managed_calls_cannot_fall_through_into_legacy_input(self):
+        result = self.run_store("managed-socket-sync")
+        self.assertEqual(result["errors"], ["access_denied"] * 3, result)
+        self.assertEqual(result["managedLookups"], 0, result)
+
+    def test_native_target_comes_from_current_owned_coordinator_store_and_session_not_ui_claims(self):
+        result = self.run_store("native-coding-supervisor-rpc-target-accessor")
+        self.assertTrue(result["exactTarget"], result)
+        self.assertEqual(result["refused"], [True] * 9, result)
+        self.assertEqual(result["captures"], 0, result)
+        self.assertEqual(result["insertions"], 0, result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_actual_native_factory_resolves_only_the_exact_live_local_panel_and_retains_no_owner(self):
+        result = self.run_store("native-coding-supervisor-rpc-target-factory")
+        self.assertTrue(result["inspectedExactTarget"], result)
+        self.assertEqual(result["refused"], ["target_unavailable"] * 8, result)
+        self.assertEqual(result["captures"], 1, result)
+        self.assertEqual(result["insertions"], 0, result)
+        self.assertTrue(result["stopped"], result)
 
     def test_native_managed_start_is_owned_and_blocks_a_manual_start(self):
         result = self.run_store("start-owned")
@@ -197,6 +296,90 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         self.assertEqual(result["sendCount"], 2, result)
         self.assertEqual(result["commandExecutions"], "read\nedit\nvalidate\n", result)
         self.assertTrue(result["identityMatches"], result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_managed_rpc_binds_native_identity_raw_painted_screen_and_retains_exact_ack_after_close(self):
+        result = self.run_store("native-coding-supervisor-rpc-success")
+        inspection = result["inspection"]
+        self.assertEqual(inspection["protocol_version"], 1, result)
+        self.assertEqual(inspection["host_instance"], result["identityHost"], result)
+        self.assertEqual(inspection["identity"]["kind"], "agent_session", result)
+        self.assertEqual(inspection.get("cwd"), os.path.realpath(result["directory"]), result)
+        self.assertNotIn("tty", inspection["identity"], result)
+        self.assertEqual(inspection["screen"], "Paint-bound native output", result)
+        self.assertEqual(inspection["screen_fingerprint"],
+                         hashlib.sha256(b"Paint-bound native output").hexdigest(), result)
+        self.assertTrue(result["registeredBeforeInsertion"], result)
+        self.assertEqual(result["first"]["state"], "accepted", result)
+        for receipt in [result["first"], result["replay"], result["final"]]:
+            self.assertEqual(receipt["state"], "accepted", result)
+            self.assertTrue(receipt["editor_inserted"], result)
+            self.assertTrue(receipt["backend_write_admitted"], result)
+            self.assertTrue(receipt["provider_acknowledged"], result)
+            self.assertEqual(receipt["provider_input_id"], "server-input-two", result)
+            self.assertNotIn("paste_admitted", receipt, result)
+            self.assertNotIn("submit_admitted", receipt, result)
+        self.assertEqual(result["conflict"]["error"], "request_conflict", result)
+        self.assertEqual(result["insertions"], 1, result)
+        self.assertEqual(result["consumes"], 1, result)
+        self.assertEqual(result["editor"], "", result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertFalse(result["storeProgressAfterClose"], result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_managed_rpc_refuses_unverified_peer_and_remote_envelope_before_any_renderer_read(self):
+        result = self.run_store("native-coding-supervisor-rpc-provenance")
+        self.assertEqual(result["rejected"], ["access_denied"] * 4, result)
+        self.assertEqual(result["captures"], 0, result)
+        self.assertEqual(result["insertions"], 0, result)
+        self.assertEqual(result["sendCount"], 1, result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_managed_rpc_strict_parameters_do_not_alias_classic_methods_or_caller_authority(self):
+        result = self.run_store("native-coding-supervisor-rpc-parameters")
+        self.assertEqual(result["rejected"],
+                         ["invalid_params"] * 3 + ["method_not_found", "invalid_params"], result)
+        self.assertEqual(result["captures"], 0, result)
+        self.assertEqual(result["insertions"], 0, result)
+        self.assertEqual(result["sendCount"], 1, result)
+
+    def test_managed_rpc_uncertain_editor_effect_never_becomes_not_sent_or_retried(self):
+        for suffix in ["nil-insert", "throw-insert", "cancel"]:
+            with self.subTest(suffix=suffix):
+                result = self.run_store("native-coding-supervisor-rpc-" + suffix)
+                for receipt in [result["first"], result["replay"], result["final"]]:
+                    self.assertEqual(receipt["state"], "unknown", result)
+                    self.assertFalse(receipt["backend_write_admitted"], result)
+                    self.assertFalse(receipt["provider_acknowledged"], result)
+                self.assertTrue(result["registeredBeforeInsertion"], result)
+                self.assertEqual(result["insertions"], 1, result)
+                self.assertEqual(result["editor"], "Continue authorized coding.", result)
+                self.assertEqual(result["consumes"], 0, result)
+                self.assertEqual(result["sendCount"], 1, result)
+                self.assertTrue(result["stopped"], result)
+
+    def test_managed_rpc_late_ack_reconciles_same_receipt_without_retry_and_only_then_cleans_editor(self):
+        result = self.run_store("native-coding-supervisor-rpc-late-ack")
+        self.assertEqual(result["first"]["state"], "unknown", result)
+        self.assertEqual(result["final"]["state"], "accepted", result)
+        self.assertTrue(result["final"]["provider_acknowledged"], result)
+        self.assertEqual(result["final"]["provider_input_id"], "server-input-two", result)
+        self.assertEqual(result["insertions"], 1, result)
+        self.assertEqual(result["consumes"], 1, result)
+        self.assertEqual(result["editor"], "", result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_managed_rpc_complete_bytes_without_ack_retains_unknown_after_owner_release_and_never_cleans(self):
+        result = self.run_store("native-coding-supervisor-rpc-missing-ack")
+        self.assertEqual(result["first"]["state"], "unknown", result)
+        self.assertEqual(result["final"]["state"], "unknown", result)
+        self.assertTrue(result["final"]["editor_inserted"], result)
+        self.assertTrue(result["final"]["backend_write_admitted"], result)
+        self.assertFalse(result["final"]["provider_acknowledged"], result)
+        self.assertEqual(result["consumes"], 0, result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertFalse(result["storeProgressAfterClose"], result)
         self.assertTrue(result["stopped"], result)
 
     def test_supervisor_receipt_progress_is_exact_monotonic_and_survives_owner_release(self):

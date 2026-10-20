@@ -234,6 +234,41 @@ struct ManagedRendererControllerFixture {
             throw Failure.assertion("missing insertion")
         }
         try check(reservedText == "literal\n<script>", "text was not passed literally")
+        if scenario.hasPrefix("submission-token-") {
+            let cutoff = began.advanced(by: scenario == "submission-token-prepare"
+                ? .milliseconds(100) : scenario == "submission-token-cannot-extend" ? .seconds(10) : .milliseconds(200))
+            let prepared = try await controller.prepareSubmission(insertion, inputID: UUID(), expiresAt: cutoff)
+            if scenario == "submission-token-prepare" {
+                try check(prepared == nil, "processing separation outlived the narrower native observation token")
+                return
+            }
+            guard let submission = prepared else { throw Failure.assertion("missing narrowed submission") }
+            if scenario == "submission-token-cannot-extend" {
+                try check(submission.deadline == snapshot.deadline, "token deadline extended native capture authority")
+                return
+            }
+            if scenario == "submission-token-claim" { now = cutoff }
+            if scenario == "submission-token-callback" { contextHook = { now = cutoff } }
+            let claimed = submission.claim(owner: owner, store: host)
+            if scenario != "submission-token-validate" {
+                try check(!claimed, "expired token claimed a live renderer frame")
+                try check(submission.deadline == cutoff, "submission ignored the narrower native token deadline")
+                return
+            }
+            try check(claimed, "in-budget token could not claim its frame")
+            now = cutoff
+            let pipe = Pipe()
+            let writer = try ShepherdManagedPipeWriter(takingOwnershipOf: pipe.fileHandleForWriting)
+            defer { try? writer.close(); try? pipe.fileHandleForReading.close() }
+            let result = await writer.write(Data("must not write".utf8), deadline: submission.deadline) {
+                submission.validate(owner: owner, store: host)
+            }
+            try check(!submission.validate(owner: owner, store: host) &&
+                      result == .notWritten(.guardInvalidated),
+                      "narrower token deadline admitted a real pipe byte")
+            try check(submission.deadline == cutoff, "submission ignored the narrower native token deadline")
+            return
+        }
         if scenario.hasPrefix("consume-") {
             if ["consume-post-context-ABA", "consume-post-changed-ABA", "consume-newer-insertion"].contains(scenario) {
                 var concurrentSnapshot: Controller.Snapshot?

@@ -4,9 +4,14 @@ import CryptoKit
 import Foundation
 
 extension TerminalController {
+    nonisolated static func isShepherdMethod(_ method: String) -> Bool {
+        ShepherdControlRequest.Method(rawValue: method) != nil ||
+            AgentSessionManagedShepherdBoundary.Method(rawValue: method) != nil
+    }
+
     nonisolated static func isShepherdSocketCommand(_ command: String) -> Bool {
         guard case .success(let request) = ControlRequestParser().request(fromLine: command) else { return false }
-        return ShepherdControlRequest.Method(rawValue: request.method) != nil
+        return isShepherdMethod(request.method)
     }
 
     nonisolated func handleShepherdRequestAsync(
@@ -21,6 +26,10 @@ extension TerminalController {
                 message: "Native Shepherd requires a verified same-user local peer.",
                 data: nil
             )
+        }
+        if AgentSessionManagedShepherdBoundary.Method(rawValue: request.method) != nil {
+            let boundary = await managedShepherdControlBoundary
+            return await boundary.handle(request, peer: peer)
         }
         let boundary = await shepherdControlBoundary
         return await boundary.handle(request, peer: peer)
@@ -41,6 +50,18 @@ extension TerminalController {
                 try await Task.sleep(for: .seconds(seconds))
             }
         )
+    }
+
+    func makeManagedShepherdControlBoundary() -> AgentSessionManagedShepherdBoundary {
+        AgentSessionManagedShepherdBoundary { [weak self] workspaceID, surfaceID in
+            guard self != nil,
+                  let located = AppDelegate.shared?.workspaceContainingPanel(
+                      panelId: surfaceID, preferredWorkspaceId: workspaceID
+                  ), located.workspace.id == workspaceID, !located.workspace.isRemoteWorkspace,
+                  let panel = located.workspace.panels[surfaceID] as? AgentSessionPanel,
+                  panel.id == surfaceID, panel.workspaceId == workspaceID, !panel.isClosed else { return nil }
+            return panel.rendererSession.managedShepherdTarget()
+        }
     }
 }
 

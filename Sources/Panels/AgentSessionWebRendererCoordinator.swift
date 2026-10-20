@@ -532,6 +532,14 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         return controller
     }
 
+    func managedShepherdTarget() -> AgentSessionManagedShepherdBoundary.Target? {
+        guard !isClosed, let owner = nativeCodingOwner,
+              let sessionID = processStore.managedCodingSessionID(for: owner),
+              let renderer = managedRenderer(for: owner),
+              currentManagedRendererContext(for: owner) != nil else { return nil }
+        return .init(nativeOwner: owner, store: processStore, renderer: renderer, sessionID: sessionID)
+    }
+
     private func installManagedRendererObservation() {
         guard managedRendererController != nil else { return }
         webView?.observeManagedRendererChanges { [weak self] in self?.managedRendererController?.invalidate() }

@@ -18,6 +18,7 @@ extension TerminalController {
         }
         var methods = capabilities["methods"] as? [String] ?? []
         for method in ShepherdControlRequest.Method.allCases.map(\.rawValue)
+            + AgentSessionManagedShepherdBoundary.Method.allCases.map(\.rawValue)
             + ["browser.design_mode.set", "browser.design_mode.status"]
             where !methods.contains(method)
         {
@@ -33,6 +34,11 @@ extension TerminalController {
             guardedInput["qualification_reason"] = reason
         }
         capabilities["shepherd_guarded_input"] = guardedInput
+        capabilities["shepherd_managed_input"] = [
+            "protocol_version": 1, "state": "unqualified",
+            "providers": [String](), "profiles": [String](),
+            "qualification_reason": "managed_native_runtime_unqualified",
+        ] as [String: Any]
         return capabilities
     }
 

@@ -13,6 +13,7 @@ enum AgentSessionProviderID: String {
     var displayName: String { rawValue }
 }
 struct AgentSessionWebTheme {}
+enum AgentSessionManagedShepherdBoundary { struct Target {} }
 
 @MainActor final class AgentSessionWebRendererCoordinator {
     static var onRevoke: (() -> Void)?
@@ -33,6 +34,7 @@ struct AgentSessionWebTheme {}
     ) throws {}
     func focus() {}
     func unfocus() {}
+    func managedShepherdTarget() -> AgentSessionManagedShepherdBoundary.Target? { nil }
     func revokeNativeCodingStart() {
         Self.operations.append("revoke")
         Self.onRevoke?()

@@ -71,6 +71,14 @@ final class AgentSessionProcessStore {
         return state
     }
 
+    func managedCodingSessionID(
+        for candidate: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+    ) -> String? {
+        guard ownsManagedCodingOwner(candidate), let owner = managedCopilot,
+              owner.nativeCodingOwner === candidate else { return nil }
+        return owner.sessionID
+    }
+
     func beginManagedSupervisorInput(
         sessionId: String, submission: AgentSessionManagedRendererController.Submission,
         nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner,

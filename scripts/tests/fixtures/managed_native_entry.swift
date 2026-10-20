@@ -93,7 +93,10 @@ final class WKNavigation {}
 
 @MainActor final class AgentSessionManagedRendererController {
     func invalidate() {}
+    func invalidateRender() {}
 }
+
+enum AgentSessionManagedShepherdBoundary { struct Target {} }
 
 @MainActor final class AgentSessionTurnNotifier {
     init(surfaceID: UUID, workspaceID: () -> UUID, workingDirectory: () -> String?) {}
@@ -132,6 +135,7 @@ final class WKNavigation {}
 // __BIND_METHOD__
     func applyThemeToLoadedPage() {}
     func sendEvent(_ event: [String: Any]) {}
+    func managedShepherdTarget() -> AgentSessionManagedShepherdBoundary.Target? { nil }
     func focus() {}
     func unfocus() {}
     func close() { revokeNativeCodingStart(); isClosed = true }

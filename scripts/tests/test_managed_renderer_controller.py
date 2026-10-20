@@ -68,6 +68,11 @@ class ManagedRendererControllerTests(unittest.TestCase):
     def test_reentrant_native_validation_cannot_claim_the_same_submission_twice(self):
         self.scenario("submission-claim-reentry")
 
+    def test_native_token_deadline_only_narrows_submission_preparation_claim_and_actual_pipe_validation(self):
+        for suffix in ["prepare", "claim", "callback", "validate", "cannot-extend"]:
+            with self.subTest(suffix=suffix):
+                self.scenario("submission-token-" + suffix)
+
     def test_invalidated_capture_reply_cannot_create_a_snapshot(self):
         self.scenario("capture-reentry")
 
