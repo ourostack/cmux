@@ -18,6 +18,7 @@ final class CopilotManagedSession {
     private(set) var diagnostics = Data()
     private(set) var closeFailures: [String] = []
     var failureSink: ((String) -> Void)?
+    var projectionSink: ((CopilotManagedTurnLedger.Projection) -> Void)?
 
     var hasCompleteWorkEvidence: Bool {
         phase == .workObserved && lifetime.transportIsLive(launchID: lifetime.launchID)
@@ -271,6 +272,7 @@ final class CopilotManagedSession {
                 hold(reason)
                 return
             }
+            guard publishLedgerProjections() else { return }
             if phase == .workObserved { phase = .awaitingRoot }
             dispatchCallbackIfReady()
             inspectWorkIfReady()
@@ -492,6 +494,7 @@ final class CopilotManagedSession {
                 hold(turnLedger?.failureReason ?? "inputLedgerConflict")
                 return
             }
+            guard publishLedgerProjections() else { return }
             phase = .awaitingRoot
             dispatchCallbackIfReady()
             inspectWorkIfReady()
@@ -537,6 +540,29 @@ final class CopilotManagedSession {
         request(.work(.refresh, token), params: ["sessionId": sessionID])
     }
 
+    private func publish(_ projection: CopilotManagedTurnLedger.Projection) -> Bool {
+        guard phase != .held, lifetime.transportIsLive(launchID: lifetime.launchID),
+              commandAuthorityIsLive, phase != .held else {
+            hold("projectionOwnerUnavailable")
+            return false
+        }
+        projectionSink?(projection)
+        guard phase != .held, lifetime.transportIsLive(launchID: lifetime.launchID),
+              commandAuthorityIsLive, phase != .held else {
+            hold("projectionOwnerUnavailable")
+            return false
+        }
+        return true
+    }
+
+    private func publishLedgerProjections() -> Bool {
+        guard let turnLedger else { return false }
+        for projection in turnLedger.takeProjections() {
+            guard publish(projection) else { return false }
+        }
+        return phase != .held
+    }
+
     private func dispatchCallbackIfReady() {
         guard phase == .awaitingRoot, pending.isEmpty, commandTask == nil,
               let callback = turnLedger?.nextCallback else { return }
@@ -547,6 +573,7 @@ final class CopilotManagedSession {
             return
         }
         phase = .executingCallback
+        guard publish(.commandStarted(callback.callID, callback.command)) else { return }
         let operationID = UUID()
         commandTask = Task { [weak self] in
             guard let self else { return }
@@ -561,15 +588,20 @@ final class CopilotManagedSession {
             case .held(let reason):
                 self.hold("commandHeld:\(reason.rawValue)")
             case .completed(let completion):
+                let limit = 16 * 1024
+                let stdout = String(decoding: completion.stdout.prefix(limit), as: UTF8.self)
+                let stderr = String(decoding: completion.stderr.prefix(limit), as: UTF8.self)
+                guard self.publish(.commandCompleted(
+                    callback.callID, callback.command, completion.status, stdout + stderr
+                )) else { return }
                 guard self.turnLedger?.registerCallbackResponse(callback.callID) == true else {
                     self.hold("callbackMismatch")
                     return
                 }
-                let limit = 16 * 1024
                 let report: [String: Any] = [
                     "status": completion.status,
-                    "stdout": String(decoding: completion.stdout.prefix(limit), as: UTF8.self),
-                    "stderr": String(decoding: completion.stderr.prefix(limit), as: UTF8.self),
+                    "stdout": stdout,
+                    "stderr": stderr,
                     "stdoutBytes": completion.stdout.count, "stderrBytes": completion.stderr.count,
                     "stdoutTruncated": completion.stdout.count > limit, "stderrTruncated": completion.stderr.count > limit,
                     "decoding": "utf8-replacement",

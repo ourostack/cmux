@@ -137,6 +137,10 @@ final class AgentSessionProcessStore {
                 guard let self, let owner else { return }
                 self.failManagedCopilot(owner, reason: reason)
             }
+            launch.adapter.projectionSink = { [weak self, weak owner, weak launch] projection in
+                guard let self, let owner, let launch else { return }
+                self.projectManagedCopilot(projection, owner: owner, launch: launch)
+            }
             owner.started = true
             emitNativeSessionState(owner)
             var startedEvent: [String: Any] = [
@@ -180,6 +184,34 @@ final class AgentSessionProcessStore {
         guard managedCopilot === owner else { return }
         managedCopilot = nil
         Self.retainedManagedWork.removeValue(forKey: ObjectIdentifier(self))
+    }
+
+    private func projectManagedCopilot(
+        _ projection: CopilotManagedTurnLedger.Projection,
+        owner: ManagedCopilotOwner, launch: AgentSessionManagedCopilotLaunch
+    ) {
+        guard managedCopilot === owner, owner.launch === launch,
+              owner.started, !owner.isClosing, !owner.failed,
+              owner.nativeCodingOwner?.authorizes(launch.lifetime) != false,
+              managedCopilot === owner, owner.launch === launch,
+              owner.started, !owner.isClosing, !owner.failed else { return }
+        switch projection {
+        case .assistant(let text):
+            emitOutput(sessionId: owner.sessionID, providerID: .copilot, stream: "stdout", text: text + "\n\n")
+        case .commandStarted(let callID, let command):
+            emitActivity(sessionId: owner.sessionID, providerID: .copilot, activity: [
+                "activityId": callID, "kind": "command", "status": "inProgress",
+                "action": command.program, "detail": command.arguments.joined(separator: " "),
+            ])
+        case .commandCompleted(let callID, let command, let status, let output):
+            emitActivity(sessionId: owner.sessionID, providerID: .copilot, activity: [
+                "activityId": callID, "kind": "command", "status": status == 0 ? "completed" : "failed",
+                "action": command.program, "detail": command.arguments.joined(separator: " "),
+                "outputDelta": output,
+            ])
+        case .turnComplete:
+            emitTurnComplete(sessionId: owner.sessionID, providerID: .copilot)
+        }
     }
 
     private func emitNativeSessionState(_ owner: ManagedCopilotOwner) {

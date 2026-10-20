@@ -4,12 +4,25 @@ import Foundation
 /// Provider event attribution and positive work evidence, never profile qualification or input admission.
 @MainActor
 final class CopilotManagedTurnLedger {
+    enum Projection {
+        case assistant(String)
+        case commandStarted(String, AgentSessionManagedCommand)
+        case commandCompleted(String, AgentSessionManagedCommand, Int32, String)
+        case turnComplete
+    }
+
     enum WorkReadback: String, CaseIterable {
         case refresh, tasks, schedules, pendingTools
     }
 
     private(set) var state: ShepherdManagedSessionState
     private(set) var failureReason: String?
+    private var projections: [Projection] = []
+
+    func takeProjections() -> [Projection] {
+        defer { projections.removeAll() }
+        return failureReason == nil ? projections : []
+    }
 
     private struct Root {
         let input: UUID
@@ -358,6 +371,9 @@ final class CopilotManagedTurnLedger {
                 }
                 candidate = Root(input: owner, providerInputID: originatingID, turnID: turn)
             }
+            if let text = data["content"] as? String, !text.isEmpty {
+                projections.append(.assistant(text))
+            }
         case "assistant.turn_end":
             guard let turn = identifier(data["turnId"]), let activity = turns.removeValue(forKey: turn),
                   state.finishActivity(activity) else {
@@ -388,6 +404,7 @@ final class CopilotManagedTurnLedger {
             }
             completedRoot = candidate
             self.candidate = nil
+            projections.append(.turnComplete)
         case "assistant.idle":
             break
         case "assistant.intent":

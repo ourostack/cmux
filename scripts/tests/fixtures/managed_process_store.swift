@@ -609,7 +609,20 @@ struct ManagedProcessStoreFixture {
         _ scenario: String, store: AgentSessionProcessStore, executable: URL, directory: URL
     ) async throws -> [String: Any] {
         var nativeEvents: [[String: Any]] = []
-        store.eventSink = { nativeEvents.append($0) }
+        var projectionClosed = false
+        store.eventSink = { [weak store] event in
+            nativeEvents.append(event)
+            let closeOnStart = scenario == "native-coding-projection-close-start" &&
+                event["type"] as? String == "provider.activity" && event["status"] as? String == "inProgress"
+            let closeOnCompletion = scenario == "native-coding-projection-close-completion" &&
+                event["type"] as? String == "provider.activity" && event["status"] as? String == "completed"
+            let closeOnAssistant = scenario == "native-coding-projection-close-assistant" &&
+                event["type"] as? String == "provider.output" && event["stream"] as? String == "stdout"
+            if !projectionClosed && (closeOnStart || closeOnCompletion || closeOnAssistant) {
+                projectionClosed = true
+                store?.closeAll()
+            }
+        }
         let projectFile = directory.appendingPathComponent("controlled-project.txt")
         try Data("before\n".utf8).write(to: projectFile)
         try JSONSerialization.data(withJSONObject: [
@@ -727,7 +740,8 @@ struct ManagedProcessStoreFixture {
                     } catch { return true }
                 }
                 nativeOwner.revoke()
-            } else if ["native-coding-input", "native-coding-owner-lost", "native-coding-command-held"].contains(scenario) {
+            } else if ["native-coding-input", "native-coding-owner-lost", "native-coding-command-held"].contains(scenario)
+                        || scenario.hasPrefix("native-coding-projection-") {
                 do {
                     try await targetStore.writeLine(sessionId: sessionID, text: acceptedOwnerPrompt)
                 } catch {
@@ -739,6 +753,12 @@ struct ManagedProcessStoreFixture {
                         let traceFile = directory.appendingPathComponent(".cmux-controlled-copilot-trace")
                         if let trace = try? String(contentsOf: traceFile, encoding: .utf8),
                            trace.contains("response-written:session.tools.listPendingRequests at ") { break }
+                        try await Task.sleep(for: .milliseconds(5))
+                    }
+                }
+                if scenario.hasPrefix("native-coding-projection-") {
+                    let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+                    while targetStore.hasActiveProviderSession, ContinuousClock.now < deadline {
                         try await Task.sleep(for: .milliseconds(5))
                     }
                 }
@@ -806,6 +826,8 @@ struct ManagedProcessStoreFixture {
             "nativeFailureEvents": nativeEvents.filter {
                 $0["type"] as? String == "provider.output" && $0["stream"] as? String == "stderr"
             },
+            "nativeEvents": nativeEvents,
+            "projectionClosed": projectionClosed, "peerTrace": trace,
             "sessionID": sessionID, "reservedSnapshot": reservedSnapshot, "runningSnapshot": runningSnapshot,
             "snapshotCleared": targetStore.nativeManagedSessionSnapshot == nil,
             "inputError": inputError, "queuedInputRejected": queuedInputRejected,

@@ -140,6 +140,48 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         self.assertTrue(result["snapshotCleared"], result)
         self.assertTrue(result["stopped"], result)
 
+    def test_native_coding_projection_exposes_attributed_reply_and_actual_command_outcomes(self):
+        result = self.run_store("native-coding-input")
+        self.assertEqual(result["startError"], "", result)
+        self.assertEqual(result["inputError"], "", result)
+        self.assertEqual(result["commandExecutions"], "read\nedit\nvalidate\n", result)
+        events = result["nativeEvents"]
+        output = [event for event in events if event["type"] == "provider.output"
+                  and event["stream"] == "stdout"]
+        self.assertEqual([event["text"] for event in output], ["Done\n\n"], result)
+        activity = [event for event in events if event["type"] == "provider.activity"]
+        self.assertEqual([event["status"] for event in activity],
+                         ["inProgress", "completed"] * 3, result)
+        self.assertEqual([event["activityId"] for event in activity],
+                         ["call-0", "call-0", "call-1", "call-1", "call-2", "call-2"], result)
+        self.assertTrue(all(event["kind"] == "command" for event in activity), result)
+        self.assertEqual([event.get("outputDelta", "") for event in activity
+                          if event["status"] == "completed"], ["before\n", "", "validated\n"], result)
+        completion = [event for event in events if event["type"] == "provider.turnComplete"]
+        self.assertEqual(len(completion), 1, result)
+        self.assertTrue(all(event["sessionId"] == result["sessionID"] and event["providerId"] == "copilot"
+                            for event in [*output, *activity, *completion]), result)
+        self.assertLess(events.index(activity[-1]), events.index(output[0]), result)
+        self.assertLess(events.index(output[0]), events.index(completion[0]), result)
+        self.assertTrue(result["workReadbacksObserved"], result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_reentrant_projection_close_stops_native_work_and_protocol_writes(self):
+        for moment, executions, responses in [
+            ("start", "", 0), ("completion", "read\n", 0),
+            ("assistant", "read\nedit\nvalidate\n", 3),
+        ]:
+            with self.subTest(moment=moment):
+                result = self.run_store(f"native-coding-projection-close-{moment}")
+                self.assertTrue(result["projectionClosed"], result)
+                self.assertTrue(result["stopped"], result)
+                self.assertEqual(result["commandExecutions"], executions, result)
+                self.assertEqual(result["peerTrace"].splitlines().count("session.tools.handlePendingToolCall"),
+                                 responses, result)
+                self.assertFalse(result["workReadbacksObserved"], result)
+                self.assertFalse(any(event["type"] == "provider.turnComplete"
+                                     for event in result["nativeEvents"]), result)
+
     def test_production_native_owner_requires_an_immutable_qualified_profile_before_launch(self):
         for renderer in ["react", "solid"]:
             with self.subTest(renderer=renderer):

@@ -47,9 +47,18 @@ struct ManagedCopilotTurnLedgerFixture {
             default:
                 throw CocoaError(.coderInvalidValue)
             }
+            let projections: [[String: Any]] = ledger.takeProjections().map { projection in
+                switch projection {
+                case .assistant(let text): return ["type": "assistant", "text": text]
+                case .turnComplete: return ["type": "turnComplete"]
+                case .commandStarted, .commandCompleted:
+                    fatalError("provider telemetry cannot create native command projections")
+                }
+            }
             responses.append([
                 "accepted": accepted, "complete": ledger.hasCompleteWorkEvidence,
                 "failure": ledger.failureReason ?? "", "hold": ledger.state.holdReason.map { "\($0)" } ?? "",
+                "projections": projections,
             ])
         }
         try FileHandle.standardOutput.write(contentsOf: JSONSerialization.data(withJSONObject: responses))

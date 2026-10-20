@@ -519,6 +519,53 @@ for (const renderer of ["react", "solid"] as const) {
     }
   });
 
+  test(`actual ${renderer} managed command and assistant projections are visible without executing output`, async () => {
+    const fixture = mount(renderer, {
+      providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2, executionDisclosure: disclosure,
+    });
+    try {
+      const document = fixture.dom.window.document;
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const receive = (event: AgentEvent) => fixture.dom.window.cmuxAgentBridge?.receive(event);
+      receive({
+        type: "provider.output", providerId: "copilot", sessionId: "foreign-session",
+        stream: "stdout", text: "Foreign reply must not appear",
+      });
+      for (const [activityId, detail, output] of [
+        ["call-0", "Read authorized project", "before\n"],
+        ["call-1", "Edit authorized project", ""],
+        ["call-2", "Validate authorized project", "validated <img src=x onerror='throw 1'>\n"],
+      ]) {
+        receive({
+          type: "provider.activity", providerId: "copilot", sessionId: "native-owned-session",
+          activityId, kind: "command", status: "inProgress", action: "/bin/sh", detail,
+        });
+        receive({
+          type: "provider.activity", providerId: "copilot", sessionId: "native-owned-session",
+          activityId, kind: "command", status: "completed", action: "/bin/sh", detail, outputDelta: output,
+        });
+      }
+      receive({
+        type: "provider.output", providerId: "copilot", sessionId: "native-owned-session", stream: "stdout",
+        text: "Authorized coding reply\n\n",
+      });
+      receive({ type: "provider.turnComplete", providerId: "copilot", sessionId: "native-owned-session" });
+      await waitFor(() => document.body.textContent?.includes("Authorized coding reply") === true);
+      const text = document.body.textContent ?? "";
+      expect(text).toContain("Read authorized project");
+      expect(text).toContain("Edit authorized project");
+      expect(text).toContain("Validate authorized project");
+      expect(text).toContain("before");
+      expect(text).toContain("validated <img src=x onerror='throw 1'>");
+      expect(document.querySelector("img")).toBeNull();
+      expect(text).not.toContain("Foreign reply must not appear");
+      expect(fixture.messages.filter((method) => method !== "app.context" && method !== "provider.list")).toEqual([]);
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
   test(`actual ${renderer} renderer does not turn a restored Copilot panel into a manual start`, async () => {
     const fixture = mount(renderer);
     try {

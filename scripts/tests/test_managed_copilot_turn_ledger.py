@@ -93,6 +93,57 @@ class ManagedCopilotTurnLedgerTests(unittest.TestCase):
         self.assertFalse(any(row["complete"] for row in rows[:-1]))
         self.assertTrue(rows[-1]["complete"])
 
+    def test_projection_waits_for_exact_ack_and_does_not_expose_an_early_foreign_root(self):
+        rows = self.run_ledger([begin(), *root(), ack()])
+        self.assertTrue(all(not row["projections"] for row in rows[:-1]), rows)
+        self.assertEqual(rows[-1]["projections"], [
+            {"type": "assistant", "text": "Finished"}, {"type": "turnComplete"},
+        ], rows)
+        foreign = self.run_ledger([begin(), *root("someone-else"), ack()])
+        self.assertTrue(all(not row["projections"] for row in foreign), foreign)
+        self.assertEqual(foreign[-1]["failure"], "foreignRoot", foreign)
+
+    def test_projection_emits_only_attributed_full_messages_not_unattributed_stream_deltas(self):
+        rows = self.run_ledger([
+            begin(), ack(), event("assistant.turn_start", {"turnId": "0"}),
+            event("assistant.message_start", {"messageId": "assistant-A"}),
+            event("assistant.message_delta", {"messageId": "assistant-A", "deltaContent": "unattributed draft"}),
+            event("assistant.reasoning_delta", {"reasoningId": "reason-A", "deltaContent": "private reasoning"}),
+            event("assistant.reasoning", {"reasoningId": "reason-A", "content": "private reasoning"}),
+            *root()[1:],
+        ])
+        self.assertTrue(all(not row["projections"] for row in rows[:7]), rows)
+        projected = [projection for row in rows for projection in row["projections"]]
+        self.assertEqual(projected, [
+            {"type": "assistant", "text": "Finished"}, {"type": "turnComplete"},
+        ], rows)
+
+    def test_replayed_or_malformed_messages_do_not_create_a_second_projection(self):
+        for change in ["replay", "malformed", "foreign-participant"]:
+            with self.subTest(change=change):
+                events = root()
+                repeated = events[1] if change == "replay" else event("assistant.message", {
+                    "messageId": "bad", "turnId": "0", "originatingMessageId": "server-message-A",
+                    "content": 42 if change == "malformed" else "foreign",
+                }, **({"agentId": "someone-else"} if change == "foreign-participant" else {}))
+                rows = self.run_ledger([begin(), ack(), *events[:2], repeated])
+                projected = [projection for row in rows for projection in row["projections"]]
+                self.assertEqual(projected, [{"type": "assistant", "text": "Finished"}], rows)
+                self.assertTrue(rows[-1]["failure"], rows)
+
+    def test_each_distinct_attributed_message_is_projected_once_and_completion_requires_idle(self):
+        events = root()
+        second = event("assistant.message", {
+            "turnId": "0", "originatingMessageId": "server-message-A",
+            "messageId": "assistant-B", "content": "Second answer",
+        })
+        rows = self.run_ledger([begin(), ack(), *events[:2], second, events[2], events[3], *clean_work()])
+        self.assertEqual(rows[3]["projections"], [{"type": "assistant", "text": "Finished"}], rows)
+        self.assertEqual(rows[4]["projections"], [{"type": "assistant", "text": "Second answer"}], rows)
+        self.assertEqual(rows[5]["projections"], [], rows)
+        self.assertEqual(rows[6]["projections"], [{"type": "turnComplete"}], rows)
+        self.assertTrue(rows[-1]["complete"], rows)
+
     def test_early_root_events_replay_only_after_the_exact_send_ack(self):
         rows = self.run_ledger([begin(), *root(), ack(), *clean_work()])
         self.assertFalse(any(row["complete"] for row in rows[:6]))
