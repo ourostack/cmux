@@ -26,6 +26,7 @@ class ManagedProcessStoreTests(unittest.TestCase):
             "Sources/AgentSessionProvider.swift", "Sources/AgentSessionLaunchPlan.swift",
             "Sources/Panels/AgentSessionProcessStore.swift", "Sources/Panels/AgentSessionRunningSession.swift",
             "Sources/Panels/AgentSessionBridge.swift", "Sources/Panels/AgentSessionBridgeError.swift",
+            "Sources/Panels/AgentSessionBridgeRequest.swift",
             "Sources/Panels/AgentSessionStartedSession.swift", "Sources/Panels/AgentSessionInputWriter.swift",
             "Sources/Panels/AgentSessionOutputLineBuffer.swift", "Sources/Panels/AgentSessionPermissionMode.swift",
             "Sources/Panels/AgentSessionStreamAccumulators.swift", "Sources/Panels/ClaudeStreamJSONAccumulator.swift",
@@ -87,10 +88,94 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         result = self.run_store("start-owned")
         self.assertEqual(result["startError"], "", result)
         self.assertTrue(result["activeAfterStart"], result)
+        self.assertTrue(result["peerStarted"], result)
         self.assertEqual(result["manualStartError"], "sessionAlreadyRunning", result)
         self.assertTrue(result["stopped"], result)
         self.assertEqual(result["exitStatus"], 0, result)
         self.assertTrue(result["exitStopRequested"], result)
+
+    def test_copilot_identity_does_not_describe_a_generic_manual_launch(self):
+        result = self.run_store("copilot-provider-contract")
+        self.assertTrue(result["supported"], result)
+        self.assertEqual(result["executableName"], "copilot", result)
+        self.assertEqual(result["transportKind"], "managed-stdio-jsonrpc", result)
+        self.assertEqual(result["arguments"], [], result)
+        self.assertFalse(result["autoStart"], result)
+
+    def test_generic_copilot_start_is_refused_before_session_or_child_creation(self):
+        result = self.run_store("copilot-manual-refused")
+        self.assertEqual(result["startError"], "unsupportedTransport", result)
+        self.assertFalse(result["active"], result)
+        self.assertFalse(result["started"], result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_browser_requests_cannot_select_or_start_the_managed_provider(self):
+        result = self.run_store("copilot-browser-refused")
+        self.assertTrue(result["supported"], result)
+        self.assertEqual(result["errors"], ["invalidProvider", "invalidProvider"], result)
+        self.assertEqual(result["manualProviders"], ["codex", "claude", "opencode"], result)
+
+    def test_raw_native_scope_and_mandate_cannot_grant_coding_execution(self):
+        result = self.run_store("raw-coding-mandate-refused")
+        self.assertEqual(result["startError"], "unsupportedTransport", result)
+        self.assertFalse(result["activeAfterStart"], result)
+        self.assertFalse(result["peerStarted"], result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_native_coding_owner_runs_real_read_edit_validate_under_one_owned_launch(self):
+        result = self.run_store("native-coding-input")
+        self.assertTrue(result["nativeOwnerAvailable"], result)
+        self.assertEqual(result["startError"], "", result)
+        self.assertEqual(result["inputError"], "", result)
+        self.assertTrue(result["peerStarted"], result)
+        self.assertTrue(result["wireSendObserved"], result)
+        self.assertTrue(result["workReadbacksObserved"], result)
+        self.assertEqual(result["projectContents"], "after\n", result)
+        self.assertEqual(result["commandExecutions"], "read\nedit\nvalidate\n", result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_revoked_or_foreign_native_coding_owners_never_launch_a_child(self):
+        for scenario in [
+            "revoked", "other-store", "wrong-workspace", "wrong-surface", "wrong-generation",
+            "wrong-host", "wrong-mandate", "wrong-directory",
+        ]:
+            with self.subTest(scenario=scenario):
+                result = self.run_store("native-coding-" + scenario)
+                self.assertTrue(result["nativeOwnerAvailable"], result)
+                self.assertEqual(result["startError"], "unsupportedTransport", result)
+                self.assertFalse(result["activeAfterStart"], result)
+                self.assertFalse(result["peerStarted"], result)
+                self.assertTrue(result["stopped"], result)
+
+    def test_current_native_owner_is_rechecked_after_awaited_preparation(self):
+        result = self.run_store("native-coding-owner-lost-before-launch")
+        self.assertTrue(result["nativeOwnerAvailable"], result)
+        self.assertNotEqual(result["startError"], "", result)
+        self.assertFalse(result["activeAfterStart"], result)
+        self.assertFalse(result["peerStarted"], result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_current_native_owner_is_rechecked_before_owner_input(self):
+        result = self.run_store("native-coding-owner-lost")
+        self.assertEqual(result["startError"], "", result)
+        self.assertNotEqual(result["inputError"], "", result)
+        self.assertFalse(result["wireSendObserved"], result)
+        self.assertEqual(result["projectContents"], "before\n", result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_native_coding_revocation_synchronously_blocks_queued_input(self):
+        result = self.run_store("native-coding-close-queued-input")
+        self.assertEqual(result["startError"], "", result)
+        self.assertTrue(result["queuedInputRejected"], result)
+        self.assertFalse(result["wireSendObserved"], result)
+        self.assertEqual(result["commandExecutions"], "", result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_native_coding_capability_cannot_be_reused_after_a_normal_close(self):
+        result = self.run_store("native-coding-replay")
+        self.assertEqual(result["startError"], "", result)
+        self.assertEqual(result["replayError"], "unsupportedTransport", result)
+        self.assertTrue(result["stopped"], result)
 
     def test_close_during_preparation_never_launches_a_late_backend(self):
         result = self.run_store("cancel-preparation")

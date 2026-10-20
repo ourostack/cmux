@@ -24,13 +24,15 @@ final class AgentSessionManagedCommandService {
         private let host: AgentPIDProcessIdentity
         private let launcher: AgentSessionOwnedProcessLauncher
         private let environment: [String: String]
+        private let validateNativeOwner: @MainActor () -> Bool
         private var revoked = false
         private var keptService: AgentSessionManagedCommandService?
 
         init?(
             explicitNativeCodingOptInFor lifetime: AgentSessionManagedSession,
             projectMandate: UUID, workingDirectory: String,
-            launcher: AgentSessionOwnedProcessLauncher, environment: [String: String]
+            launcher: AgentSessionOwnedProcessLauncher, environment: [String: String],
+            validateNativeOwner: @escaping @MainActor () -> Bool = { true }
         ) {
             guard lifetime.ownsWorkingDirectory(workingDirectory),
                   let host = AgentPIDProcessIdentity(pid: getpid()) else { return nil }
@@ -41,6 +43,7 @@ final class AgentSessionManagedCommandService {
             self.host = host
             self.launcher = launcher
             self.environment = environment
+            self.validateNativeOwner = validateNativeOwner
         }
 
         func revoke() { revoked = true }
@@ -48,6 +51,7 @@ final class AgentSessionManagedCommandService {
         func isLive(for lifetime: AgentSessionManagedSession, workingDirectory: String) -> Bool {
             !revoked && self.lifetime === lifetime && self.workingDirectory == workingDirectory
                 && AgentPIDProcessIdentity(pid: getpid()) == host
+                && validateNativeOwner()
                 && lifetime.transportIsLive(launchID: launchID) && lifetime.identity != nil
         }
 

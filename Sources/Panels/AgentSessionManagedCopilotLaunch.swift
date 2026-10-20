@@ -14,11 +14,93 @@ final class AgentSessionManagedCopilotLaunch {
         case supervisorCleanupUnverified(expected: AgentPIDProcessIdentity?, terminationStatus: Int32)
     }
 
-    struct Scope {
+    struct Scope: Equatable {
         let hostInstance: UUID
         let workspaceID: UUID
         let surfaceID: UUID
         let generation: UInt64
+    }
+
+    /// A native object capability, never decoded from bridge or provider data.
+    @MainActor final class NativeCodingOwner {
+        static let executionDisclosure =
+            "General-purpose foreground coding commands run as your OS account, with no sandbox " +
+            "and no per-call SDK permission prompt. They can access or change files and use the network " +
+            "where your account has access. The project folder is a working directory, not confinement."
+        private static let hostInstance = UUID()
+        let scope: Scope
+        let projectMandate = UUID()
+        let workingDirectory: String
+        let rendererID: String
+        private let host: AgentPIDProcessIdentity
+        private weak var owningStore: AnyObject?
+        private let isCurrentOwner: @MainActor () -> Bool
+        private weak var lifetime: AgentSessionManagedSession?
+        private var consumed = false
+        private var revoked = false
+        private var revocationSink: (() -> Void)?
+
+        init?(
+            newPanelID: UUID, workspaceID: UUID, rendererID: String, workingDirectory: String,
+            owningStore: AnyObject, isCurrentOwner: @escaping @MainActor () -> Bool
+        ) {
+            guard ["react", "solid"].contains(rendererID),
+                  let host = AgentPIDProcessIdentity(pid: getpid()),
+                  let directory = try? AgentSessionManagedCopilotLaunch.canonicalPath(workingDirectory),
+                  isCurrentOwner() else { return nil }
+            self.scope = Scope(
+                hostInstance: Self.hostInstance, workspaceID: workspaceID, surfaceID: newPanelID, generation: 1
+            )
+            self.workingDirectory = directory
+            self.rendererID = rendererID
+            self.host = host
+            self.owningStore = owningStore
+            self.isCurrentOwner = isCurrentOwner
+        }
+
+        func consume(
+            for store: AnyObject, scope: Scope, workingDirectory: String, projectMandate: UUID
+        ) -> Bool {
+            guard !consumed, owningStore === store, self.scope == scope,
+                  self.projectMandate == projectMandate,
+                  (try? AgentSessionManagedCopilotLaunch.canonicalPath(workingDirectory)) == self.workingDirectory,
+                  isCurrent else {
+                revoke()
+                return false
+            }
+            consumed = true
+            return true
+        }
+
+        func installRevocationSink(for store: AnyObject, _ sink: @escaping () -> Void) -> Bool {
+            guard consumed, owningStore === store, revocationSink == nil, isCurrent else { return false }
+            revocationSink = sink
+            return true
+        }
+
+        func bind(to lifetime: AgentSessionManagedSession) -> Bool {
+            guard consumed, self.lifetime == nil, isCurrent,
+                  lifetime.ownsWorkingDirectory(workingDirectory) else {
+                revoke()
+                return false
+            }
+            self.lifetime = lifetime
+            return true
+        }
+
+        var isCurrent: Bool {
+            !revoked && owningStore != nil && AgentPIDProcessIdentity(pid: getpid()) == host && isCurrentOwner()
+        }
+
+        func authorizes(_ lifetime: AgentSessionManagedSession) -> Bool {
+            consumed && self.lifetime === lifetime && isCurrent
+        }
+
+        func revoke() {
+            guard !revoked else { return }
+            revoked = true
+            revocationSink?()
+        }
     }
 
     static let arguments = ["--headless", "--no-auto-update", "--stdio", "--allow-all"]
@@ -43,6 +125,7 @@ final class AgentSessionManagedCopilotLaunch {
 
     static func prepare(
         scope: Scope, executableURL: URL, workingDirectory: String, codingProjectMandate: UUID?,
+        nativeCodingOwner: NativeCodingOwner? = nil,
         launcher: AgentSessionOwnedProcessLauncher = .init()
     ) async throws -> AgentSessionManagedCopilotLaunch {
         guard scope.generation > 0, executableURL.isFileURL, executableURL.path.hasPrefix("/"),
@@ -63,6 +146,12 @@ final class AgentSessionManagedCopilotLaunch {
         }.value
         try Task.checkCancellation()
         let directory = try canonicalPath(workingDirectory)
+        if let nativeCodingOwner {
+            guard nativeCodingOwner.scope == scope,
+                  nativeCodingOwner.projectMandate == codingProjectMandate,
+                  nativeCodingOwner.workingDirectory == directory,
+                  nativeCodingOwner.isCurrent else { throw CancellationError() }
+        }
         let nativeTool = codingProjectMandate != nil
         let profile: [String: Any] = [
             "version": 1, "provider": "copilot", "cliVersion": "1.0.98", "sdkVersion": "1.0.22",
@@ -101,10 +190,23 @@ final class AgentSessionManagedCopilotLaunch {
             workingDirectory: directory, stdout: output.fileHandleForReading, stderr: error.fileHandleForReading
         )
         let authority: AgentSessionManagedCommandService.NativeCodingAuthority?
+        if let nativeCodingOwner, !nativeCodingOwner.bind(to: lifetime) {
+            throw CocoaError(.fileReadNoPermission)
+        }
         if let codingProjectMandate {
+            let validateNativeOwner: @MainActor () -> Bool
+            if let nativeCodingOwner {
+                validateNativeOwner = { [weak nativeCodingOwner, weak lifetime] in
+                    guard let nativeCodingOwner, let lifetime else { return false }
+                    return nativeCodingOwner.authorizes(lifetime)
+                }
+            } else {
+                validateNativeOwner = { true }
+            }
             guard let granted = AgentSessionManagedCommandService.NativeCodingAuthority(
                 explicitNativeCodingOptInFor: lifetime, projectMandate: codingProjectMandate, workingDirectory: directory,
-                launcher: launcher, environment: environment
+                launcher: launcher, environment: environment,
+                validateNativeOwner: validateNativeOwner
             ) else { throw CocoaError(.fileReadNoPermission) }
             authority = granted
         } else {

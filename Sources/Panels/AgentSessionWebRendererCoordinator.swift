@@ -608,7 +608,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         case "app.pickFiles":
             return await pickLocalFiles()
         case "provider.list":
-            return AgentSessionProviderID.allCases.map { provider in
+            return AgentSessionProviderID.manualCases.map { provider in
                 [
                     "id": provider.rawValue,
                     "displayName": provider.displayName,

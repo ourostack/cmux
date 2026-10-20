@@ -1,4 +1,4 @@
-export type ProviderId = "codex" | "claude" | "opencode";
+export type ProviderId = "codex" | "claude" | "opencode" | "copilot";
 
 export type RendererKind = "react" | "solid";
 
@@ -8,7 +8,7 @@ export type ProviderInfo = {
   id: ProviderId;
   displayName: string;
   executableName: string;
-  transportKind: "stdio-jsonrpc" | "stdio-jsonl" | "http-loopback";
+  transportKind: "stdio-jsonrpc" | "stdio-jsonl" | "http-loopback" | "managed-stdio-jsonrpc";
   arguments: string[];
   autoStart: boolean;
 };

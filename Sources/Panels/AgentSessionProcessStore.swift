@@ -16,11 +16,16 @@ final class AgentSessionProcessStore {
     private var sessions: [String: AgentSessionRunningSession] = [:]
     private final class ManagedCopilotOwner {
         let sessionID = UUID().uuidString
+        let nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?
         var launch: AgentSessionManagedCopilotLaunch?
         var isClosing = false
         var stopRequested = false
         var failed = false
         var cleanup: Task<Void, any Error>?
+
+        init(nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?) {
+            self.nativeCodingOwner = nativeCodingOwner
+        }
     }
     private var managedCopilot: ManagedCopilotOwner?
     private var lastEmittedHasActiveProviderSession: Bool?
@@ -28,40 +33,64 @@ final class AgentSessionProcessStore {
 
     func startManagedCopilot(
         scope: AgentSessionManagedCopilotLaunch.Scope, executableURL: URL, workingDirectory: String,
-        codingProjectMandate: UUID?, launcher: AgentSessionOwnedProcessLauncher = .init()
+        codingProjectMandate: UUID?,
+        nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner? = nil,
+        launcher: AgentSessionOwnedProcessLauncher = .init()
     ) async throws -> AgentSessionStartedSession {
         guard !hasActiveProviderSession else {
             throw AgentSessionBridgeError.sessionAlreadyRunning
         }
-        let owner = ManagedCopilotOwner()
+        if let codingProjectMandate {
+            guard let nativeCodingOwner,
+                  nativeCodingOwner.consume(
+                    for: self, scope: scope, workingDirectory: workingDirectory, projectMandate: codingProjectMandate
+                  ) else {
+                throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-native-authorization")
+            }
+        } else if nativeCodingOwner != nil {
+            nativeCodingOwner?.revoke()
+            throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-native-authorization")
+        }
+        let owner = ManagedCopilotOwner(nativeCodingOwner: nativeCodingOwner)
         managedCopilot = owner
-        emitActiveProviderStateIfNeeded()
         do {
+            if let nativeCodingOwner {
+                guard nativeCodingOwner.installRevocationSink(for: self, { [weak self, weak owner] in
+                    guard let self, let owner else { return }
+                    self.failManagedCopilot(owner, reason: "nativeOwnerRevoked")
+                }) else { throw CancellationError() }
+            }
+            emitActiveProviderStateIfNeeded()
             try Task.checkCancellation()
             guard !owner.isClosing else { throw CancellationError() }
             let launch = try await AgentSessionManagedCopilotLaunch.prepare(
                 scope: scope, executableURL: executableURL, workingDirectory: workingDirectory,
-                codingProjectMandate: codingProjectMandate, launcher: launcher
+                codingProjectMandate: codingProjectMandate, nativeCodingOwner: nativeCodingOwner, launcher: launcher
             )
             owner.launch = launch
             try Task.checkCancellation()
-            guard managedCopilot === owner, !owner.isClosing else { throw CancellationError() }
+            guard managedCopilot === owner, !owner.isClosing,
+                  nativeCodingOwner?.authorizes(launch.lifetime) != false else { throw CancellationError() }
             try launch.launchBackend()
             while launch.lifetime.phase == .awaitingBootstrap {
                 try Task.checkCancellation()
-                guard !owner.isClosing else { throw CancellationError() }
+                guard !owner.isClosing,
+                      nativeCodingOwner?.authorizes(launch.lifetime) != false else { throw CancellationError() }
                 try await Task.sleep(for: .milliseconds(5))
             }
-            guard launch.lifetime.phase == .awaitingProvider, !owner.isClosing else {
+            guard launch.lifetime.phase == .awaitingProvider, !owner.isClosing,
+                  nativeCodingOwner?.authorizes(launch.lifetime) != false else {
                 throw AgentSessionBridgeError.providerNotReady("Copilot")
             }
             launch.adapter.start(launchID: launch.lifetime.launchID)
             while launch.adapter.phase != .configurationObserved && launch.adapter.phase != .held {
                 try Task.checkCancellation()
-                guard !owner.isClosing else { throw CancellationError() }
+                guard !owner.isClosing,
+                      nativeCodingOwner?.authorizes(launch.lifetime) != false else { throw CancellationError() }
                 try await Task.sleep(for: .milliseconds(5))
             }
-            guard launch.adapter.phase == .configurationObserved, !owner.isClosing else {
+            guard launch.adapter.phase == .configurationObserved, !owner.isClosing,
+                  nativeCodingOwner?.authorizes(launch.lifetime) != false else {
                 throw AgentSessionBridgeError.providerNotReady("Copilot")
             }
             launch.adapter.failureSink = { [weak self, weak owner] reason in
@@ -89,6 +118,7 @@ final class AgentSessionProcessStore {
                 beginManagedCopilotClose(owner)
                 try await owner.cleanup?.value
             } else if managedCopilot === owner {
+                nativeCodingOwner?.revoke()
                 managedCopilot = nil
                 emitActiveProviderStateIfNeeded()
             }
@@ -108,6 +138,7 @@ final class AgentSessionProcessStore {
 
     private func beginManagedCopilotClose(_ owner: ManagedCopilotOwner) {
         owner.isClosing = true
+        owner.nativeCodingOwner?.revoke()
         guard owner.cleanup == nil, let launch = owner.launch else { return }
         let cleanup = launch.beginClose()
         owner.cleanup = Task {
@@ -136,6 +167,9 @@ final class AgentSessionProcessStore {
     ) async throws -> AgentSessionStartedSession {
         guard !hasActiveProviderSession else {
             throw AgentSessionBridgeError.sessionAlreadyRunning
+        }
+        guard AgentSessionProviderID.manualCases.contains(plan.provider) else {
+            throw AgentSessionBridgeError.unsupportedTransport(plan.provider.transportKind)
         }
         let sessionId = UUID().uuidString
         let launchArguments = plan.arguments
@@ -247,6 +281,10 @@ final class AgentSessionProcessStore {
             guard !owner.isClosing, let launch = owner.launch else {
                 throw AgentSessionBridgeError.providerNotReady("Copilot")
             }
+            guard owner.nativeCodingOwner?.authorizes(launch.lifetime) != false else {
+                failManagedCopilot(owner, reason: "nativeOwnerUnavailable")
+                throw AgentSessionBridgeError.providerNotReady("Copilot")
+            }
             guard permissionMode == .standard else {
                 failManagedCopilot(owner, reason: "unsupportedPermissionMode")
                 throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-permission-mode")
@@ -270,6 +308,8 @@ final class AgentSessionProcessStore {
             try await writeClaudeStreamJSON(text, to: session.inputWriter)
         case .opencode:
             try await postOpenCodePrompt(text, session: session)
+        case .copilot:
+            throw AgentSessionBridgeError.unsupportedTransport(session.providerID.transportKind)
         }
     }
 

@@ -264,7 +264,7 @@ struct AgentExecutableResolver {
             marker = "cmux claude wrapper - injects hooks and session tracking"
         case .codex:
             marker = "cmux codex wrapper - per-invocation Codex hook injection"
-        case .opencode:
+        case .opencode, .copilot:
             return false
         }
 

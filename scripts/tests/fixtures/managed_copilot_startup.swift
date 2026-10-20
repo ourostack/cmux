@@ -735,9 +735,20 @@ enum ManagedCopilotStartupFixture {
     static func recordTrace(_ value: String) throws {
         let path = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".cmux-controlled-copilot-trace")
-        let prior = FileManager.default.fileExists(atPath: path.path) ? try Data(contentsOf: path) : Data()
-        guard prior.count + value.utf8.count < 8192 else { throw POSIXError(.EOVERFLOW) }
-        try (prior + Data((value + "\n").utf8)).write(to: path)
+        let descriptor = open(path.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        defer { Darwin.close(descriptor) }
+        var metadata = stat()
+        let line = Data((value + "\n").utf8)
+        guard fstat(descriptor, &metadata) == 0 else { throw POSIXError(.EIO) }
+        guard metadata.st_size + Int64(line.count) < 8192 else { throw POSIXError(.EOVERFLOW) }
+        let count = line.withUnsafeBytes { bytes in
+            var count: Int
+            repeat { count = Darwin.write(descriptor, bytes.baseAddress, bytes.count) }
+            while count < 0 && errno == EINTR
+            return count
+        }
+        guard count == line.count else { throw POSIXError(.EIO) }
     }
 
     static func sendRoot(sessionID: String, scenario: String, input: Int = 1, replayEventID: String? = nil) throws {

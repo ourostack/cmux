@@ -4,6 +4,9 @@ enum AgentSessionProviderID: String, CaseIterable, Codable, Identifiable, Sendab
     case codex
     case claude
     case opencode
+    case copilot
+
+    static let manualCases: [Self] = [.codex, .claude, .opencode]
 
     var id: String { rawValue }
 
@@ -15,6 +18,8 @@ enum AgentSessionProviderID: String, CaseIterable, Codable, Identifiable, Sendab
             return String(localized: "agentSession.provider.claude", defaultValue: "Claude Code")
         case .opencode:
             return String(localized: "agentSession.provider.opencode", defaultValue: "OpenCode")
+        case .copilot:
+            return String(localized: "agentSession.provider.copilot", defaultValue: "GitHub Copilot")
         }
     }
 
@@ -26,6 +31,8 @@ enum AgentSessionProviderID: String, CaseIterable, Codable, Identifiable, Sendab
             return "claude"
         case .opencode:
             return "opencode"
+        case .copilot:
+            return "copilot"
         }
     }
 
@@ -43,6 +50,8 @@ enum AgentSessionProviderID: String, CaseIterable, Codable, Identifiable, Sendab
             ]
         case .opencode:
             return ["serve", "--hostname", "127.0.0.1", "--port", "0", "--print-logs"]
+        case .copilot:
+            return []
         }
     }
 
@@ -54,6 +63,8 @@ enum AgentSessionProviderID: String, CaseIterable, Codable, Identifiable, Sendab
             return "stdio-jsonl"
         case .opencode:
             return "http-loopback"
+        case .copilot:
+            return "managed-stdio-jsonrpc"
         }
     }
 
@@ -61,7 +72,7 @@ enum AgentSessionProviderID: String, CaseIterable, Codable, Identifiable, Sendab
         switch self {
         case .codex, .opencode:
             return true
-        case .claude:
+        case .claude, .copilot:
             return false
         }
     }
