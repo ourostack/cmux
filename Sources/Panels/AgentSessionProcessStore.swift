@@ -73,12 +73,15 @@ final class AgentSessionProcessStore {
 
     func beginManagedSupervisorInput(
         sessionId: String, submission: AgentSessionManagedRendererController.Submission,
-        nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+        nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner,
+        progress: ((CopilotManagedSession.SupervisorInputProgress) -> Void)? = nil
     ) -> Bool {
         guard ownsManagedCodingOwner(nativeOwner), let owner = managedCopilot,
               owner.sessionID == sessionId, owner.nativeCodingOwner === nativeOwner,
               let launch = owner.launch else { return false }
-        return launch.adapter.beginSupervisorInput(submission, nativeOwner: nativeOwner, owningStore: self)
+        return launch.adapter.beginSupervisorInput(
+            submission, nativeOwner: nativeOwner, owningStore: self, progress: progress
+        )
     }
 
     func managedSupervisorInputProgress(

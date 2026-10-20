@@ -493,6 +493,7 @@ enum ManagedCopilotStartupFixture {
                     guard scenario.hasPrefix("owner-"), sentInputs == 0 || (
                             sentInputs == 1 && ["owner-next-input", "owner-reused-provider", "owner-late-prior-root",
                                                "owner-tool-native-supervisor", "owner-tool-native-supervisor-missing-ack",
+                                               "owner-tool-native-supervisor-late-ack",
                                                "owner-tool-native-supervisor-backpressure"]
                                 .contains(scenario)
                           ),
@@ -511,6 +512,7 @@ enum ManagedCopilotStartupFixture {
                     sentInputs += 1
                     workStep = 0
                     if scenario == "owner-tool-native-supervisor-missing-ack", sentInputs == 2 { continue }
+                    if scenario == "owner-tool-native-supervisor-late-ack", sentInputs == 2 { usleep(2_200_000) }
                     if scenario == "owner-tool-before-send-ack" {
                         try sendTool(sessionID: plannedID, step: callbackStep, scenario: scenario)
                         usleep(40_000)

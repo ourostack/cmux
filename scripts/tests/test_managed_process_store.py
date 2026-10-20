@@ -199,6 +199,64 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         self.assertTrue(result["identityMatches"], result)
         self.assertTrue(result["stopped"], result)
 
+    def test_supervisor_receipt_progress_is_exact_monotonic_and_survives_owner_release(self):
+        result = self.run_store("native-coding-supervisor")
+        self.assertEqual(result["receiptStages"], ["registration", "bytes", "ack"], result)
+        self.assertTrue(result["receiptScopeMatches"], result)
+        self.assertTrue(result["receiptPublishedWhileOwned"], result)
+        self.assertFalse(result["receiptLookupAfterClose"], result)
+        self.assertTrue(result["retainedReceiptHasBytes"], result)
+        self.assertEqual(result["retainedReceiptProviderInputID"], "server-input-two", result)
+        self.assertEqual(result["retainedReceiptFailure"], "", result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_receipt_failure_is_published_before_failed_owner_disappears(self):
+        for suffix, stages, has_bytes, failure in [
+            ("revoke-before-byte", ["registration", "failure"], False, "writeUnavailable"),
+            ("missing-ack", ["registration", "bytes", "failure"], True, "responseTimeout"),
+            ("backpressure", ["registration", "failure"], False, "writeUnavailable"),
+        ]:
+            with self.subTest(suffix=suffix):
+                result = self.run_store("native-coding-supervisor-" + suffix)
+                self.assertEqual(result["receiptStages"], stages, result)
+                self.assertTrue(result["receiptScopeMatches"], result)
+                self.assertTrue(result["receiptPublishedWhileOwned"], result)
+                self.assertFalse(result["receiptLookupAfterClose"], result)
+                self.assertEqual(result["retainedReceiptHasBytes"], has_bytes, result)
+                self.assertEqual(result["retainedReceiptProviderInputID"], "", result)
+                self.assertEqual(result["retainedReceiptFailure"], failure, result)
+                self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_receipt_callback_close_cannot_resurrect_transport_or_emit_later_work(self):
+        for moment, stages, sends, has_bytes, ack in [
+            ("registration", ["registration", "failure"], [1], False, ""),
+            ("bytes", ["registration", "bytes", "failure"], [1, 2], True, ""),
+            ("ack", ["registration", "bytes", "ack"], [2], True, "server-input-two"),
+        ]:
+            with self.subTest(moment=moment):
+                result = self.run_store("native-coding-supervisor-close-" + moment)
+                self.assertTrue(result["receiptCloseRequested"], result)
+                self.assertEqual(result["receiptStages"], stages, result)
+                self.assertTrue(result["receiptScopeMatches"], result)
+                self.assertTrue(result["receiptPublishedWhileOwned"], result)
+                self.assertFalse(result["receiptLookupAfterClose"], result)
+                self.assertEqual(result["retainedReceiptHasBytes"], has_bytes, result)
+                self.assertEqual(result["retainedReceiptProviderInputID"], ack, result)
+                self.assertIn(result["sendCount"], sends, result)
+                self.assertFalse(result["workEvidence"], result)
+                self.assertTrue(result["stopped"], result)
+
+    def test_supervisor_late_exact_ack_updates_receipt_without_a_second_input_write(self):
+        result = self.run_store("native-coding-supervisor-late-ack")
+        self.assertEqual(result["receiptStages"], ["registration", "bytes", "ack"], result)
+        self.assertEqual(result["retainedReceiptProviderInputID"], "server-input-two", result)
+        self.assertTrue(result["retainedReceiptHasBytes"], result)
+        self.assertEqual(result["retainedReceiptFailure"], "", result)
+        self.assertEqual(result["sendCount"], 2, result)
+        self.assertTrue(result["receiptScopeMatches"], result)
+        self.assertTrue(result["stopped"], result)
+
     def test_supervisor_input_requires_complete_work_exact_native_custody_and_unexpired_editor_evidence(self):
         for suffix, sends in [("unready", 0), ("foreign-owner", 1), ("foreign-store", 1), ("expired", 1)]:
             with self.subTest(suffix=suffix):

@@ -657,6 +657,11 @@ struct ManagedProcessStoreFixture {
             throw POSIXError(.EPROTO)
         }
         var recordedProgress = store.managedSupervisorInputProgress(sessionId: sessionID, inputID: inputID)
+        var receiptProgress: CopilotManagedSession.SupervisorInputProgress?
+        var receiptStages: [String] = []
+        var receiptScopeMatches = true
+        var receiptCloseRequested = false
+        var receiptPublishedWhileOwned = true
         store.eventSink = { [weak store] _ in
             if let progress = store?.managedSupervisorInputProgress(sessionId: sessionID, inputID: inputID) {
                 recordedProgress = progress
@@ -671,12 +676,27 @@ struct ManagedProcessStoreFixture {
               )! : nativeOwner
         if scenario == "native-coding-supervisor-expired" { try await Task.sleep(for: .milliseconds(2010)) }
         let registered = target.beginManagedSupervisorInput(
-            sessionId: sessionID, submission: submission, nativeOwner: candidate
+            sessionId: sessionID, submission: submission, nativeOwner: candidate,
+            progress: { [weak store] progress in
+                receiptProgress = progress
+                receiptScopeMatches = receiptScopeMatches &&
+                    progress.inputID == inputID && progress.identity == before?.identity
+                receiptPublishedWhileOwned = receiptPublishedWhileOwned &&
+                    store?.hasActiveProviderSession == true
+                let stage = progress.providerInputID != nil ? "ack"
+                    : progress.failureReason != nil ? "failure"
+                    : progress.backendWriteAdmitted ? "bytes" : "registration"
+                receiptStages.append(stage)
+                if scenario == "native-coding-supervisor-close-\(stage)", !receiptCloseRequested {
+                    receiptCloseRequested = true
+                    store?.closeAll()
+                }
+            }
         )
         if scenario == "native-coding-supervisor-revoke-before-byte" { invalidateRenderer = true }
         let expectedHold = ["native-coding-supervisor-revoke-before-byte", "native-coding-supervisor-missing-ack",
-                            "native-coding-supervisor-backpressure"]
-            .contains(scenario)
+                            "native-coding-supervisor-backpressure"].contains(scenario) ||
+            scenario.hasPrefix("native-coding-supervisor-close-")
         let deadline = ContinuousClock.now.advanced(by: .seconds(8))
         while registered && (expectedHold ? store.hasActiveProviderSession
             : store.managedCodingState(for: nativeOwner)?.hasCompleteWorkEvidence != true) {
@@ -713,6 +733,16 @@ struct ManagedProcessStoreFixture {
             "identityMatches": progress?.identity == after?.identity,
             "sendCount": trace.split(separator: "\n").filter { $0 == "session.send" }.count,
             "partialChunkObserved": trace.contains("partial-supervisor-chunk:"),
+            "receiptStages": receiptStages,
+            "receiptScopeMatches": receiptScopeMatches,
+            "receiptPublishedWhileOwned": receiptPublishedWhileOwned,
+            "receiptCloseRequested": receiptCloseRequested,
+            "receiptLookupAfterClose": store.managedSupervisorInputProgress(
+                sessionId: sessionID, inputID: inputID
+            ) != nil,
+            "retainedReceiptHasBytes": receiptProgress?.backendWriteAdmitted == true,
+            "retainedReceiptProviderInputID": receiptProgress?.providerInputID ?? "",
+            "retainedReceiptFailure": receiptProgress?.failureReason ?? "",
             "commandExecutions": executions,
             "stopped": !store.hasActiveProviderSession,
         ]
@@ -741,6 +771,7 @@ struct ManagedProcessStoreFixture {
         try JSONSerialization.data(withJSONObject: [
             "scenario": scenario == "native-coding-supervisor-backpressure" ? "owner-tool-native-supervisor-backpressure"
                 : scenario == "native-coding-supervisor-missing-ack" ? "owner-tool-native-supervisor-missing-ack"
+                : scenario == "native-coding-supervisor-late-ack" ? "owner-tool-native-supervisor-late-ack"
                 : scenario.hasPrefix("native-coding-supervisor") ? "owner-tool-native-supervisor"
                 : scenario == "native-coding-command-held" ? "owner-tool-uncertain-command"
                 : "owner-tool-native-coding", "callbackFile": projectFile.path,
