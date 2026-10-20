@@ -1,6 +1,23 @@
 import CoreFoundation
 import Foundation
 
+final class AgentSessionManagedInputCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelled = true
+    }
+}
+
 /// Native custody of renderer evidence; never grants provider or profile authority.
 @MainActor
 final class AgentSessionManagedRendererController {
@@ -82,10 +99,12 @@ final class AgentSessionManagedRendererController {
         private let frame: AgentSessionManagedRendererReservation.Frame
         private let owner: ObjectIdentifier
         private let store: ObjectIdentifier
+        private let cancellation: AgentSessionManagedInputCancellation
         private var claimed = false
 
         fileprivate init(
-            inputID: UUID, insertion: Insertion, frame: AgentSessionManagedRendererReservation.Frame
+            inputID: UUID, insertion: Insertion, frame: AgentSessionManagedRendererReservation.Frame,
+            cancellation: AgentSessionManagedInputCancellation
         ) {
             self.inputID = inputID
             text = insertion.text
@@ -93,17 +112,21 @@ final class AgentSessionManagedRendererController {
             self.frame = frame
             owner = insertion.snapshot.context.owner
             store = insertion.snapshot.context.store
+            self.cancellation = cancellation
         }
 
         func claim(owner: AnyObject, store: AnyObject) -> Bool {
-            guard !claimed, self.owner == ObjectIdentifier(owner), self.store == ObjectIdentifier(store),
-                  frame.validate(), !claimed else { return false }
+            guard !claimed, !cancellation.isCancelled,
+                  self.owner == ObjectIdentifier(owner), self.store == ObjectIdentifier(store),
+                  frame.validate(), !cancellation.isCancelled, !claimed else { return false }
             claimed = true
             return true
         }
 
         func validate(owner: AnyObject, store: AnyObject) -> Bool {
-            claimed && self.owner == ObjectIdentifier(owner) && self.store == ObjectIdentifier(store) && frame.validate()
+            claimed && !cancellation.isCancelled &&
+                self.owner == ObjectIdentifier(owner) && self.store == ObjectIdentifier(store) &&
+                frame.validate() && !cancellation.isCancelled
         }
     }
 
@@ -211,9 +234,13 @@ final class AgentSessionManagedRendererController {
         }
     }
 
-    func prepareSubmission(_ insertion: Insertion, inputID: UUID) async throws -> Submission? {
-        guard let frame = try await prepareFrame(insertion), frame.validate() else { return nil }
-        return Submission(inputID: inputID, insertion: insertion, frame: frame)
+    func prepareSubmission(
+        _ insertion: Insertion, inputID: UUID,
+        cancellation: AgentSessionManagedInputCancellation = AgentSessionManagedInputCancellation()
+    ) async throws -> Submission? {
+        guard !cancellation.isCancelled, let frame = try await prepareFrame(insertion),
+              !cancellation.isCancelled, frame.validate(), !cancellation.isCancelled else { return nil }
+        return Submission(inputID: inputID, insertion: insertion, frame: frame, cancellation: cancellation)
     }
 
     func prepareFrame(_ insertion: Insertion) async throws -> AgentSessionManagedRendererReservation.Frame? {
