@@ -1,6 +1,7 @@
 import type { AgentEvent, AgentSessionTheme } from "./types";
 import { makeClientId } from "./ids";
 import { applyAgentTheme } from "./theme";
+import type { ManagedComposer } from "./managedComposer";
 
 type NativeReply<T> =
   | { ok: true; value: T }
@@ -13,11 +14,30 @@ declare global {
     cmuxAgentBridge?: {
       applyTheme(theme: AgentSessionTheme): void;
       receive(event: AgentEvent): void;
+      managedComposer?: Pick<ManagedComposer, "capture" | "reserve" | "validate" | "release">;
     };
   }
 }
 
 const listeners = new Set<EventListener>();
+
+export function installManagedComposer(composer: ManagedComposer): () => void {
+  const bridge = window.cmuxAgentBridge;
+  if (!bridge) throw new Error("Native renderer bridge is unavailable.");
+  const operations = {
+    capture: () => composer.capture(),
+    reserve: (snapshot: Parameters<ManagedComposer["reserve"]>[0], text: string) => composer.reserve(snapshot, text),
+    validate: (receipt: Parameters<ManagedComposer["validate"]>[0]) => composer.validate(receipt),
+    release: (leaseId: string) => composer.release(leaseId),
+  };
+  bridge.managedComposer = operations;
+  const unsubscribe = subscribeToAgentEvents(() => composer.revoke());
+  return () => {
+    composer.revoke();
+    unsubscribe();
+    if (bridge.managedComposer === operations) delete bridge.managedComposer;
+  };
+}
 
 export class NativeBridgeError extends Error {
   readonly code?: string;

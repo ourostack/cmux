@@ -1,7 +1,8 @@
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { render } from "solid-js/web";
 import { activityGlyph } from "../shared/activityGlyph";
-import { callNative, subscribeToAgentEvents } from "../shared/bridge";
+import { callNative, installManagedComposer, subscribeToAgentEvents } from "../shared/bridge";
+import { ManagedComposer } from "../shared/managedComposer";
 import {
   CODEX_BUTTON_BASE,
   CODEX_BUTTON_COMPOSER,
@@ -52,15 +53,19 @@ import { applyCodexDocumentMetadata } from "../shared/theme";
 import type { AgentSessionRateLimitRow, ProviderId } from "../shared/types";
 
 function App() {
+  const composer = new ManagedComposer();
   const [state, setState] = createSignal<SessionState>(initialState("solid"));
-  const dispatch = (action: Action) => setState((current) => reduceSession(current, action));
+  const dispatch = (action: Action) => {
+    if (composer.allowAction(action)) setState((current) => reduceSession(current, action));
+  };
 
   void loadInitialData(dispatch);
   const unsubscribe = subscribeToAgentEvents((event) => dispatch({ type: "event", event }));
   onCleanup(unsubscribe);
 
+  const currentStatus = createMemo(() => state().status);
   createEffect(() => {
-    document.documentElement.dataset.status = state().status;
+    document.documentElement.dataset.status = currentStatus();
   });
   const autoStartState = createMemo(() => pickAutoStartState(state()), pickAutoStartState(state()), {
     equals: autoStartStateEquals,
@@ -69,7 +74,7 @@ function App() {
     void autoStartProvider(autoStartState(), dispatch);
   });
 
-  return SessionSurface({ state, dispatch, renderer: "Solid" });
+  return SessionSurface({ state, dispatch, composer, renderer: "Solid" });
 }
 
 function pickAutoStartState(state: SessionState): SessionState {
@@ -109,10 +114,12 @@ function autoStartStateEquals(previous: SessionState, next: SessionState): boole
 function SessionSurface({
   state,
   dispatch,
+  composer,
   renderer,
 }: {
   state: () => SessionState;
   dispatch: (action: Action) => void;
+  composer: ManagedComposer;
   renderer: string;
 }) {
   const provider = () => selectedProviderForDisplay(state().providers, state().selectedProviderId);
@@ -123,6 +130,7 @@ function SessionSurface({
   let inputRevision = 0;
   const commandSubmissionGate = new ComposerCommandSubmissionGate();
   const setComposerInput = (input: string) => {
+    if (!composer.allowMutation()) return;
     inputRevision += 1;
     dispatch({ type: "setInput", input });
   };
@@ -163,10 +171,12 @@ function SessionSurface({
   nativeDescription.className = "m-0";
   disclosure.append(nativeStatus, nativeDescription);
   root.append(disclosure);
+  const disclosureText = createMemo(() => state().context?.nativeSession?.executionDisclosure ?? "");
+  const nativeStatusText = createMemo(() => statusLabel(state()));
   createEffect(() => {
-    const text = state().context?.nativeSession?.executionDisclosure ?? "";
+    const text = disclosureText();
     disclosure.hidden = text.length === 0;
-    nativeStatus.textContent = statusLabel(state());
+    nativeStatus.textContent = nativeStatusText();
     nativeDescription.textContent = text;
   });
 
@@ -174,8 +184,9 @@ function SessionSurface({
   thread.className = "agent-thread";
   root.append(thread);
   const transcriptRows = new Map<string, HTMLDivElement>();
+  const transcriptEntries = createMemo(() => state().transcript);
   createEffect(() => {
-    const entries = state().transcript;
+    const entries = transcriptEntries();
     thread.toggleAttribute("data-empty", entries.length === 0);
     const liveIds = new Set(entries.map((entry) => entry.id));
     for (const [id, row] of transcriptRows) {
@@ -209,6 +220,7 @@ function SessionSurface({
   form.className = "w-full min-w-0";
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+    if (!composer.allowMutation()) return;
     const input = state().input;
     if (submitRoutedCommand(input)) {
       return;
@@ -235,8 +247,15 @@ function SessionSurface({
 
   const textarea = document.createElement("textarea");
   textarea.className = "prompt-input text-base";
-  textarea.addEventListener("input", () => setComposerInput(textarea.value));
+  textarea.addEventListener("input", () => {
+    if (!composer.allowMutation()) {
+      textarea.value = state().input;
+      return;
+    }
+    setComposerInput(textarea.value);
+  });
   textarea.addEventListener("keydown", (event) => {
+    if (!composer.allowMutation()) return;
     if (isComposingEnter(event)) {
       return;
     }
@@ -255,6 +274,7 @@ function SessionSurface({
   });
   composerBody.append(textarea);
   const insertToken = (token: "@" | "$") => {
+    if (!composer.allowMutation()) return;
     const insertion = insertComposerToken({
       text: state().input,
       selectionStart: textarea.selectionStart ?? state().input.length,
@@ -263,6 +283,7 @@ function SessionSurface({
     });
     setComposerInput(insertion.text);
     queueMicrotask(() => {
+      if (!composer.allowMutation()) return;
       textarea.focus();
       textarea.setSelectionRange(insertion.cursor, insertion.cursor);
     });
@@ -270,10 +291,22 @@ function SessionSurface({
   createEffect(() => {
     textarea.placeholder = state().context?.copy.promptPlaceholder ?? "";
     textarea.setAttribute("aria-label", state().context?.copy.promptPlaceholder ?? "");
-    if (textarea.value !== state().input) {
+    if (textarea.value !== state().input && composer.allowMutation()) {
       textarea.value = state().input;
     }
   });
+  onCleanup(composer.bind({
+    element: () => textarea,
+    text: () => textarea.value,
+    replace: (text) => {
+      textarea.value = text;
+      setComposerInput(text);
+      textarea.setSelectionRange(text.length, text.length);
+    },
+    eligible: () => state().status === "running" &&
+      state().context?.nativeSession?.sessionId === state().runningSessionId,
+  }));
+  onCleanup(installManagedComposer(composer));
 
   const composerFooter = document.createElement("div");
   composerFooter.className = CODEX_COMPOSER_FOOTER_MULTILINE;
@@ -398,11 +431,16 @@ function SessionSurface({
     }
   });
   composerStack.append(rateLine);
+  const footerState = createMemo(() => state(), undefined, {
+    equals: (previous, next) => previous.context === next.context && previous.status === next.status &&
+      previous.selectedProviderId === next.selectedProviderId && previous.providers === next.providers,
+  });
   createEffect(() => {
+    const current = footerState();
     renderRateLimitFooter(
       rateLine,
-      state(),
-      provider()?.displayName ?? renderer,
+      current,
+      selectedProviderForDisplay(current.providers, current.selectedProviderId)?.displayName ?? renderer,
       isRateLimitOpen(),
       () => setIsRateLimitOpen((open) => !open),
     );

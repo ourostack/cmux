@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { activityGlyph } from "../shared/activityGlyph";
-import { callNative, subscribeToAgentEvents } from "../shared/bridge";
+import { callNative, installManagedComposer, subscribeToAgentEvents } from "../shared/bridge";
+import { ManagedComposer } from "../shared/managedComposer";
 import {
   CODEX_BUTTON_BASE,
   CODEX_BUTTON_COMPOSER,
@@ -270,20 +271,26 @@ function useAutoStart(state: SessionState, dispatch: React.Dispatch<Action>) {
 }
 
 export function AgentSessionApp() {
-  const [state, dispatch] = useReducer(reduceSession, initialState("react"));
+  const [state, rawDispatch] = useReducer(reduceSession, initialState("react"));
+  const [composer] = useState(() => new ManagedComposer());
+  const dispatch = useCallback((action: Action) => {
+    if (composer.allowAction(action)) rawDispatch(action);
+  }, [composer]);
   useInitialData(dispatch);
   useNativeEvents(dispatch);
   useAutoStart(state, dispatch);
-  return h(SessionSurface, { state, dispatch, renderer: "React" });
+  return h(SessionSurface, { state, dispatch, composer, renderer: "React" });
 }
 
 function SessionSurface({
   state,
   dispatch,
+  composer,
   renderer,
 }: {
   state: SessionState;
   dispatch: React.Dispatch<Action>;
+  composer: ManagedComposer;
   renderer: string;
 }) {
   "use no memo";
@@ -331,14 +338,29 @@ function SessionSurface({
   const commandSubmissionGateRef = useRef(new ComposerCommandSubmissionGate());
   const inputRevisionRef = useRef(0);
   const inputVersionRef = useRef(state.inputVersion);
-  const setComposerInput = (input: string) => {
+  const setComposerInput = useCallback((input: string) => {
+    if (!composer.allowMutation()) return;
     const inputVersion = makeClientId();
     inputRevisionRef.current += 1;
     inputVersionRef.current = inputVersion;
     dispatch({ type: "setInput", input, inputVersion });
-  };
+  }, [composer, dispatch]);
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
+  useLayoutEffect(() => {
+    const unbind = composer.bind({
+      element: () => editorRef.current?.element() ?? null,
+      text: () => editorRef.current?.getText() ?? "",
+      replace: (text) => {
+        editorRef.current?.replaceText(text);
+        setComposerInput(text);
+      },
+      eligible: () => latestStateRef.current.status === "running" &&
+        latestStateRef.current.context?.nativeSession?.sessionId === latestStateRef.current.runningSessionId,
+    });
+    const uninstall = installManagedComposer(composer);
+    return () => { uninstall(); unbind(); };
+  }, [composer, setComposerInput]);
   const [menuKind, setMenuKind] = useState<ComposerMenuKind>(null);
   const [menuQuery, setMenuQuery] = useState("");
   const [menuIndex, setMenuIndex] = useState(0);
@@ -382,6 +404,7 @@ function SessionSurface({
   };
 
   const submit = () => {
+    if (!composer.allowMutation()) return;
     const currentInput = editorRef.current?.getText() ?? state.input;
     const canSubmit =
       (state.status === "running" && (currentInput.length > 0 || attachments.length > 0)) ||
@@ -651,6 +674,7 @@ function SessionSurface({
       : null,
   );
   const composerInput = h(PromptEditor, {
+    allowMutation: () => composer.allowMutation(),
     ref: editorRef,
     className: isSingleLineComposer
       ? "text-base"
