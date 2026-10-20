@@ -30,16 +30,21 @@ final class AgentSessionManagedRendererController {
     final class Snapshot {
         let editorText: String
         let screen: String
+        let deadline: ContinuousClock.Instant
         fileprivate let origin: UUID
         fileprivate let epoch: UInt64
         fileprivate let context: Context
         fileprivate let values: [String: String]
 
-        fileprivate init(origin: UUID, epoch: UInt64, context: Context, values: [String: String]) {
+        fileprivate init(
+            origin: UUID, epoch: UInt64, context: Context, values: [String: String],
+            deadline: ContinuousClock.Instant
+        ) {
             self.origin = origin
             self.epoch = epoch
             self.context = context
             self.values = values
+            self.deadline = deadline
             editorText = values["editorText"]!
             screen = values["screen"]!
         }
@@ -133,17 +138,20 @@ final class AgentSessionManagedRendererController {
     func capture() async throws -> Snapshot? {
         if let insertion = activeInsertion, now() >= insertion.deadline { invalidate() }
         guard activeContext == nil else { return nil }
+        let began = now()
+        let deadline = began.advanced(by: .seconds(2))
         let epoch = self.epoch
         guard let context = context(), self.epoch == epoch else { return nil }
         do {
             let reply = try await operation(.capture)
             guard matches(context, epoch: epoch),
+                  began <= now(), now() < deadline,
                   let values = Self.strings(reply, keys: ["editorText", "editVersion", "render", "screen"]),
                   Self.bounded(values["editorText"], maximum: 1024 * 1024, allowEmpty: true),
                   Self.bounded(values["editVersion"], maximum: 128),
                   Self.bounded(values["screen"], maximum: 1024 * 1024, allowEmpty: true),
                   Self.bounded(values["render"], maximum: 1024 * 1024) else { return nil }
-            return Snapshot(origin: identity, epoch: epoch, context: context, values: values)
+            return Snapshot(origin: identity, epoch: epoch, context: context, values: values, deadline: deadline)
         } catch {
             revokeIfCurrent(epoch)
             throw error
@@ -152,10 +160,11 @@ final class AgentSessionManagedRendererController {
 
     func insert(_ snapshot: Snapshot, text: String) async throws -> Insertion? {
         guard snapshot.origin == identity, snapshot.editorText.isEmpty, Self.bounded(text, maximum: 256 * 1024),
-              activeContext == nil, matches(snapshot.context, epoch: snapshot.epoch) else { return nil }
+              activeContext == nil, matches(snapshot.context, epoch: snapshot.epoch),
+              now() < snapshot.deadline else { return nil }
         activeContext = snapshot.context
-        let deadline = now().advanced(by: .seconds(2))
-        guard let ticket = reservation.begin() else {
+        let deadline = snapshot.deadline
+        guard let ticket = reservation.begin(expiresAt: deadline) else {
             revokeIfCurrent(snapshot.epoch)
             return nil
         }

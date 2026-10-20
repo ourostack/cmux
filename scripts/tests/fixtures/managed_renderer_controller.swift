@@ -79,6 +79,12 @@ struct ManagedRendererControllerFixture {
             try check(snapshot == nil, "late capture survived native invalidation")
             return
         }
+        if scenario == "capture-late-reply" {
+            hook = { if case .capture = $0 { now = began.advanced(by: .seconds(2)) } }
+            let snapshot = try await controller.capture()
+            try check(snapshot == nil, "expired capture reply minted a fresh observation")
+            return
+        }
         if scenario == "strict-dictionaries" {
             let badSnapshots: [Any] = [
                 ["editorText": "", "editVersion": "edit-1", "render": "paint-1", "screen": "visible",
@@ -124,6 +130,37 @@ struct ManagedRendererControllerFixture {
                             "screen": "Visible output\n  exact spacing \n"]
         }
         guard let snapshot = try await controller.capture() else { throw Failure.assertion("missing capture") }
+        if scenario == "capture-expired" {
+            now = began.advanced(by: .seconds(2))
+            let insertion = try await controller.insert(snapshot, text: "expired observation")
+            try check(insertion == nil && reservedText == nil,
+                      "expired observation invoked the editor with a renewed insertion budget")
+            return
+        }
+        if scenario == "capture-delayed-insertion" {
+            now = began.advanced(by: .milliseconds(1800))
+            hook = { if case .reserve = $0 { now = now.advanced(by: .milliseconds(100)) } }
+            guard let insertion = try await controller.insert(snapshot, text: "literal") else {
+                throw Failure.assertion("missing in-budget insertion")
+            }
+            let frame = try await controller.prepareFrame(insertion)
+            try check(frame == nil, "processing separation renewed an expired observation budget")
+            return
+        }
+        if scenario == "capture-clipped-frame" {
+            now = began.advanced(by: .milliseconds(1600))
+            guard let insertion = try await controller.insert(snapshot, text: "literal"),
+                  let submission = try await controller.prepareSubmission(insertion, inputID: UUID()) else {
+                throw Failure.assertion("missing in-budget submission")
+            }
+            try check(submission.deadline == began.advanced(by: .seconds(2)),
+                      "submission deadline was renewed at insertion")
+            try check(submission.claim(owner: owner, store: host), "fresh narrowed submission refused")
+            now = began.advanced(by: .seconds(2))
+            try check(!submission.validate(owner: owner, store: host),
+                      "narrowed submission frame survived the original observation deadline")
+            return
+        }
         if scenario.hasPrefix("draft-") {
             let insertion = try await controller.insert(snapshot, text: "automatic literal")
             try check(insertion == nil && reservedText == nil, "native automatic insertion replaced a human draft")

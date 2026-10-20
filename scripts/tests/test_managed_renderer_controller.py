@@ -68,6 +68,12 @@ class ManagedRendererControllerTests(unittest.TestCase):
     def test_invalidated_capture_reply_cannot_create_a_snapshot(self):
         self.scenario("capture-reentry")
 
+    def test_original_observation_deadline_cannot_be_renewed_by_capture_or_insertion(self):
+        for scenario in ["capture-late-reply", "capture-expired",
+                         "capture-delayed-insertion", "capture-clipped-frame"]:
+            with self.subTest(scenario=scenario):
+                self.scenario(scenario)
+
     def test_late_insertion_is_released_without_a_frame(self):
         self.scenario("insert-reentry")
 

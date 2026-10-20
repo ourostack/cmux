@@ -10,13 +10,15 @@ final class AgentSessionManagedRendererReservation {
 
     @MainActor final class Ticket {
         fileprivate let began: ContinuousClock.Instant
+        fileprivate let deadline: ContinuousClock.Instant
         fileprivate var receipt: Receipt?
         fileprivate var inserted: ContinuousClock.Instant?
         fileprivate var rendererValidated = false
         fileprivate var frameClaimed = false
 
-        fileprivate init(began: ContinuousClock.Instant) {
+        fileprivate init(began: ContinuousClock.Instant, deadline: ContinuousClock.Instant) {
             self.began = began
+            self.deadline = deadline
         }
     }
 
@@ -45,12 +47,16 @@ final class AgentSessionManagedRendererReservation {
         self.now = now
     }
 
-    func begin() -> Ticket? {
+    func begin(expiresAt: ContinuousClock.Instant? = nil) -> Ticket? {
         if let active { _ = isCurrent(active) }
         guard active == nil else { return nil }
         let revision = self.revision
         guard isCurrentHost(), active == nil, self.revision == revision else { return nil }
-        let ticket = Ticket(began: now())
+        let began = now()
+        let maximum = began.advanced(by: .seconds(2))
+        let deadline = min(expiresAt ?? maximum, maximum)
+        guard began < deadline else { return nil }
+        let ticket = Ticket(began: began, deadline: deadline)
         active = ticket
         return ticket
     }
@@ -81,7 +87,7 @@ final class AgentSessionManagedRendererReservation {
     func claimFrame(_ ticket: Ticket) -> Frame? {
         guard isCurrent(ticket), ticket.rendererValidated, !ticket.frameClaimed else { return nil }
         ticket.frameClaimed = true
-        return Frame(deadline: ticket.began.advanced(by: .seconds(2))) { [weak self, weak ticket] in
+        return Frame(deadline: ticket.deadline) { [weak self, weak ticket] in
             guard let self, let ticket else { return false }
             return self.isCurrent(ticket) && ticket.rendererValidated && ticket.frameClaimed
         }
@@ -97,7 +103,7 @@ final class AgentSessionManagedRendererReservation {
         let hostIsCurrent = isCurrentHost()
         guard active === ticket else { return false }
         let current = now()
-        guard ticket.began <= current, current < ticket.began.advanced(by: .seconds(2)), hostIsCurrent else {
+        guard ticket.began <= current, current < ticket.deadline, hostIsCurrent else {
             invalidate()
             return false
         }
