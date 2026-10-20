@@ -1,19 +1,34 @@
 """Actual native Copilot startup over owned, supervised private pipes; no provider/model."""
 
+import hashlib
 import json
 import subprocess
+import time
 import unittest
+import uuid
 
 import test_managed_process_bootstrap as bootstrap
 
 
 class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
     def startup(self, scenario):
+        started = time.monotonic()
         result = subprocess.run(
             [str(self.executable), "--fixture-copilot-startup", scenario],
             capture_output=True, timeout=20 if scenario.startswith("owner-tool-") else 12,
         )
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        evidence = self.build / f"startup-{uuid.uuid4().hex}"
+        for suffix, payload in (("stdout", result.stdout), ("stderr", result.stderr)):
+            with evidence.with_suffix(f".{suffix}").open("xb") as handle:
+                handle.write(payload)
+        with evidence.with_suffix(".json").open("x") as handle:
+            json.dump({
+                "scenario": scenario, "elapsed_seconds": time.monotonic() - started,
+                "returncode": result.returncode, "stdout": str(evidence.with_suffix(".stdout")),
+                "stderr": str(evidence.with_suffix(".stderr")),
+            }, handle, indent=2)
+        print(f"Retained fixture result: {evidence}.json", file=bootstrap.sys.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr.decode() + f"\nFixture evidence: {evidence}.json")
         return json.loads(result.stdout)
 
     def test_root_callback_executes_real_read_edit_validate_then_ack_and_fresh_inventories(self):
@@ -28,6 +43,33 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
         self.assertEqual(result["nativeOutstanding"], 0)
         self.assertEqual(result["outstandingActivities"], 0)
 
+    def test_owned_launch_binds_the_actual_executable_digest_and_fixed_copilot_arguments(self):
+        result = self.startup("owner-tool-read-edit-validate")
+        self.assertEqual(result["executableSHA256"], hashlib.sha256(self.executable.read_bytes()).hexdigest(), result)
+        self.assertEqual(result["backendArguments"], ["--headless", "--no-auto-update", "--stdio", "--allow-all"])
+        manifest_bytes = result["profileManifest"].encode()
+        self.assertEqual(result["profileSHA256"], hashlib.sha256(manifest_bytes).hexdigest())
+        manifest = json.loads(manifest_bytes)
+        self.assertEqual(set(manifest), {
+            "version", "provider", "cliVersion", "sdkVersion", "sdkCommit", "arguments", "create", "options",
+            "workContract", "commandAuthority", "environment",
+        })
+        self.assertEqual(manifest["version"], 1)
+        self.assertEqual(manifest["provider"], "copilot")
+        self.assertEqual(manifest["cliVersion"], "1.0.98")
+        self.assertEqual(manifest["sdkVersion"], "1.0.22")
+        self.assertEqual(manifest["sdkCommit"], "ffd25c775742f73e13a492093be0287d7885123f")
+        self.assertEqual(manifest["arguments"], result["backendArguments"])
+        self.assertEqual(manifest["commandAuthority"], "general-purpose-foreground-os-account")
+        self.assertEqual(manifest["create"]["sessionId"], "<native-session>")
+        self.assertEqual(manifest["create"]["workingDirectory"], "<native-project>")
+        self.assertEqual(manifest["create"]["availableTools"], ["custom:cmux_run_foreground"])
+        self.assertEqual(manifest["options"]["availableTools"], ["custom:cmux_run_foreground"])
+        self.assertEqual(manifest["environment"], {
+            "HOME": "<native-home>", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
+        })
+        self.assertTrue(result["workEvidence"], result)
+
     def test_callback_before_send_ack_or_root_is_retained_until_exact_join(self):
         for scenario in ("owner-tool-before-send-ack", "owner-tool-external-before-root"):
             with self.subTest(scenario=scenario):
@@ -36,6 +78,36 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
                 self.assertTrue(result["workEvidence"], result)
                 self.assertEqual(result["callbackExecutions"], "read\nedit\nvalidate\n")
                 self.assertEqual(result["nativeOutstanding"], 0)
+
+    def test_replaced_executable_cannot_launch_using_the_prepared_digest(self):
+        result = self.startup("launch-replaced-before-start")
+        self.assertTrue(result["rejected"], result)
+        self.assertFalse(result["peerStarted"], result)
+
+    def test_duplicate_launch_request_holds_the_existing_generation(self):
+        result = self.startup("launch-duplicate-start")
+        self.assertTrue(result["rejected"], result)
+        self.assertEqual(result["nativePhase"], "held")
+        self.assertFalse(result["workEvidence"])
+
+    def test_close_revokes_input_before_queued_actor_work_can_run(self):
+        for scenario in ("owner-tool-close-queued-input", "owner-close-queued-input"):
+            with self.subTest(scenario=scenario):
+                result = self.startup(scenario)
+                self.assertFalse(result["queuedInputAccepted"], result)
+                self.assertFalse(result["wireSendObserved"], result)
+                self.assertFalse(result["workEvidence"])
+                self.assertEqual(result["phase"], "held")
+
+    def test_supervisor_death_cannot_report_cleanup_while_its_backend_survives(self):
+        result = self.startup("launch-supervisor-killed")
+        self.assertTrue(result["backendStillAlive"], result)
+        self.assertTrue(result["fixtureBackendAbsent"], result)
+        self.assertTrue(result["closeFailed"], result)
+        self.assertTrue(result["secondCloseFailed"], result)
+        self.assertTrue(result["sameCloseError"], result)
+        self.assertTrue(result["firstCloseError"], result)
+        self.assertEqual(result["nativePhase"], "held")
 
     def test_unowned_or_ambiguous_callback_cannot_execute_any_command(self):
         for suffix in (
@@ -288,9 +360,9 @@ class ManagedCopilotStartupTests(bootstrap.ManagedProcessBootstrapTests):
 
     def test_root_events_before_send_ack_are_retained_under_the_preregistered_host_input(self):
         result = self.startup("owner-early-root")
-        self.assertTrue(result["inputAccepted"])
-        self.assertTrue(result["ackMatchesHost"])
-        self.assertTrue(result["workEvidence"])
+        self.assertTrue(result["inputAccepted"], result)
+        self.assertTrue(result["ackMatchesHost"], result)
+        self.assertTrue(result["workEvidence"], result)
 
     def test_ack_and_root_idle_cannot_hide_a_nonempty_work_inventory(self):
         result = self.startup("owner-background-task")

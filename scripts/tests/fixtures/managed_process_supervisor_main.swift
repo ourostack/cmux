@@ -41,11 +41,15 @@ struct ManagedProcessSupervisorFixture {
                 exit(1)
             }
         }
-        if arguments.count == 2, arguments.first == "--fixture-copilot-peer" {
+        if arguments == ["--headless", "--no-auto-update", "--stdio", "--allow-all"] {
             do {
-                try ManagedCopilotStartupFixture.peer(arguments[1])
+                guard let scenario = try ManagedCopilotStartupFixture.configuration()["scenario"] else {
+                    throw POSIXError(.EPROTO)
+                }
+                try ManagedCopilotStartupFixture.peer(scenario)
                 exit(0)
             } catch {
+                try? ManagedCopilotStartupFixture.recordTrace("peer-error: \(error)")
                 try? FileHandle.standardError.write(contentsOf: Data("\(error)\n".utf8))
                 exit(1)
             }

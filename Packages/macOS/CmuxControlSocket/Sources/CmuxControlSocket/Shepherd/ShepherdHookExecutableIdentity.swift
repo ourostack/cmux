@@ -1,8 +1,14 @@
 internal import Foundation
 internal import Darwin
+internal import CryptoKit
 
 /// Stable metadata for the exact file hashed and probed during a qualified launch.
 public struct ShepherdHookExecutableIdentity: Codable, Equatable, Sendable {
+    public struct Digest: Sendable {
+        public let sha256: String
+        public let isNativeExecutable: Bool
+    }
+
     public let device: UInt64
     public let inode: UInt64
     public let byteCount: Int64
@@ -67,6 +73,44 @@ public struct ShepherdHookExecutableIdentity: Codable, Equatable, Sendable {
         let count = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard count > 0 else { return nil }
         return String(cString: buffer)
+    }
+
+    /// The caller owns the descriptor and separately revalidates its path binding.
+    public func hash(fileDescriptor: Int32) throws -> Digest {
+        guard try Self(fileDescriptor: fileDescriptor) == self else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        var hash = SHA256()
+        var header: [UInt8] = []
+        var count: Int64 = 0
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            try Task.checkCancellation()
+            let readCount = buffer.withUnsafeMutableBytes {
+                Darwin.read(fileDescriptor, $0.baseAddress, $0.count)
+            }
+            if readCount < 0, errno == EINTR { continue }
+            guard readCount >= 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if readCount == 0 { break }
+            count += Int64(readCount)
+            guard count <= byteCount else { throw CocoaError(.fileReadCorruptFile) }
+            header.append(contentsOf: buffer.prefix(min(readCount, 4 - header.count)))
+            hash.update(data: Data(buffer.prefix(readCount)))
+        }
+        guard count == byteCount, try Self(fileDescriptor: fileDescriptor) == self else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let nativeHeaders: [[UInt8]] = [
+            [0xcf, 0xfa, 0xed, 0xfe], [0xfe, 0xed, 0xfa, 0xcf],
+            [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],
+            [0xca, 0xfe, 0xba, 0xbf], [0xbf, 0xba, 0xfe, 0xca],
+        ]
+        return Digest(
+            sha256: hash.finalize().map { String(format: "%02x", $0) }.joined(),
+            isNativeExecutable: nativeHeaders.contains(header)
+        )
     }
 
     private init(validating info: stat) throws {

@@ -219,6 +219,7 @@
 		A9F200000000000000000004 /* AgentSessionLaunchPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F100000000000000000004 /* AgentSessionLaunchPlan.swift */; };
 		B11401000000000000000001 /* AgentSessionManagedCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11401000000000000000002 /* AgentSessionManagedCommand.swift */; };
 		B11391000000000000000001 /* AgentSessionManagedCommandService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11391000000000000000002 /* AgentSessionManagedCommandService.swift */; };
+		B11402000000000000000001 /* AgentSessionManagedCopilotLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */; };
 		B11371000000000000000023 /* AgentSessionManagedSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11371000000000000000024 /* AgentSessionManagedSession.swift */; };
 		A9F20000000000000000000E /* AgentSessionOutputLineBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F10000000000000000000E /* AgentSessionOutputLineBuffer.swift */; };
 		B11371000000000000000021 /* AgentSessionOwnedProcessLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11371000000000000000022 /* AgentSessionOwnedProcessLauncher.swift */; };
@@ -4976,6 +4977,7 @@
 		A9F100000000000000000004 /* AgentSessionLaunchPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSessionLaunchPlan.swift; sourceTree = "<group>"; };
 		B11401000000000000000002 /* AgentSessionManagedCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCommand.swift; sourceTree = "<group>"; };
 		B11391000000000000000002 /* AgentSessionManagedCommandService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCommandService.swift; sourceTree = "<group>"; };
+		B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCopilotLaunch.swift; sourceTree = "<group>"; };
 		B11371000000000000000024 /* AgentSessionManagedSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedSession.swift; sourceTree = "<group>"; };
 		A9F10000000000000000000E /* AgentSessionOutputLineBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionOutputLineBuffer.swift; sourceTree = "<group>"; };
 		B11371000000000000000022 /* AgentSessionOwnedProcessLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionOwnedProcessLauncher.swift; sourceTree = "<group>"; };
@@ -11680,6 +11682,7 @@
 				B11371000000000000000024 /* AgentSessionManagedSession.swift */,
 				B11391000000000000000002 /* AgentSessionManagedCommandService.swift */,
 				B11401000000000000000002 /* AgentSessionManagedCommand.swift */,
+				B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */,
 				A9E010000000000000000009 /* AgentSessionProcessStore.swift */,
 				A9E01000000000000000000A /* AgentSessionStreamAccumulators.swift */,
 				A9E01000000000000000000E /* CodexAppServerSession.swift */,
@@ -14937,6 +14940,7 @@
 				A9F200000000000000000004 /* AgentSessionLaunchPlan.swift in Sources */,
 				B11401000000000000000001 /* AgentSessionManagedCommand.swift in Sources */,
 				B11391000000000000000001 /* AgentSessionManagedCommandService.swift in Sources */,
+				B11402000000000000000001 /* AgentSessionManagedCopilotLaunch.swift in Sources */,
 				B11371000000000000000023 /* AgentSessionManagedSession.swift in Sources */,
 				A9F20000000000000000000E /* AgentSessionOutputLineBuffer.swift in Sources */,
 				B11371000000000000000021 /* AgentSessionOwnedProcessLauncher.swift in Sources */,

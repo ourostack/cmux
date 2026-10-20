@@ -1,5 +1,4 @@
 import CmuxControlSocket
-import CryptoKit
 import Darwin
 import Foundation
 
@@ -27,37 +26,13 @@ struct ShepherdHookExecutableVerifier {
         }
         defer { close(descriptor) }
         let identity = try ShepherdHookExecutableIdentity(fileDescriptor: descriptor)
-        var hash = SHA256()
-        var header: [UInt8] = []
-        var count: Int64 = 0
-        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
-        while true {
-            let readCount = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
-            if readCount < 0, errno == EINTR { continue }
-            guard readCount >= 0 else {
-                throw CLIError(message: "Shepherd launch executable could not be hashed completely.")
-            }
-            if readCount == 0 { break }
-            count += Int64(readCount)
-            guard count <= identity.byteCount else {
-                throw CLIError(message: "Shepherd launch executable changed while it was being hashed.")
-            }
-            header.append(contentsOf: buffer.prefix(min(readCount, 4 - header.count)))
-            hash.update(data: Data(buffer.prefix(readCount)))
-        }
-        guard count == identity.byteCount,
-              try ShepherdHookExecutableIdentity(fileDescriptor: descriptor) == identity,
-              try ShepherdHookExecutableIdentity.capture(path: canonicalPath) == identity else {
+        let hashed = try identity.hash(fileDescriptor: descriptor)
+        guard try ShepherdHookExecutableIdentity.capture(path: canonicalPath) == identity else {
             throw CLIError(message: "Shepherd launch executable identity changed during verification.")
         }
-        let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let digest = hashed.sha256
         guard qualifiedBinaries.values.contains(where: { $0.contains(digest) }) else { return nil }
-        let nativeHeaders: [[UInt8]] = [
-            [0xcf, 0xfa, 0xed, 0xfe], [0xfe, 0xed, 0xfa, 0xcf],
-            [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],
-            [0xca, 0xfe, 0xba, 0xbf], [0xbf, 0xba, 0xfe, 0xca],
-        ]
-        guard nativeHeaders.contains(header) else {
+        guard hashed.isNativeExecutable else {
             throw CLIError(message: "Shepherd launch qualification requires a direct native agent executable.")
         }
         let output = try versionOutput(path: canonicalPath)

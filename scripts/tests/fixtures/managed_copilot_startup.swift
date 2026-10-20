@@ -7,50 +7,91 @@ import Foundation
 enum ManagedCopilotStartupFixture {
     static func run(_ scenario: String) async throws -> [String: Any] {
         let executable = URL(fileURLWithPath: CommandLine.arguments[0])
-        let callbackFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cmux-copilot-callback-\(UUID().uuidString)")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-copilot-project-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]
+        )
+        let callbackFile = directory.appendingPathComponent("document.txt")
         if scenario.hasPrefix("owner-tool-") {
             try Data("before\n".utf8).write(to: callbackFile)
         }
-        let nonce = UUID()
-        let process = try AgentSessionOwnedProcessLauncher(supervisorExecutableURL: executable).prepareManaged(
-            nonce: nonce, executableURL: executable, arguments: ["--fixture-copilot-peer", scenario],
-            workingDirectory: "/tmp", environment: ["CMUX_FIXTURE_CALLBACK_FILE": callbackFile.path]
-        )
-        let input = Pipe(), output = Pipe(), error = Pipe()
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = error
-        let lifetime = try AgentSessionManagedSession(
-            nonce: nonce, hostInstance: UUID(), workspaceID: UUID(), surfaceID: UUID(),
-            surfaceGeneration: 1, provider: .copilot,
-            executableURL: executable,
-            executableIdentity: ShepherdHookExecutableIdentity.capture(path: executable.path),
-            executableSHA256: String(repeating: "a", count: 64),
-            profileSHA256: String(repeating: "b", count: 64), workingDirectory: "/tmp",
-            stdout: output.fileHandleForReading, stderr: error.fileHandleForReading
-        )
-        let authority = scenario.hasPrefix("owner-tool-") && scenario != "owner-tool-no-native-authority"
-            ? AgentSessionManagedCommandService.NativeCodingAuthority(
-                explicitNativeCodingOptInFor: lifetime, projectMandate: UUID(), workingDirectory: "/tmp",
-                launcher: AgentSessionOwnedProcessLauncher(supervisorExecutableURL: executable),
-                environment: ["PATH": "/usr/bin:/bin"]
-            ) : nil
-        let adapter = try CopilotManagedSession(
-            lifetime: lifetime, takingOwnershipOf: input.fileHandleForWriting, workingDirectory: "/tmp",
-            codingAuthority: authority
-        )
-        try process.run()
-        defer {
-            try? lifetime.abandon()
-            if process.isRunning { process.terminate() }
-            process.waitUntilExit()
+        try JSONSerialization.data(withJSONObject: ["scenario": scenario, "callbackFile": callbackFile.path])
+            .write(to: directory.appendingPathComponent(".cmux-controlled-copilot-scenario"))
+        var candidate = executable
+        if scenario == "launch-replaced-before-start" {
+            candidate = directory.appendingPathComponent("candidate")
+            try FileManager.default.copyItem(at: executable, to: candidate)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: candidate.path)
         }
-        guard let supervisor = AgentPIDProcessIdentity(pid: process.processIdentifier) else {
-            throw POSIXError(.ESRCH)
+        let launch = try await AgentSessionManagedCopilotLaunch.prepare(
+            scope: .init(hostInstance: UUID(), workspaceID: UUID(), surfaceID: UUID(), generation: 1),
+            executableURL: candidate, workingDirectory: directory.path,
+            codingProjectMandate: scenario.hasPrefix("owner-tool-") && scenario != "owner-tool-no-native-authority" ? UUID() : nil,
+            launcher: AgentSessionOwnedProcessLauncher(supervisorExecutableURL: executable)
+        )
+        do {
+            if scenario == "launch-replaced-before-start" {
+                try FileManager.default.moveItem(at: candidate, to: directory.appendingPathComponent("old"))
+                try FileManager.default.copyItem(at: executable, to: candidate)
+                try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: candidate.path)
+                var rejected = false
+                do { try launch.launchBackend() } catch { rejected = true }
+                try await launch.close()
+                return [
+                    "rejected": rejected,
+                    "peerStarted": FileManager.default.fileExists(
+                        atPath: directory.appendingPathComponent(".cmux-controlled-copilot-trace").path
+                    ),
+                ]
+            }
+            let result = try await exercise(scenario, launch: launch, callbackFile: callbackFile)
+            if scenario == "launch-supervisor-killed" { return result }
+            try await launch.close()
+            return result
+        } catch {
+            let original = error
+            try await launch.close()
+            throw original
         }
-        try lifetime.attach(supervisor: supervisor)
+    }
+
+    static func exercise(
+        _ scenario: String, launch: AgentSessionManagedCopilotLaunch, callbackFile: URL
+    ) async throws -> [String: Any] {
+        let lifetime = launch.lifetime, adapter = launch.adapter, authority = launch.codingAuthority
+        try launch.launchBackend()
         try await ManagedSessionLifetimeFixture.wait { lifetime.phase == .awaitingProvider }
+        if scenario == "launch-supervisor-killed" {
+            guard let backend = lifetime.backendIdentity else { throw POSIXError(.ESRCH) }
+            defer {
+                if AgentPIDProcessIdentity(pid: backend.pid) == backend { _ = kill(backend.pid, SIGKILL) }
+            }
+            let supervisorPID = launch.processIdentifier
+            guard kill(supervisorPID, SIGKILL) == 0 else { throw POSIXError(.ESRCH) }
+            try await ManagedSessionLifetimeFixture.wait { AgentPIDProcessIdentity(pid: supervisorPID) == nil }
+            var firstCloseError = ""
+            do { try await launch.close() } catch { firstCloseError = String(describing: error) }
+            let backendStillAlive = AgentPIDProcessIdentity(pid: backend.pid) == backend
+            var secondCloseError = ""
+            do { try await launch.close() } catch { secondCloseError = String(describing: error) }
+            if AgentPIDProcessIdentity(pid: backend.pid) == backend {
+                guard kill(backend.pid, SIGKILL) == 0 else { throw POSIXError(.ESRCH) }
+            }
+            try await ManagedSessionLifetimeFixture.wait { AgentPIDProcessIdentity(pid: backend.pid) != backend }
+            return [
+                "backendStillAlive": backendStillAlive, "closeFailed": !firstCloseError.isEmpty,
+                "secondCloseFailed": !secondCloseError.isEmpty, "sameCloseError": firstCloseError == secondCloseError,
+                "firstCloseError": firstCloseError, "nativePhase": ManagedSessionLifetimeFixture.phase(lifetime),
+                "fixtureBackendAbsent": true,
+            ]
+        }
+        if scenario == "launch-duplicate-start" {
+            var rejected = false
+            do { try launch.launchBackend() } catch { rejected = true }
+            return ["rejected": rejected, "nativePhase": ManagedSessionLifetimeFixture.phase(lifetime),
+                    "workEvidence": adapter.hasCompleteWorkEvidence]
+        }
         if scenario == "dead-before-start" {
             guard let backend = lifetime.backendIdentity, kill(backend.pid, SIGKILL) == 0 else {
                 throw POSIXError(.ESRCH)
@@ -59,8 +100,8 @@ enum ManagedCopilotStartupFixture {
         }
         if scenario == "kernel-dead-before-start" {
             guard let backend = lifetime.backendIdentity,
-                  kill(process.processIdentifier, SIGSTOP) == 0 else { throw POSIXError(.ESRCH) }
-            defer { kill(process.processIdentifier, SIGCONT) }
+                  kill(launch.processIdentifier, SIGSTOP) == 0 else { throw POSIXError(.ESRCH) }
+            defer { kill(launch.processIdentifier, SIGCONT) }
             guard kill(backend.pid, SIGKILL) == 0 else { throw POSIXError(.ESRCH) }
             let deadline = ContinuousClock.now.advanced(by: .seconds(1))
             while AgentPIDProcessIdentity.processSnapshot(pid: backend.pid) != nil {
@@ -81,13 +122,26 @@ enum ManagedCopilotStartupFixture {
         if scenario == "stale-start" {
             try await Task.sleep(for: .milliseconds(100))
         } else {
-            let deadline = ContinuousClock.now.advanced(by: .seconds(scenario == "timeout" ? 7 : 2))
-            while adapter.phase != .held && adapter.phase.rawValue != "configurationObserved"
-                    && ContinuousClock.now < deadline {
+            while adapter.phase != .held && adapter.phase.rawValue != "configurationObserved" {
                 try await Task.sleep(for: .milliseconds(5))
             }
             // A duplicate response must still invalidate a completed startup.
             try await Task.sleep(for: .milliseconds(80))
+        }
+        if ["owner-tool-close-queued-input", "owner-close-queued-input"].contains(scenario) {
+            let queued = Task(priority: .high) { @MainActor in
+                adapter.submitOwnerInput(hostInputID, prompt: "Owner input: 雪 🐈", launchID: lifetime.launchID)
+            }
+            try await launch.close()
+            let accepted = await queued.value
+            let traceFile = URL(fileURLWithPath: launch.workingDirectory)
+                .appendingPathComponent(".cmux-controlled-copilot-trace")
+            let trace = FileManager.default.fileExists(atPath: traceFile.path)
+                ? try String(contentsOf: traceFile, encoding: .utf8) : ""
+            return [
+                "queuedInputAccepted": accepted, "wireSendObserved": trace.split(separator: "\n").contains("session.send"),
+                "workEvidence": adapter.hasCompleteWorkEvidence, "phase": adapter.phase.rawValue,
+            ]
         }
         if scenario.hasPrefix("owner-") && scenario != "owner-before-start" {
             inputAccepted = adapter.submitOwnerInput(
@@ -117,9 +171,12 @@ enum ManagedCopilotStartupFixture {
         }
         if adapter.phase == .held { await adapter.waitForCommandSettlement() }
         let executionFile = URL(fileURLWithPath: callbackFile.path + ".executions")
+        let traceFile = URL(fileURLWithPath: launch.workingDirectory).appendingPathComponent(".cmux-controlled-copilot-trace")
         return [
             "phase": adapter.phase.rawValue, "reason": adapter.holdReason ?? "",
             "nativePhase": ManagedSessionLifetimeFixture.phase(lifetime),
+            "nativeHold": lifetime.holdReason.map { "\($0)" } ?? "",
+            "diagnostics": String(decoding: adapter.diagnostics, as: UTF8.self),
             "sessionID": adapter.sessionID,
             "boundSessionID": lifetime.identity?.providerSessionID ?? "",
             "bufferedEvents": adapter.bufferedEvents.count,
@@ -135,10 +192,21 @@ enum ManagedCopilotStartupFixture {
                 ? String(decoding: try Data(contentsOf: executionFile), as: UTF8.self) : "",
             "nativeOutstanding": authority?.outstandingWorkCount ?? 0,
             "outstandingActivities": adapter.inputState?.outstandingActivityCount ?? 0,
+            "executableSHA256": lifetime.identity?.executableSHA256 ?? "",
+            "profileSHA256": lifetime.identity?.profileSHA256 ?? "",
+            "profileManifest": String(decoding: launch.profileManifest, as: UTF8.self),
+            "backendArguments": launch.backendArguments,
+            "peerTrace": FileManager.default.fileExists(atPath: traceFile.path)
+                ? try String(contentsOf: traceFile, encoding: .utf8) : "",
         ]
     }
 
     static func peer(_ scenario: String) throws {
+        try recordTrace("peer-started")
+        if scenario == "launch-supervisor-killed" {
+            while true { usleep(10_000) }
+        }
+        let directory = FileManager.default.currentDirectoryPath
         var framer = ShepherdManagedRPCFramer()
         var bytes = [UInt8](repeating: 0, count: 4096)
         var plannedID: String?
@@ -152,7 +220,10 @@ enum ManagedCopilotStartupFixture {
         var nativeToolAdvertised = false
         while true {
             let count = Darwin.read(STDIN_FILENO, &bytes, bytes.count)
-            if count == 0 { return }
+            if count == 0 {
+                try recordTrace("stdinEOF")
+                return
+            }
             if count < 0 {
                 if errno == EINTR { continue }
                 throw POSIXError(.EIO)
@@ -165,6 +236,8 @@ enum ManagedCopilotStartupFixture {
                       let params = request["params"] as? [String: Any] else {
                     throw POSIXError(.EPROTO)
                 }
+                try recordTrace(method)
+                try recordTrace("request-read:\(method) at \(Date().timeIntervalSince1970)")
                 if scenario == "timeout" { continue }
                 if scenario == "unknown-id" {
                     try send(["jsonrpc": "2.0", "id": "foreign", "result": [:]])
@@ -213,6 +286,7 @@ enum ManagedCopilotStartupFixture {
                         "version": scenario == "wrong-version" ? "1.0.97" : "1.0.98",
                     ]
                 case "session.create":
+                    try recordTrace("createDirectory=\(String(describing: params["workingDirectory"])); peerDirectory=\(directory)")
                     if scenario.hasPrefix("owner-tool-") {
                         let tools = params["tools"] as? [[String: Any]] ?? []
                         nativeToolAdvertised = tools.count == 1
@@ -261,7 +335,7 @@ enum ManagedCopilotStartupFixture {
                     }
                     guard let sid = params["sessionId"] as? String,
                           UUID(uuidString: sid) != nil,
-                          params["workingDirectory"] as? String == "/tmp",
+                          params["workingDirectory"] as? String == directory,
                           params["enableConfigDiscovery"] as? Bool == false,
                           params["enableSkills"] as? Bool == false,
                           params["enableFileHooks"] as? Bool == false,
@@ -409,7 +483,7 @@ enum ManagedCopilotStartupFixture {
                     if scenario == "owner-tool-before-send-ack" {
                         try sendTool(sessionID: plannedID, step: callbackStep, scenario: scenario)
                         usleep(40_000)
-                        guard let file = ProcessInfo.processInfo.environment["CMUX_FIXTURE_CALLBACK_FILE"],
+                        guard let file = try configuration()["callbackFile"],
                               !FileManager.default.fileExists(atPath: file + ".executions") else {
                             throw POSIXError(.EPROTO)
                         }
@@ -426,6 +500,7 @@ enum ManagedCopilotStartupFixture {
                         "jsonrpc": "2.0", "id": scenario == "owner-foreign-ack" ? "foreign" : id, "result": ack,
                     ]
                     try send(response)
+                    try recordTrace("response-written:\(method) at \(Date().timeIntervalSince1970)")
                     if scenario == "owner-duplicate-ack" { try send(response) }
                     if scenario == "owner-configuration-changed" {
                         try sendConfiguration("configuration-before-start", sessionID: plannedID)
@@ -548,6 +623,7 @@ enum ManagedCopilotStartupFixture {
                 }
                 let response: [String: Any] = ["jsonrpc": "2.0", "id": id, "result": result]
                 try send(response)
+                try recordTrace("response-written:\(method) at \(Date().timeIntervalSince1970)")
                 if scenario == "duplicate" { try send(response) }
                 if scenario == "configuration-late" && method == "session.tools.getCurrentMetadata" {
                     try sendConfiguration("configuration-before-start", sessionID: plannedID!)
@@ -557,7 +633,7 @@ enum ManagedCopilotStartupFixture {
     }
 
     static func sendTool(sessionID: String, step: Int, scenario: String) throws {
-        guard let path = ProcessInfo.processInfo.environment["CMUX_FIXTURE_CALLBACK_FILE"] else {
+        guard let path = try configuration()["callbackFile"] else {
             throw POSIXError(.EINVAL)
         }
         var scripts = [
@@ -586,7 +662,8 @@ enum ManagedCopilotStartupFixture {
         if scenario == "owner-tool-nonfunction" { rootRequest["type"] = "custom" }
         var requested: [String: Any] = [
             "requestId": "request-\(step)", "sessionId": sessionID, "toolCallId": "call-\(step)",
-            "toolName": "cmux_run_foreground", "arguments": arguments, "workingDirectory": "/tmp",
+            "toolName": "cmux_run_foreground", "arguments": arguments,
+            "workingDirectory": FileManager.default.currentDirectoryPath,
         ]
         if scenario == "owner-tool-foreign-session" { requested["sessionId"] = "foreign" }
         if scenario == "owner-tool-foreign-call" { requested["toolCallId"] = "foreign" }
@@ -644,6 +721,23 @@ enum ManagedCopilotStartupFixture {
         if scenario == "owner-tool-ui-before-result" {
             try sendEvent(sessionID: sessionID, type: "external_tool.completed", data: ["requestId": "request-\(step)"])
         }
+    }
+
+    static func configuration() throws -> [String: String] {
+        let path = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".cmux-controlled-copilot-scenario")
+        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: String] else {
+            throw POSIXError(.EPROTO)
+        }
+        return value
+    }
+
+    static func recordTrace(_ value: String) throws {
+        let path = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".cmux-controlled-copilot-trace")
+        let prior = FileManager.default.fileExists(atPath: path.path) ? try Data(contentsOf: path) : Data()
+        guard prior.count + value.utf8.count < 8192 else { throw POSIXError(.EOVERFLOW) }
+        try (prior + Data((value + "\n").utf8)).write(to: path)
     }
 
     static func sendRoot(sessionID: String, scenario: String, input: Int = 1, replayEventID: String? = nil) throws {
