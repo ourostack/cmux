@@ -18,7 +18,7 @@ import {
 import { insertComposerToken } from "../shared/composerTokens";
 import { isComposingEnter } from "../shared/keyboard";
 import { renderMarkdownFragment, renderPlainTextHTML } from "../shared/markdown";
-import { codexModelLabel, providerBadgeLabel } from "../shared/providerDisplay";
+import { codexModelLabel, providerBadgeLabel, selectedProviderForDisplay } from "../shared/providerDisplay";
 import {
   formatRateLimitPercent,
   formatRateLimitReset,
@@ -86,6 +86,9 @@ function pickAutoStartState(state: SessionState): SessionState {
     autoStartAttemptedProviderIds: state.autoStartAttemptedProviderIds,
     seenSessionIds: state.seenSessionIds,
     requestedStopSessionId: state.requestedStopSessionId,
+    bootstrapEvents: state.bootstrapEvents,
+    bootstrapEventCharacters: state.bootstrapEventCharacters,
+    bootstrapError: state.bootstrapError,
   };
 }
 
@@ -98,7 +101,8 @@ function autoStartStateEquals(previous: SessionState, next: SessionState): boole
     previous.status === next.status &&
     previous.autoStartAttemptedProviderIds === next.autoStartAttemptedProviderIds &&
     previous.seenSessionIds === next.seenSessionIds &&
-    previous.requestedStopSessionId === next.requestedStopSessionId
+    previous.requestedStopSessionId === next.requestedStopSessionId &&
+    previous.bootstrapError === next.bootstrapError
   );
 }
 
@@ -111,7 +115,7 @@ function SessionSurface({
   dispatch: (action: Action) => void;
   renderer: string;
 }) {
-  const provider = () => state().providers.find((item) => item.id === state().selectedProviderId);
+  const provider = () => selectedProviderForDisplay(state().providers, state().selectedProviderId);
   const canStart = () => canStartProvider(state());
   const canStop = () => canStopProvider(state());
   const canSend = () =>
@@ -149,6 +153,22 @@ function SessionSurface({
   const root = document.createElement("section");
   root.className = "agent-shell";
   root.dataset.codexWindowType = "electron";
+
+  const disclosure = document.createElement("aside");
+  disclosure.className = "mx-4 mt-3 text-xs text-token-text-tertiary";
+  disclosure.setAttribute("role", "note");
+  const nativeStatus = document.createElement("div");
+  nativeStatus.setAttribute("role", "status");
+  const nativeDescription = document.createElement("p");
+  nativeDescription.className = "m-0";
+  disclosure.append(nativeStatus, nativeDescription);
+  root.append(disclosure);
+  createEffect(() => {
+    const text = state().context?.nativeSession?.executionDisclosure ?? "";
+    disclosure.hidden = text.length === 0;
+    nativeStatus.textContent = statusLabel(state());
+    nativeDescription.textContent = text;
+  });
 
   const thread = document.createElement("div");
   thread.className = "agent-thread";

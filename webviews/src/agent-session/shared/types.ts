@@ -39,6 +39,15 @@ export type AppContext = {
   rateLimitRows?: AgentSessionRateLimitRow[];
   copy: AgentSessionCopy;
   theme: AgentSessionTheme;
+  nativeSession?: NativeManagedSession;
+};
+
+export type NativeManagedSession = {
+  providerId: "copilot";
+  sessionId: string;
+  status: "starting" | "running" | "stopping" | "failed";
+  revision: number;
+  executionDisclosure: string;
 };
 
 export type AgentSessionRateLimitRow = {
@@ -144,6 +153,13 @@ export type AgentEvent =
       providerId: ProviderId;
       executablePath: string;
       arguments: string[];
+      nativeSession?: NativeManagedSession;
+    }
+  | {
+      type: "provider.nativeSession";
+      sessionId: string;
+      providerId: "copilot";
+      nativeSession: NativeManagedSession;
     }
   | {
       type: "provider.output";

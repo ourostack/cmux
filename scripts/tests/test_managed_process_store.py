@@ -132,6 +132,12 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         self.assertTrue(result["workReadbacksObserved"], result)
         self.assertEqual(result["projectContents"], "after\n", result)
         self.assertEqual(result["commandExecutions"], "read\nedit\nvalidate\n", result)
+        self.assertEqual(result["reservedSnapshot"]["status"], "starting", result)
+        self.assertEqual(result["runningSnapshot"]["status"], "running", result)
+        self.assertEqual(result["runningSnapshot"]["providerId"], "copilot", result)
+        self.assertEqual(result["runningSnapshot"]["sessionId"], result["sessionID"], result)
+        self.assertIn("no sandbox", result["runningSnapshot"]["executionDisclosure"], result)
+        self.assertTrue(result["snapshotCleared"], result)
         self.assertTrue(result["stopped"], result)
 
     def test_revoked_or_foreign_native_coding_owners_never_launch_a_child(self):
@@ -176,6 +182,19 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         self.assertEqual(result["startError"], "", result)
         self.assertEqual(result["replayError"], "unsupportedTransport", result)
         self.assertTrue(result["stopped"], result)
+
+    def test_failed_native_cleanup_projects_typed_lifecycle_without_falsely_releasing_ownership(self):
+        result = self.run_store("native-coding-cleanup-unknown")
+        self.assertEqual(result["startError"], "", result)
+        self.assertTrue(result["failureReported"], result)
+        self.assertTrue(result["occupiedAfterFailure"], result)
+        self.assertFalse(result["exitReported"], result)
+        self.assertTrue(result["fixtureBackendAbsent"], result)
+        self.assertTrue(any(
+            event["nativeSession"]["status"] == "failed"
+            and event["nativeSession"]["sessionId"] == result["runningSnapshot"]["sessionId"]
+            for event in result["nativeLifecycleEvents"]
+        ), result)
 
     def test_close_during_preparation_never_launches_a_late_backend(self):
         result = self.run_store("cancel-preparation")

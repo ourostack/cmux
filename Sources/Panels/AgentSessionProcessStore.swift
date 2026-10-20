@@ -13,6 +13,15 @@ final class AgentSessionProcessStore {
     var hasActiveProviderSession: Bool {
         !sessions.isEmpty || managedCopilot != nil
     }
+    var nativeManagedSessionSnapshot: [String: Any]? {
+        guard let owner = managedCopilot, owner.nativeCodingOwner != nil else { return nil }
+        let status = owner.failed ? "failed" : owner.isClosing ? "stopping" : owner.started ? "running" : "starting"
+        return [
+            "providerId": "copilot", "sessionId": owner.sessionID, "status": status,
+            "revision": owner.failed ? 4 : owner.isClosing ? 3 : owner.started ? 2 : 1,
+            "executionDisclosure": AgentSessionManagedCopilotLaunch.NativeCodingOwner.executionDisclosure,
+        ]
+    }
     private var sessions: [String: AgentSessionRunningSession] = [:]
     private final class ManagedCopilotOwner {
         let sessionID = UUID().uuidString
@@ -21,6 +30,7 @@ final class AgentSessionProcessStore {
         var isClosing = false
         var stopRequested = false
         var failed = false
+        var started = false
         var cleanup: Task<Void, any Error>?
 
         init(nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?) {
@@ -60,6 +70,7 @@ final class AgentSessionProcessStore {
                     self.failManagedCopilot(owner, reason: "nativeOwnerRevoked")
                 }) else { throw CancellationError() }
             }
+            emitNativeSessionState(owner)
             emitActiveProviderStateIfNeeded()
             try Task.checkCancellation()
             guard !owner.isClosing else { throw CancellationError() }
@@ -97,33 +108,58 @@ final class AgentSessionProcessStore {
                 guard let self, let owner else { return }
                 self.failManagedCopilot(owner, reason: reason)
             }
-            eventSink?([
+            owner.started = true
+            emitNativeSessionState(owner)
+            var startedEvent: [String: Any] = [
                 "type": "provider.started", "sessionId": owner.sessionID, "providerId": "copilot",
                 "executablePath": executableURL.path, "arguments": launch.backendArguments,
-            ])
+            ]
+            if let nativeSession = nativeManagedSessionSnapshot { startedEvent["nativeSession"] = nativeSession }
+            eventSink?(startedEvent)
             try Task.checkCancellation()
             guard !owner.isClosing else { throw CancellationError() }
             return AgentSessionStartedSession(sessionId: owner.sessionID)
         } catch {
             let original = error
+            let reason: String?
             if !owner.stopRequested {
                 owner.failed = true
-                let reason = owner.launch?.adapter.holdReason ?? String(describing: error)
+                reason = owner.launch?.adapter.holdReason ?? String(describing: error)
+            } else {
+                reason = nil
+            }
+            beginManagedCopilotClose(owner)
+            if let reason {
                 eventSink?([
                     "type": "provider.output", "sessionId": owner.sessionID, "providerId": "copilot",
                     "stream": "stderr", "text": "Managed Copilot failed to start: \(reason)\n",
                 ])
             }
             if owner.launch != nil {
-                beginManagedCopilotClose(owner)
                 try await owner.cleanup?.value
             } else if managedCopilot === owner {
                 nativeCodingOwner?.revoke()
                 managedCopilot = nil
                 emitActiveProviderStateIfNeeded()
+                emitManagedCopilotExit(owner)
             }
             throw original
         }
+    }
+
+    private func emitNativeSessionState(_ owner: ManagedCopilotOwner) {
+        guard managedCopilot === owner, let nativeSession = nativeManagedSessionSnapshot else { return }
+        eventSink?([
+            "type": "provider.nativeSession", "providerId": "copilot",
+            "sessionId": owner.sessionID, "nativeSession": nativeSession,
+        ])
+    }
+
+    private func emitManagedCopilotExit(_ owner: ManagedCopilotOwner) {
+        eventSink?([
+            "type": "provider.exit", "sessionId": owner.sessionID, "providerId": "copilot",
+            "status": owner.failed ? 1 : 0, "stopRequested": owner.stopRequested,
+        ])
     }
 
     private func failManagedCopilot(_ owner: ManagedCopilotOwner, reason: String) {
@@ -137,9 +173,14 @@ final class AgentSessionProcessStore {
     }
 
     private func beginManagedCopilotClose(_ owner: ManagedCopilotOwner) {
+        let beganClosing = !owner.isClosing
         owner.isClosing = true
         owner.nativeCodingOwner?.revoke()
-        guard owner.cleanup == nil, let launch = owner.launch else { return }
+        guard owner.cleanup == nil else { return }
+        guard let launch = owner.launch else {
+            if beganClosing { emitNativeSessionState(owner) }
+            return
+        }
         let cleanup = launch.beginClose()
         owner.cleanup = Task {
             do {
@@ -147,11 +188,10 @@ final class AgentSessionProcessStore {
                 guard self.managedCopilot === owner else { return }
                 self.managedCopilot = nil
                 self.emitActiveProviderStateIfNeeded()
-                self.eventSink?([
-                    "type": "provider.exit", "sessionId": owner.sessionID, "providerId": "copilot",
-                    "status": owner.failed ? 1 : 0, "stopRequested": owner.stopRequested,
-                ])
+                self.emitManagedCopilotExit(owner)
             } catch {
+                owner.failed = true
+                self.emitNativeSessionState(owner)
                 self.eventSink?([
                     "type": "provider.output", "sessionId": owner.sessionID, "providerId": "copilot",
                     "stream": "stderr", "text": "Managed Copilot cleanup is unverified: \(error)\n",
@@ -159,6 +199,7 @@ final class AgentSessionProcessStore {
                 throw error
             }
         }
+        if beganClosing { emitNativeSessionState(owner) }
     }
 
     func start(

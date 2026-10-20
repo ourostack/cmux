@@ -352,6 +352,8 @@ struct ManagedProcessStoreFixture {
     @MainActor static func runNativeCoding(
         _ scenario: String, store: AgentSessionProcessStore, executable: URL, directory: URL
     ) async throws -> [String: Any] {
+        var nativeEvents: [[String: Any]] = []
+        store.eventSink = { nativeEvents.append($0) }
         let projectFile = directory.appendingPathComponent("controlled-project.txt")
         try Data("before\n".utf8).write(to: projectFile)
         try JSONSerialization.data(withJSONObject: [
@@ -366,13 +368,15 @@ struct ManagedProcessStoreFixture {
         var mandate = nativeOwner.projectMandate
         var workingDirectory = nativeOwner.workingDirectory
         let targetStore = scenario == "native-coding-other-store" ? AgentSessionProcessStore() : store
-        if scenario == "native-coding-revoked" { nativeOwner.revoke() }
-        if scenario == "native-coding-owner-lost-before-launch" {
-            store.activeProviderSink = { active in
-                guard active else { return }
+        var reservedSnapshot: [String: Any] = [:]
+        store.activeProviderSink = { active in
+            guard active else { return }
+            reservedSnapshot = store.nativeManagedSessionSnapshot ?? [:]
+            if scenario == "native-coding-owner-lost-before-launch" {
                 Task { @MainActor in currentOwner = false }
             }
         }
+        if scenario == "native-coding-revoked" { nativeOwner.revoke() }
         if scenario == "native-coding-wrong-workspace" {
             scope = .init(hostInstance: scope.hostInstance, workspaceID: UUID(),
                           surfaceID: scope.surfaceID, generation: scope.generation)
@@ -407,6 +411,41 @@ struct ManagedProcessStoreFixture {
             startError = (error as? AgentSessionBridgeError)?.code ?? String(describing: error)
         }
         let active = targetStore.hasActiveProviderSession
+        let runningSnapshot = targetStore.nativeManagedSessionSnapshot ?? [:]
+        if scenario == "native-coding-cleanup-unknown", !sessionID.isEmpty {
+            let pidFile = directory.appendingPathComponent(".cmux-controlled-backend-pid")
+            guard let pid = Int32(try String(contentsOf: pidFile, encoding: .utf8)),
+                  let backend = AgentPIDProcessIdentity.processSnapshot(pid: pid),
+                  let supervisor = AgentPIDProcessIdentity.processSnapshot(pid: backend.parentPID),
+                  supervisor.parentPID == getpid() else { throw POSIXError(.ESRCH) }
+            defer {
+                if AgentPIDProcessIdentity(pid: pid) == backend.identity { _ = kill(pid, SIGKILL) }
+            }
+            guard kill(supervisor.identity.pid, SIGKILL) == 0 else { throw POSIXError(.ESRCH) }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(6))
+            while !nativeEvents.contains(where: {
+                ($0["text"] as? String)?.contains("cleanup is unverified") == true
+            }), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let occupied = targetStore.hasActiveProviderSession
+            let snapshotAfterFailure = targetStore.nativeManagedSessionSnapshot ?? [:]
+            let lifecycleEvents = nativeEvents.filter { $0["type"] as? String == "provider.nativeSession" }
+            let exitReported = nativeEvents.contains { $0["type"] as? String == "provider.exit" }
+            let failureReported = nativeEvents.contains {
+                ($0["text"] as? String)?.contains("cleanup is unverified") == true
+            }
+            if AgentPIDProcessIdentity(pid: pid) == backend.identity {
+                guard kill(pid, SIGKILL) == 0 else { throw POSIXError(.ESRCH) }
+            }
+            try await ManagedSessionLifetimeFixture.wait { AgentPIDProcessIdentity(pid: pid) != backend.identity }
+            return [
+                "startError": startError, "runningSnapshot": runningSnapshot,
+                "snapshotAfterFailure": snapshotAfterFailure, "nativeLifecycleEvents": lifecycleEvents,
+                "occupiedAfterFailure": occupied, "exitReported": exitReported,
+                "failureReported": failureReported, "fixtureBackendAbsent": true,
+            ]
+        }
         var inputError = ""
         var queuedInput: Task<Bool, Never>?
         if !sessionID.isEmpty {
@@ -466,6 +505,8 @@ struct ManagedProcessStoreFixture {
         let executionFile = URL(fileURLWithPath: projectFile.path + ".executions")
         return [
             "nativeOwnerAvailable": true, "startError": startError, "activeAfterStart": active,
+            "sessionID": sessionID, "reservedSnapshot": reservedSnapshot, "runningSnapshot": runningSnapshot,
+            "snapshotCleared": targetStore.nativeManagedSessionSnapshot == nil,
             "inputError": inputError, "queuedInputRejected": queuedInputRejected,
             "replayError": replayError, "stopped": !targetStore.hasActiveProviderSession,
             "peerStarted": FileManager.default.fileExists(

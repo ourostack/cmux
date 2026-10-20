@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { makeClientId } from "./ids";
 import {
   autoStartProvider,
+  canStartProvider,
   canSelectProvider,
   canStopProvider,
   formatTemplate,
@@ -652,6 +653,261 @@ test("auto start is enabled for idle auto-start providers after context and prov
   const state = reduceSession(stateWithContext, { type: "providers", providers });
 
   expect(shouldAutoStartProvider(state)).toBe(true);
+});
+
+test("restored Copilot context cannot start through the generic browser path", () => {
+  for (const renderer of ["react", "solid"] as const) {
+    const restored = reduceSession(initialState(renderer), {
+      type: "context",
+      context: { ...context, renderer, initialProviderId: "copilot" },
+    });
+    const state = reduceSession(restored, {
+      type: "providers",
+      providers: [{
+        id: "copilot",
+        displayName: "GitHub Copilot",
+        executableName: "copilot",
+        transportKind: "managed-stdio-jsonrpc",
+        arguments: [],
+        autoStart: true,
+      }],
+    });
+    expect(canStartProvider(state)).toBe(false);
+    expect(shouldAutoStartProvider(state)).toBe(false);
+    expect(state.runningSessionId).toBeUndefined();
+  }
+});
+
+test("native context recovers managed lifecycle state after pre-navigation events were lost", () => {
+  for (const renderer of ["react", "solid"] as const) {
+    for (const [status, revision] of [["starting", 1], ["running", 2], ["stopping", 3], ["failed", 4]] as const) {
+      const drafted = reduceSession(initialState(renderer), {
+        type: "setInput", input: "owner draft", inputVersion: "owner-edit-1",
+      });
+      const state = reduceSession(drafted, {
+        type: "context",
+        context: {
+          ...context,
+          renderer,
+          initialProviderId: "copilot",
+          nativeSession: {
+            providerId: "copilot",
+            sessionId: "native-owned-session",
+            status,
+            revision,
+            executionDisclosure: "Native-owned foreground OS-account execution; no sandbox.",
+          },
+        },
+      });
+      expect(state.status).toBe(status);
+      expect(state.runningSessionId).toBe("native-owned-session");
+      expect(state.selectedProviderId).toBe("copilot");
+      expect(canStartProvider(state)).toBe(false);
+      expect(canSelectProvider(state)).toBe(false);
+      expect(state.input).toBe("owner draft");
+      expect(state.inputVersion).toBe("owner-edit-1");
+    }
+  }
+});
+
+test("native events received while initial context is in flight are replayed after its snapshot", () => {
+  const earlyStarted = reduceSession(initialState("react"), {
+    type: "event",
+    event: {
+      type: "provider.started", providerId: "copilot", sessionId: "native-owned-session",
+      executablePath: "/native/copilot", arguments: ["--headless"],
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  const earlyOutput = reduceSession(earlyStarted, {
+    type: "event",
+    event: {
+      type: "provider.output", providerId: "copilot", sessionId: "native-owned-session",
+      stream: "stdout", text: "Output after the captured native snapshot",
+    },
+  });
+  const state = reduceSession(earlyOutput, {
+    type: "context",
+    context: {
+      ...context, initialProviderId: "copilot",
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "starting", revision: 1,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  expect(state.status).toBe("running");
+  expect(state.runningSessionId).toBe("native-owned-session");
+  expect(state.transcript.at(-1)?.text).toBe("Output after the captured native snapshot");
+});
+
+test("a native exit during the initial context request cannot resurrect its captured session", () => {
+  const exited = reduceSession(initialState("solid"), {
+    type: "event",
+    event: {
+      type: "provider.exit", providerId: "copilot", sessionId: "native-owned-session", status: 1,
+    },
+  });
+  const state = reduceSession(exited, {
+    type: "context",
+    context: {
+      ...context, renderer: "solid", initialProviderId: "copilot",
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  expect(state.status).toBe("failed");
+  expect(state.runningSessionId).toBeUndefined();
+  expect(state.transcript.at(-1)?.text).toBe("Provider exited 1");
+});
+
+test("a native start after an empty context snapshot is still projected without a browser start request", () => {
+  const loaded = reduceSession(initialState("react"), {
+    type: "context", context: { ...context, initialProviderId: "copilot" },
+  });
+  const state = reduceSession(loaded, {
+    type: "event",
+    event: {
+      type: "provider.started", providerId: "copilot", sessionId: "native-owned-session",
+      executablePath: "/native/copilot", arguments: ["--headless"],
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  expect(state.status).toBe("running");
+  expect(state.runningSessionId).toBe("native-owned-session");
+  expect(canStartProvider(state)).toBe(false);
+  expect(state.context?.nativeSession?.executionDisclosure).toBe("OS-account commands, no sandbox.");
+});
+
+test("native lifecycle failure supersedes a running snapshot without clearing its occupied owner", () => {
+  const loaded = reduceSession(initialState("react"), {
+    type: "context",
+    context: {
+      ...context, initialProviderId: "copilot",
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  const state = reduceSession(loaded, {
+    type: "event",
+    event: {
+      type: "provider.nativeSession", providerId: "copilot", sessionId: "native-owned-session",
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "failed", revision: 4,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  expect(state.status).toBe("failed");
+  expect(state.runningSessionId).toBe("native-owned-session");
+  expect(canStopProvider(state)).toBe(true);
+});
+
+test("Stop preserves an authoritative failed occupied native owner instead of inventing a closing transition", () => {
+  const failed = reduceSession(initialState("react"), {
+    type: "context",
+    context: {
+      ...context, initialProviderId: "copilot",
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "failed", revision: 4,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  const state = reduceSession(failed, { type: "stopping", sessionId: "native-owned-session" });
+  expect(state.status).toBe("failed");
+  expect(state.runningSessionId).toBe("native-owned-session");
+  expect(state.requestedStopSessionId).toBeUndefined();
+  expect(canStopProvider(state)).toBe(true);
+});
+
+test("equal failed native lifecycle repairs optimistic local Stop without replacing or releasing its owner", () => {
+  const nativeSession = {
+    providerId: "copilot", sessionId: "native-owned-session", status: "failed", revision: 4,
+    executionDisclosure: "OS-account commands, no sandbox.",
+  } as const;
+  const failed = reduceSession(initialState("solid"), {
+    type: "context", context: { ...context, renderer: "solid", initialProviderId: "copilot", nativeSession },
+  });
+  const optimistic = { ...failed, status: "stopping" as const, requestedStopSessionId: "native-owned-session" };
+  const state = reduceSession(optimistic, {
+    type: "event",
+    event: {
+      type: "provider.nativeSession", providerId: "copilot", sessionId: "native-owned-session", nativeSession,
+    },
+  });
+  expect(state.status).toBe("failed");
+  expect(state.runningSessionId).toBe("native-owned-session");
+  expect(state.context?.nativeSession).toBe(nativeSession);
+  expect(state.requestedStopSessionId).toBeUndefined();
+  expect(canStopProvider(state)).toBe(true);
+});
+
+test("an older native started event cannot revive a failed occupied snapshot", () => {
+  const loaded = reduceSession(initialState("react"), {
+    type: "context",
+    context: {
+      ...context, initialProviderId: "copilot",
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "failed", revision: 4,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  const state = reduceSession(loaded, {
+    type: "event",
+    event: {
+      type: "provider.started", providerId: "copilot", sessionId: "native-owned-session",
+      executablePath: "/native/copilot", arguments: ["--headless"],
+      nativeSession: {
+        providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
+        executionDisclosure: "OS-account commands, no sandbox.",
+      },
+    },
+  });
+  expect(state.status).toBe("failed");
+  expect(state.runningSessionId).toBe("native-owned-session");
+  expect(canStopProvider(state)).toBe(true);
+});
+
+test("initial event overflow stays bounded and holds input while keeping native stop available", () => {
+  for (const texts of [Array<string>(65).fill("delta"), ["x".repeat(256 * 1024 + 1)]]) {
+    let state = initialState("react");
+    for (const text of texts) {
+      state = reduceSession(state, {
+        type: "event",
+        event: {
+          type: "provider.output", providerId: "copilot", sessionId: "native-owned-session", stream: "stdout", text,
+        },
+      });
+    }
+    state = reduceSession(state, {
+      type: "context",
+      context: {
+        ...context, initialProviderId: "copilot",
+        nativeSession: {
+          providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
+          executionDisclosure: "OS-account commands, no sandbox.",
+        },
+      },
+    });
+    expect(state.status).toBe("failed");
+    expect(state.runningSessionId).toBe("native-owned-session");
+    expect(canStopProvider(state)).toBe(true);
+    expect(canStartProvider(state)).toBe(false);
+    expect(state.bootstrapError).toBeTruthy();
+    expect(state.bootstrapEvents.length).toBeLessThanOrEqual(64);
+  }
 });
 
 test("auto start is disabled after a provider has already been attempted", () => {

@@ -604,6 +604,9 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
             if let workingDirectory {
                 context["workingDirectory"] = workingDirectory
             }
+            if let nativeSession = processStore.nativeManagedSessionSnapshot {
+                context["nativeSession"] = nativeSession
+            }
             return context
         case "app.pickFiles":
             return await pickLocalFiles()
