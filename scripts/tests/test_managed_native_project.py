@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ManagedNativeProjectTests(unittest.TestCase):
-    def test_app_target_compiles_both_reservation_and_rpc_boundary_exactly_once(self):
+    def test_app_target_compiles_managed_transport_and_authority_sources_exactly_once(self):
         project = plistlib.loads(subprocess.check_output([
             "plutil", "-convert", "xml1", "-o", "-", str(ROOT / "cmux.xcodeproj/project.pbxproj"),
         ]))
@@ -24,7 +24,10 @@ class ManagedNativeProjectTests(unittest.TestCase):
             for build_id in objects[phase_id]["files"]
             if "fileRef" in objects[build_id]
         ]
-        for name in ["AgentSessionManagedRendererReservation.swift", "AgentSessionManagedShepherdBoundary.swift"]:
+        for name in [
+            "AgentSessionManagedRendererReservation.swift", "AgentSessionManagedShepherdBoundary.swift",
+            "ClaudeManagedStreamDecoder.swift", "ClaudeManagedTurnLedger.swift",
+        ]:
             with self.subTest(source=name):
                 self.assertEqual(source_paths.count("Panels/" + name), 1,
                                  f"{name} is missing, duplicated, or aliased in the real app build graph")
