@@ -24,6 +24,10 @@ export class ManagedComposer {
   private readonly identity = makeClientId();
   private ownedMutation = false;
   private lease: { id: string; began: number; inserted: number; render: string | null } | null = null;
+  private inserted: {
+    receipt: Readonly<ManagedComposerReceipt>; element: HTMLElement; text: string; editVersion: string;
+    focused: boolean; activeElement: Element | null;
+  } | null = null;
   private painted: string | null = null;
   private paintRequest = 0;
   private observer: MutationObserver | null = null;
@@ -35,8 +39,12 @@ export class ManagedComposer {
     const document = binding.element()?.ownerDocument;
     const window = document?.defaultView;
     if (!document || !window) return () => { this.revoke(); };
-    const invalidate = () => this.revoke();
+    const invalidate = () => {
+      this.inserted = null;
+      this.revoke();
+    };
     const input = (event: Event) => {
+      if (event.isTrusted) this.inserted = null;
       if (!this.busy()) return;
       if (event.isTrusted) {
         this.revoke();
@@ -72,6 +80,7 @@ export class ManagedComposer {
       window.removeEventListener("resize", invalidate, true);
       window.removeEventListener("scroll", invalidate, true);
       this.binding = null;
+      this.inserted = null;
       this.painted = null;
       this.unbind = null;
     };
@@ -82,6 +91,7 @@ export class ManagedComposer {
   allowAction(action: Action): boolean {
     if (action.type === "setInput") {
       if (!this.allowMutation()) return false;
+      if (!this.ownedMutation) this.inserted = null;
       this.editVersion = makeClientId();
     } else {
       this.revoke();
@@ -121,6 +131,7 @@ export class ManagedComposer {
     if (outside === null) return null;
     const lease = { id: makeClientId(), began: performance.now(), inserted: performance.now(), render: null as string | null };
     this.lease = lease;
+    this.inserted = null;
     this.ownedMutation = true;
     try {
       binding.replace(text);
@@ -149,7 +160,17 @@ export class ManagedComposer {
     }
     lease.render = inserted.render;
     this.painted = inserted.render;
-    return { leaseId: lease.id, render: inserted.render };
+    const receipt = { leaseId: lease.id, render: inserted.render };
+    const element = binding.element();
+    if (!element) {
+      this.revoke();
+      return null;
+    }
+    this.inserted = {
+      receipt: { ...receipt }, element, text, editVersion: inserted.editVersion,
+      focused: element.ownerDocument.hasFocus(), activeElement: element.ownerDocument.activeElement,
+    };
+    return receipt;
   }
 
   validate(receipt: ManagedComposerReceipt): boolean {
@@ -169,6 +190,30 @@ export class ManagedComposer {
     if (this.lease?.id === leaseId) this.revoke();
   }
 
+  consume(receipt: ManagedComposerReceipt): boolean {
+    this.drainDOMChanges();
+    const inserted = this.inserted;
+    if (!inserted || !receipt || receipt.leaseId !== inserted.receipt.leaseId ||
+        receipt.render !== inserted.receipt.render) return false;
+    const binding = this.binding;
+    const document = inserted.element.ownerDocument;
+    if (!binding || binding.element() !== inserted.element || !inserted.element.isConnected ||
+        !binding.eligible() || binding.text() !== inserted.text || this.editVersion !== inserted.editVersion ||
+        document.hasFocus() !== inserted.focused || document.activeElement !== inserted.activeElement) {
+      this.inserted = null;
+      return false;
+    }
+    this.inserted = null;
+    this.revoke();
+    this.ownedMutation = true;
+    try {
+      binding.replace("");
+    } finally {
+      this.ownedMutation = false;
+    }
+    return true;
+  }
+
   private busy(): boolean {
     if (this.lease && performance.now() - this.lease.began >= 2000) this.revoke();
     return this.lease !== null;
@@ -176,6 +221,10 @@ export class ManagedComposer {
 
   private invalidateDOM(records: MutationRecord[]): void {
     this.painted = null;
+    const inserted = this.inserted;
+    if (inserted && records.some((record) =>
+        (inserted.element.contains(record.target) && (record.type !== "attributes" || record.attributeName === "value")) ||
+        Array.from(record.removedNodes).some((node) => node.contains(inserted.element)))) this.inserted = null;
     const composer = this.binding?.element()?.closest("form");
     if (this.lease && (this.lease.render !== null ||
         records.some((record) => !composer?.contains(record.target)))) this.revoke();

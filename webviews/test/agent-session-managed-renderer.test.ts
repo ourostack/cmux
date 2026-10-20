@@ -118,6 +118,7 @@ type ManagedComposer = {
   reserve(snapshot: ComposerSnapshot, text: string): Promise<ComposerReceipt | null>;
   validate(receipt: ComposerReceipt): boolean;
   release(leaseId: string): void;
+  consume(receipt: ComposerReceipt): boolean;
 };
 
 function composer(fixture: ReturnType<typeof mount>): ManagedComposer {
@@ -195,6 +196,129 @@ async function editActualComposer(fixture: ReturnType<typeof mount>, text: strin
 }
 
 for (const renderer of ["react", "solid"] as const) {
+  test(`actual ${renderer} consumes only its unchanged inserted literal after output and lease expiry`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      const document = fixture.dom.window.document;
+      document.hasFocus = () => false;
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const lane = composer(fixture);
+      const receipt = await lane.reserve(await paintedCapture(lane), "Continue the authorized task.");
+      if (!receipt) throw new Error("Missing owned insertion receipt.");
+      expect(typeof lane.consume).toBe("function");
+      const activeElement = document.activeElement;
+      fixture.dom.window.cmuxAgentBridge?.receive({
+        type: "provider.output", providerId: "copilot", sessionId: "native-owned-session",
+        stream: "stdout", text: "New coding output",
+      });
+      await waitFor(() => document.body.textContent?.includes("New coding output") === true);
+      fixture.advance(2500);
+      lane.release(receipt.leaseId);
+      expect(lane.validate(receipt)).toBe(false);
+      expect(lane.consume({ ...receipt, render: "Unbound render" })).toBe(false);
+      expect(lane.consume(receipt)).toBe(true);
+      expect((await paintedCapture(lane)).editorText).toBe("");
+      expect(lane.consume(receipt)).toBe(false);
+      expect(document.activeElement).toBe(activeElement);
+      expect(document.hasFocus()).toBe(false);
+      expect(fixture.messages.filter((method) => method !== "app.context" && method !== "provider.list")).toEqual([]);
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
+  for (const change of ["human-draft", "edit-ABA", "focus-ABA", "direct-draft"] as const) {
+    test(`actual ${renderer} never consumes owned text after ${change} during a late acknowledgement`, async () => {
+      const fixture = paintedFixture(renderer);
+      try {
+        const document = fixture.dom.window.document;
+        document.hasFocus = () => false;
+        document.body.tabIndex = -1;
+        await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+        const lane = composer(fixture);
+        const receipt = await lane.reserve(await paintedCapture(lane), "Owned literal");
+        if (!receipt) throw new Error("Missing owned insertion receipt.");
+        expect(typeof lane.consume).toBe("function");
+        fixture.advance(2500);
+        lane.release(receipt.leaseId);
+        const editor = document.querySelector<HTMLElement>("textarea, .ProseMirror");
+        if (!editor) throw new Error("Missing mounted editor.");
+        let expected = "Owned literal";
+        if (change === "human-draft" || change === "edit-ABA") {
+          await editActualComposer(fixture, "Human draft");
+          expected = "Human draft";
+          if (change === "edit-ABA") {
+            await editActualComposer(fixture, "Owned literal");
+            expected = "Owned literal";
+          }
+        } else if (change === "focus-ABA") {
+          editor.focus();
+          document.body.focus();
+        } else {
+          if (editor instanceof fixture.dom.window.HTMLTextAreaElement) {
+            editor.value = "Direct human draft";
+          } else {
+            const paragraph = editor.querySelector("p");
+            if (!paragraph) throw new Error("Missing mounted editor paragraph.");
+            paragraph.textContent = "Direct human draft";
+          }
+          expected = "Direct human draft";
+        }
+        const activeElement = document.activeElement;
+        expect(lane.consume(receipt)).toBe(false);
+        const actualText = editor instanceof fixture.dom.window.HTMLTextAreaElement
+          ? editor.value : editor.textContent;
+        expect(actualText).toBe(expected);
+        expect(document.activeElement).toBe(activeElement);
+        expect(fixture.errors).toEqual([]);
+      } finally {
+        fixture.dom.window.close();
+      }
+    });
+  }
+
+  test(`actual ${renderer} refuses an old consumption receipt against a newer owned insertion`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      const document = fixture.dom.window.document;
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const lane = composer(fixture);
+      const first = await lane.reserve(await paintedCapture(lane), "First owned literal");
+      if (!first) throw new Error("Missing first owned insertion.");
+      expect(typeof lane.consume).toBe("function");
+      expect(lane.consume(first)).toBe(true);
+      const second = await lane.reserve(await paintedCapture(lane), "Second owned literal");
+      if (!second) throw new Error("Missing second owned insertion.");
+      expect(lane.consume(first)).toBe(false);
+      expect(lane.consume(second)).toBe(true);
+      expect((await paintedCapture(lane)).editorText).toBe("");
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
+  test(`actual ${renderer} seals consumption identity independently of the returned mutable receipt`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      const document = fixture.dom.window.document;
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const lane = composer(fixture);
+      const receipt = await lane.reserve(await paintedCapture(lane), "Owned literal");
+      if (!receipt) throw new Error("Missing owned insertion.");
+      const original = { ...receipt };
+      receipt.leaseId = "Substituted lease";
+      receipt.render = "Substituted render";
+      expect(lane.consume(receipt)).toBe(false);
+      expect(lane.consume(original)).toBe(true);
+      expect((await paintedCapture(lane)).editorText).toBe("");
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
   test(`actual ${renderer} captures platform-visible plaintext in the painted snapshot`, async () => {
     const fixture = paintedFixture(renderer);
     try {

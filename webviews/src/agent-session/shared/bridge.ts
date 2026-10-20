@@ -14,7 +14,7 @@ declare global {
     cmuxAgentBridge?: {
       applyTheme(theme: AgentSessionTheme): void;
       receive(event: AgentEvent): void;
-      managedComposer?: Pick<ManagedComposer, "capture" | "reserve" | "validate" | "release">;
+      managedComposer?: Pick<ManagedComposer, "capture" | "reserve" | "validate" | "release" | "consume">;
     };
   }
 }
@@ -29,6 +29,7 @@ export function installManagedComposer(composer: ManagedComposer): () => void {
     reserve: (snapshot: Parameters<ManagedComposer["reserve"]>[0], text: string) => composer.reserve(snapshot, text),
     validate: (receipt: Parameters<ManagedComposer["validate"]>[0]) => composer.validate(receipt),
     release: (leaseId: string) => composer.release(leaseId),
+    consume: (receipt: Parameters<ManagedComposer["consume"]>[0]) => composer.consume(receipt),
   };
   bridge.managedComposer = operations;
   const unsubscribe = subscribeToAgentEvents(() => composer.revoke());
