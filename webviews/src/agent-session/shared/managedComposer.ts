@@ -46,9 +46,11 @@ export class ManagedComposer {
     };
     const physicalEvents = ["beforeinput", "keydown", "pointerdown", "paste", "cut", "drop", "compositionstart"];
     for (const name of physicalEvents) document.addEventListener(name, input, true);
+    document.addEventListener("focusin", invalidate, true);
     document.addEventListener("focusout", invalidate, true);
     document.addEventListener("visibilitychange", invalidate, true);
     window.addEventListener("blur", invalidate, true);
+    window.addEventListener("focus", invalidate, true);
     window.addEventListener("resize", invalidate, true);
     window.addEventListener("scroll", invalidate, true);
     const observer = new window.MutationObserver((records) => this.invalidateDOM(records));
@@ -61,9 +63,11 @@ export class ManagedComposer {
       observer.disconnect();
       this.observer = null;
       for (const name of physicalEvents) document.removeEventListener(name, input, true);
+      document.removeEventListener("focusin", invalidate, true);
       document.removeEventListener("focusout", invalidate, true);
       document.removeEventListener("visibilitychange", invalidate, true);
       window.removeEventListener("blur", invalidate, true);
+      window.removeEventListener("focus", invalidate, true);
       window.removeEventListener("resize", invalidate, true);
       window.removeEventListener("scroll", invalidate, true);
       this.binding = null;
@@ -199,8 +203,7 @@ export class ManagedComposer {
     const document = editor?.ownerDocument;
     const window = document?.defaultView;
     if (!binding || !editor || !document || !window || !binding.eligible() || !editor.isConnected ||
-        document.visibilityState !== "visible" || !document.hasFocus() ||
-        (document.activeElement !== editor && !editor.contains(document.activeElement))) return null;
+        document.visibilityState !== "visible") return null;
     for (let node: HTMLElement | null = editor; node; node = node.parentElement) {
       const style = window.getComputedStyle(node);
       const rect = node.getBoundingClientRect();
@@ -216,6 +219,8 @@ export class ManagedComposer {
     const render = JSON.stringify({
       identity: this.identity, editVersion: this.editVersion, editorText, outside,
       editorDOM: editor instanceof window.HTMLTextAreaElement ? editor.value : editor.innerHTML,
+      focused: document.hasFocus(),
+      activeElement: document.activeElement ? nodePath(document.activeElement, document.documentElement) : null,
       viewport: [window.innerWidth, window.innerHeight, window.scrollX, window.scrollY, window.devicePixelRatio],
       selection: editor instanceof window.HTMLTextAreaElement
         ? [editor.selectionStart, editor.selectionEnd, editor.selectionDirection]

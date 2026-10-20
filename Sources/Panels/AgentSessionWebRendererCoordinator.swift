@@ -541,7 +541,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         for owner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
     ) -> AgentSessionManagedRendererController.Context? {
         guard processStore.ownsManagedCodingOwner(owner), managedRendererOwner === owner,
-              !isClosed, isPanelFocused, hasFinishedNavigation, hasCompletedVisiblePaintFlush,
+              !isClosed, !isPanelFocused, hasFinishedNavigation, hasCompletedVisiblePaintFlush,
               owner.scope.surfaceID == panelId, owner.scope.workspaceID == workspaceId,
               owner.rendererID == rendererKind.rawValue, owner.workingDirectory == workingDirectory,
               let host = attachedHost, let webView, let window = webView.window,
@@ -549,7 +549,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
               window.isVisible, !window.isMiniaturized, window.occlusionState.contains(.visible),
               !host.isHiddenOrHasHiddenAncestor, !webView.isHiddenOrHasHiddenAncestor,
               !host.visibleRect.isEmpty, !webView.visibleRect.isEmpty, !webView.isLoading,
-              let responder = window.firstResponder, Self.responderChainContains(responder, target: webView),
+              let responder = window.firstResponder, !Self.responderChainContains(responder, target: webView),
               Self.isTrustedShellURL(webView.url, expected: trustedShellURL),
               let document = Self.normalizedTrustedFileURL(webView.url)?.absoluteString else { return nil }
         var geometry: [Double] = []

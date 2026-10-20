@@ -191,6 +191,87 @@ async function editActualComposer(fixture: ReturnType<typeof mount>, text: strin
 }
 
 for (const renderer of ["react", "solid"] as const) {
+  test(`actual ${renderer} reserves a visible unfocused composer without taking focus`, async () => {
+    const fixture = paintedFixture(renderer);
+    try {
+      await waitFor(() => fixture.dom.window.document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const document = fixture.dom.window.document;
+      document.hasFocus = () => false;
+      document.body.tabIndex = -1;
+      document.body.focus();
+      const activeElement = document.activeElement;
+      const lane = composer(fixture);
+      const snapshot = await paintedCapture(lane);
+      expect(snapshot.editorText).toBe("");
+      const receipt = await lane.reserve(snapshot, "Continue the authorized task.");
+      expect(receipt).not.toBeNull();
+      expect(document.activeElement).toBe(activeElement);
+      expect(document.hasFocus()).toBe(false);
+      if (!receipt) throw new Error("Missing unfocused insertion receipt.");
+      fixture.advance(150);
+      expect(lane.validate(receipt)).toBe(true);
+      lane.release(receipt.leaseId);
+      expect(fixture.messages.filter((method) => method !== "app.context" && method !== "provider.list")).toEqual([]);
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
+  for (const event of ["focusin", "focus"] as const) {
+    test(`actual ${renderer} unfocused reservation cannot survive ${event} ABA`, async () => {
+      const fixture = paintedFixture(renderer);
+      try {
+        const document = fixture.dom.window.document;
+        await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+        document.hasFocus = () => false;
+        const lane = composer(fixture);
+        const receipt = await lane.reserve(await paintedCapture(lane), "reserved literal");
+        if (!receipt) throw new Error("Missing unfocused receipt.");
+        fixture.advance(150);
+        expect(lane.validate(receipt)).toBe(true);
+        document.hasFocus = () => true;
+        const target = event === "focusin" ? document.body : fixture.dom.window;
+        target.dispatchEvent(new fixture.dom.window.FocusEvent(event, { bubbles: event === "focusin" }));
+        document.hasFocus = () => false;
+        expect(lane.validate(receipt)).toBe(false);
+        expect(fixture.messages.filter((method) => method !== "app.context" && method !== "provider.list")).toEqual([]);
+        expect(fixture.errors).toEqual([]);
+      } finally {
+        fixture.dom.window.close();
+      }
+    });
+  }
+
+  for (const change of ["document-focus", "active-element"] as const) {
+    test(`actual ${renderer} unfocused capture binds current ${change} without stealing focus`, async () => {
+      const fixture = paintedFixture(renderer);
+      try {
+        const document = fixture.dom.window.document;
+        await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+        document.hasFocus = () => false;
+        const lane = composer(fixture);
+        const before = await paintedCapture(lane);
+        if (change === "document-focus") {
+          document.hasFocus = () => true;
+        } else {
+          const editor = document.querySelector<HTMLElement>("textarea, .ProseMirror");
+          if (!editor) throw new Error("Missing actual editor.");
+          // Change only the platform fact, without a focus event that could mask missing render binding.
+          Object.defineProperty(document, "activeElement", { configurable: true, get: () => editor });
+        }
+        expect(await lane.reserve(before, "stale literal")).toBeNull();
+        const after = await paintedCapture(lane);
+        expect(after.render).not.toBe(before.render);
+        expect(after.editorText).toBe("");
+        expect(fixture.errors).toEqual([]);
+        expect(fixture.messages.filter((method) => method !== "app.context" && method !== "provider.list")).toEqual([]);
+      } finally {
+        fixture.dom.window.close();
+      }
+    });
+  }
+
   test(`actual ${renderer} renderer refuses a typed-A edited-B back-to-A snapshot`, async () => {
     const fixture = paintedFixture(renderer);
     try {
