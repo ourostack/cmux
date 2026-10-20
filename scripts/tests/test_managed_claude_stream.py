@@ -33,6 +33,7 @@ class ManagedClaudeStreamTests(unittest.TestCase):
         result = subprocess.run([
             "swiftc", "-swift-version", "6", "-gnone", "-parse-as-library",
             "-module-cache-path", str(MODULE_CACHE or cls.build / "cache"),
+            str(ROOT / "Sources/Panels/AgentSessionManagedJSON.swift"),
             str(ROOT / "Sources/Panels/ClaudeManagedStreamDecoder.swift"),
             str(ROOT / "scripts/tests/fixtures/managed_claude_stream_main.swift"),
             "-o", str(cls.executable),
@@ -117,6 +118,19 @@ class ManagedClaudeStreamTests(unittest.TestCase):
                                  {"finish": True}])
         self.assertEqual([row["failure"] for row in rows], ["", "", "closed", "closed"])
         self.assertTrue(all(not row["messages"] for row in rows))
+
+    def test_duplicate_identity_members_at_any_depth_are_not_overwritten_by_foundation(self):
+        for data in (
+            b'{"type":"user","uuid":"foreign","uuid":"owned"}\n',
+            b'{"type":"user","uuid":"foreign","\\u0075uid":"owned"}\n',
+            b'{"type":"control_request","request":{"input":{"prompt_id":"A","prompt_id":"B"}}}\n',
+            b'{"type":"result","data":[{"id":"A","id":"B"}]}\n',
+            b'{"type":"assistant","params":{"a\\\\\\"b":1,"a\\\\\\"b":2}}\n',
+        ):
+            with self.subTest(data=data):
+                rows = self.run_decoder([chunk(data), chunk(wire({"type": "result"})), {"finish": True}])
+                self.assertEqual([row["failure"] for row in rows], ["duplicateKey"] * 3)
+                self.assertTrue(all(not row["messages"] for row in rows), rows)
 
 
 if __name__ == "__main__":

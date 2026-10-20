@@ -104,6 +104,7 @@ class ManagedClaudeTurnLedgerTests(unittest.TestCase):
                      "-o", str(cls.build / "libCmuxControlSocket.dylib")],
             flags + ["-parse-as-library", "-I", str(cls.build), "-L", str(cls.build), "-lCmuxControlSocket",
                      "-Xlinker", "-rpath", "-Xlinker", str(cls.build),
+                     str(ROOT / "Sources/Panels/AgentSessionManagedJSON.swift"),
                      str(ROOT / "Sources/Panels/ClaudeManagedStreamDecoder.swift"),
                      str(ROOT / "Sources/Panels/ClaudeManagedTurnLedger.swift"),
                      str(ROOT / "scripts/tests/fixtures/managed_claude_turn_ledger_main.swift"),

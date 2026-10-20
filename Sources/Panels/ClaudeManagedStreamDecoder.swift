@@ -3,7 +3,7 @@ import Foundation
 /// Raw managed transport only. Decoding a message does not establish attribution or completion.
 struct ClaudeManagedStreamDecoder {
     enum Failure: Error {
-        case invalidUTF8, invalidJSON, invalidEnvelope, lineTooLarge, incompleteLine, closed
+        case invalidUTF8, invalidJSON, invalidEnvelope, duplicateKey, lineTooLarge, incompleteLine, closed
     }
 
     private static let maximumLineBytes = 1_048_576
@@ -48,6 +48,9 @@ struct ClaudeManagedStreamDecoder {
         let decoded: Any
         do {
             decoded = try JSONSerialization.jsonObject(with: line)
+            guard try !AgentSessionManagedJSON.containsDuplicateKeys(line) else { throw Failure.duplicateKey }
+        } catch let error as Failure {
+            throw error
         } catch {
             throw Failure.invalidJSON
         }
