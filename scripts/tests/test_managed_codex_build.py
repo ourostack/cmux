@@ -538,12 +538,55 @@ class ManagedCodexBuildTests(unittest.TestCase):
             BUILD._patch_paths(source, rejected)
         self.assertEqual((source / neighbor).read_bytes(), original)
 
-    def test_sdk_patch_allowlist_is_exactly_the_six_reviewed_sources(self):
+    def _assert_checked_listener_patch_path(self, name):
+        source = self.root / "checked-listener-source"
+        target = source / name
+        target.parent.mkdir(parents=True)
+        original = b"pub fn ordinary() {}\n"
+        target.write_bytes(original)
+        integration = self.root / "checked-listener.patch"
+        integration.write_text(
+            f"diff --git a/{name} b/{name}\n"
+            f"--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n"
+            "-pub fn ordinary() {}\n+pub fn checked() {}\n"
+        )
+        accepted = None
+        try:
+            accepted = BUILD._patch_paths(source, integration)
+        except BUILD.BuildError:
+            pass
+        self.assertEqual(accepted, {name}, "Actual pre-write guard rejected the approved listener path")
+        self.assertEqual(target.read_bytes(), original)
+        neighbor = name.removesuffix(".rs") + "_extra.rs"
+        (source / neighbor).write_bytes(original)
+        rejected = self.root / "listener-neighbor.patch"
+        rejected.write_text(integration.read_text().replace(name, neighbor))
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._patch_paths(source, rejected)
+        mismatch = self.root / "listener-mismatched-headers.patch"
+        other = "codex-rs/app-server/src/in_process.rs"
+        mismatch.write_text(integration.read_text().replace(f"+++ b/{name}", f"+++ b/{other}"))
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._patch_paths(source, mismatch)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual((source / neighbor).read_bytes(), original)
+
+    def test_checked_message_processor_listener_patch_path_is_exact(self):
+        self._assert_checked_listener_patch_path("codex-rs/app-server/src/message_processor.rs")
+
+    def test_checked_thread_processor_listener_patch_path_is_exact(self):
+        self._assert_checked_listener_patch_path(
+            "codex-rs/app-server/src/request_processors/thread_processor.rs"
+        )
+
+    def test_sdk_patch_allowlist_is_exactly_the_eight_reviewed_sources(self):
         self.assertEqual(BUILD.PATCH_PATHS, frozenset({
             "codex-rs/app-server/src/config_manager.rs",
             "codex-rs/app-server/src/config_manager_service.rs",
             "codex-rs/app-server/src/in_process.rs",
             "codex-rs/app-server/src/outgoing_message.rs",
+            "codex-rs/app-server/src/message_processor.rs",
+            "codex-rs/app-server/src/request_processors/thread_processor.rs",
             "codex-rs/core/src/tools/mod.rs",
             "codex-rs/core/src/lib.rs",
         }))
