@@ -121,7 +121,9 @@ class ManagedCodexBuildTests(unittest.TestCase):
                 "else:\n"
                 f" Path({str(self.root / 'compiler-call.json')!r}).write_text(json.dumps("
                 "{'args':sys.argv[1:],'cwd':os.getcwd(),'target':os.environ['CARGO_TARGET_DIR'],"
-                "'rustc':os.environ['RUSTC']}))\n"
+                "'rustc':os.environ['RUSTC'],'incremental':os.environ.get('CARGO_INCREMENTAL'),"
+                "'dev_debug':os.environ.get('CARGO_PROFILE_DEV_DEBUG'),"
+                "'test_debug':os.environ.get('CARGO_PROFILE_TEST_DEBUG')}))\n"
                 + (" Path('Cargo.lock').write_bytes(Path('Cargo.lock').read_bytes()+b'\\n')\n"
                    if change_lock else "")
             )
@@ -270,6 +272,9 @@ class ManagedCodexBuildTests(unittest.TestCase):
         self.assertEqual(call["cwd"], str(stage.root / "codex-rs"))
         self.assertEqual(call["target"], str(target))
         self.assertEqual(call["rustc"], str(rust / "rustc"))
+        self.assertEqual(call["incremental"], "0")
+        self.assertEqual(call["dev_debug"], "0")
+        self.assertEqual(call["test_debug"], "0")
         self.assertNotEqual(first.receipt, second.receipt)
         self.assertTrue(first.log.is_file())
         receipt = json.loads(first.receipt.read_text())

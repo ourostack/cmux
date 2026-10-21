@@ -605,7 +605,8 @@ def run_locked(stage: StageManifest, target: Path, rust_bin: Path, cargo_args: l
     log, receipt = target / f"{attempt}.log", target / f"{attempt}.json"
     command = [str(rust_bin / "cargo"), cargo_args[0], "--locked", "--jobs", "2", *cargo_args[1:]]
     environment = dict(os.environ, CARGO_TARGET_DIR=str(target), RUSTC=str(rust_bin / "rustc"),
-                       RUSTDOC=str(rust_bin / "rustdoc"), PATH=str(rust_bin) + os.pathsep + os.defpath)
+                       RUSTDOC=str(rust_bin / "rustdoc"), PATH=str(rust_bin) + os.pathsep + os.defpath,
+                       CARGO_INCREMENTAL="0", CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0")
     minimum = free
     failure = None
     cleanup = None
@@ -637,6 +638,11 @@ def run_locked(stage: StageManifest, target: Path, rust_bin: Path, cargo_args: l
             "rust_bin": str(rust_bin), "stage_token": owner["token"],
             "patch_sha256": owner["patch_sha256"], "member_sha256": owner["member_sha256"],
             "stage_files_sha256": hashlib.sha256(json.dumps(stage.files, sort_keys=True).encode()).hexdigest(),
+            "compiler_preset": {
+                key: environment[key] for key in (
+                    "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"
+                )
+            },
             "stage_unchanged": unchanged, "minimum_free_bytes": minimum,
             "snapshot_error": snapshot_error, "cleanup": cleanup,
             "elapsed_seconds": time.monotonic() - began,
