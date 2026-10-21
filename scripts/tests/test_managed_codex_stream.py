@@ -199,6 +199,13 @@ class ManagedCodexStreamTests(unittest.TestCase):
         self.assertTrue(all(row["failure"] == "" for row in rows), rows)
         self.assertEqual(rows[0]["messages"][0]["object"], message)
 
+    def test_wire_size_preserves_actual_utf8_whitespace_and_crlf_not_reserialized_size(self):
+        data = '  { "id" : "A", "result" : "雪 🐈" } \r\n'.encode()
+        rows = self.run_decoder([chunk(data), {"finish": True}])
+        self.assertEqual(rows[0]["failure"], "")
+        self.assertEqual(rows[0]["messages"][0]["wireBytes"], len(data))
+        self.assertEqual(rows[0]["messages"][0]["object"], {"id": "A", "result": "雪 🐈"})
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)

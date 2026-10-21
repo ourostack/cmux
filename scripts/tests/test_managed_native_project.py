@@ -28,6 +28,7 @@ class ManagedNativeProjectTests(unittest.TestCase):
             "AgentSessionManagedRendererReservation.swift", "AgentSessionManagedShepherdBoundary.swift",
             "ClaudeManagedStreamDecoder.swift", "ClaudeManagedTurnLedger.swift",
             "AgentSessionManagedJSON.swift", "CodexManagedStreamDecoder.swift", "CodexManagedShellInventory.swift",
+            "CodexManagedTurnLedger.swift",
         ]:
             with self.subTest(source=name):
                 self.assertEqual(source_paths.count("Panels/" + name), 1,

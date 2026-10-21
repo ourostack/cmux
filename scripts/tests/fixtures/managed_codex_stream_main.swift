@@ -56,7 +56,10 @@ struct ManagedCodexStreamFixture {
                     case .integer: idKind = "integer"
                     case nil: idKind = ""
                     }
-                    return ["kind": message.kind.rawValue, "idKind": idKind, "object": message.object]
+                    return [
+                        "kind": message.kind.rawValue, "idKind": idKind,
+                        "object": message.object, "wireBytes": message.wireByteCount,
+                    ]
                 },
                 "failure": failure, "pending": decoder.hasPendingBytes,
             ])

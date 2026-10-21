@@ -34,6 +34,7 @@ struct CodexManagedStreamDecoder {
         let kind: Kind
         let id: RequestID?
         let object: [String: Any]
+        let wireByteCount: Int
     }
 
     private static let maximumLineBytes = 1_048_576
@@ -114,7 +115,7 @@ struct CodexManagedStreamDecoder {
                 kind = .error
             }
         }
-        return Message(kind: kind, id: id, object: object)
+        return Message(kind: kind, id: id, object: object, wireByteCount: line.count + 1)
     }
 
     private static func signedInteger(_ value: Any?) -> Int64? {

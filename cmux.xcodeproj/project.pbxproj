@@ -1742,6 +1742,7 @@
 		918100000000000000000061 /* CodexHookUserInputCandidate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918100000000000000000060 /* CodexHookUserInputCandidate.swift */; };
 		B1140A000000000000000001 /* CodexManagedShellInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1140A000000000000000002 /* CodexManagedShellInventory.swift */; };
 		B11409000000000000000001 /* CodexManagedStreamDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11409000000000000000002 /* CodexManagedStreamDecoder.swift */; };
+		B1140B000000000000000001 /* CodexManagedTurnLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1140B000000000000000002 /* CodexManagedTurnLedger.swift */; };
 		918100000000000000000091 /* CodexMonitorOwnerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918100000000000000000090 /* CodexMonitorOwnerState.swift */; };
 		9D04DE21C5281E376C0FE450 /* CodexRestoreHookEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 657ECAA4E052C87DFE264F70 /* CodexRestoreHookEvidence.swift */; };
 		256E3FBC057F233E8849DF79 /* CodexRestoreHookEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1D2A327B1DBFC724A70928 /* CodexRestoreHookEvidenceTests.swift */; };
@@ -6354,6 +6355,7 @@
 		918100000000000000000060 /* CodexHookUserInputCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexHookUserInputCandidate.swift; sourceTree = "<group>"; };
 		B1140A000000000000000002 /* CodexManagedShellInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedShellInventory.swift; sourceTree = "<group>"; };
 		B11409000000000000000002 /* CodexManagedStreamDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedStreamDecoder.swift; sourceTree = "<group>"; };
+		B1140B000000000000000002 /* CodexManagedTurnLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedTurnLedger.swift; sourceTree = "<group>"; };
 		918100000000000000000090 /* CodexMonitorOwnerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexMonitorOwnerState.swift; sourceTree = "<group>"; };
 		657ECAA4E052C87DFE264F70 /* CodexRestoreHookEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexRestoreHookEvidence.swift; sourceTree = "<group>"; };
 		7A1D2A327B1DBFC724A70928 /* CodexRestoreHookEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CodexRestoreHookEvidenceTests.swift"; sourceTree = "<group>"; };
@@ -11690,6 +11692,7 @@
 				B11407000000000000000002 /* ClaudeManagedTurnLedger.swift */,
 				B11408000000000000000002 /* AgentSessionManagedJSON.swift */,
 				B11409000000000000000002 /* CodexManagedStreamDecoder.swift */,
+				B1140B000000000000000002 /* CodexManagedTurnLedger.swift */,
 				B1140A000000000000000002 /* CodexManagedShellInventory.swift */,
 				A9F100000000000000000015 /* ClaudeStreamJSONAccumulator.swift */,
 				A9F100000000000000000016 /* CodexAppServerQueuedInput.swift */,
@@ -15604,6 +15607,7 @@
 				A9E02000000000000000000E /* CodexAppServerSession.swift in Sources */,
 				B1140A000000000000000001 /* CodexManagedShellInventory.swift in Sources */,
 				B11409000000000000000001 /* CodexManagedStreamDecoder.swift in Sources */,
+				B1140B000000000000000001 /* CodexManagedTurnLedger.swift in Sources */,
 				9D04DE21C5281E376C0FE450 /* CodexRestoreHookEvidence.swift in Sources */,
 				A10240030000000000000001 /* CodexTeamsAppServerProcess.swift in Sources */,
 				A10240100000000000000001 /* CodexTeamsPOSIXSupport.swift in Sources */,

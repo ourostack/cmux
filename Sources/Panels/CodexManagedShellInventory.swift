@@ -23,6 +23,7 @@ struct CodexManagedShellInventory {
     private(set) var terminals: [[String: Any]] = []
 
     var isComplete: Bool { failureReason == nil && completed }
+    var hasPendingPage: Bool { pending != nil }
     var hasEmptyCompleteSnapshot: Bool { isComplete && terminals.isEmpty }
 
     init(threadID: String, eventRevision: UUID) {
