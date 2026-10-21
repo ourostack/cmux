@@ -1,0 +1,900 @@
+diff --git a/codex-rs/app-server/src/config_manager.rs b/codex-rs/app-server/src/config_manager.rs
+--- a/codex-rs/app-server/src/config_manager.rs
++++ b/codex-rs/app-server/src/config_manager.rs
+@@ -21,9 +21,55 @@
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::sync::RwLock;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ use toml::Value as TomlValue;
+ use tracing::instrument;
+ use tracing::warn;
++
++/// Read-only terminal state shared by the owned frozen configuration generation.
++#[derive(Clone)]
++pub struct FrozenConfigViolation {
++    violated: Arc<AtomicBool>,
++}
++
++impl FrozenConfigViolation {
++    fn new() -> Self {
++        Self {
++            violated: Arc::new(AtomicBool::new(false)),
++        }
++    }
++
++    pub fn is_violated(&self) -> bool {
++        self.violated.load(Ordering::Acquire)
++    }
++
++    pub(crate) fn check(&self) -> std::io::Result<()> {
++        if self.is_violated() {
++            Err(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                "frozen configuration generation has a terminal violation",
++            ))
++        } else {
++            Ok(())
++        }
++    }
++
++    pub(crate) fn violate(&self, operation: &'static str) -> std::io::Error {
++        if !self.violated.swap(true, Ordering::AcqRel) {
++            warn!(operation, "frozen configuration operation refused; generation held");
++        }
++        std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            "frozen configuration operation refused; generation held",
++        )
++    }
++}
++
++struct FrozenConfigState {
++    config: Arc<Config>,
++    violation: FrozenConfigViolation,
++}
+ 
+ /// Shared app-server entry point for loading effective Codex configuration.
+ #[derive(Clone)]
+@@ -36,6 +82,7 @@
+     cloud_config_bundle: Arc<RwLock<CloudConfigBundleLoader>>,
+     arg0_paths: Arg0DispatchPaths,
+     thread_config_loader: Arc<dyn ThreadConfigLoader>,
++    frozen: Option<Arc<FrozenConfigState>>,
+ }
+ 
+ impl ConfigManager {
+@@ -57,6 +104,48 @@
+             cloud_config_bundle: Arc::new(RwLock::new(cloud_config_bundle)),
+             arg0_paths,
+             thread_config_loader,
++            frozen: None,
++        }
++    }
++
++    pub(crate) fn new_frozen(
++        config: Arc<Config>,
++        arg0_paths: Arg0DispatchPaths,
++    ) -> std::io::Result<Self> {
++        if config.codex_self_exe.as_ref() != arg0_paths.codex_self_exe.as_ref()
++            || config.codex_linux_sandbox_exe.as_ref() != arg0_paths.codex_linux_sandbox_exe.as_ref()
++            || config.main_execve_wrapper_exe.as_ref() != arg0_paths.main_execve_wrapper_exe.as_ref()
++        {
++            warn!("frozen configuration runtime-path binding refused");
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                "frozen configuration and owned runtime paths differ",
++            ));
++        }
++        let mut manager = Self::new(
++            config.codex_home.to_path_buf(),
++            Vec::new(),
++            LoaderOverrides::default(),
++            false,
++            CloudConfigBundleLoader::default(),
++            arg0_paths,
++            Arc::new(codex_config::NoopThreadConfigLoader),
++        );
++        manager.frozen = Some(Arc::new(FrozenConfigState {
++            config,
++            violation: FrozenConfigViolation::new(),
++        }));
++        Ok(manager)
++    }
++
++    pub(crate) fn frozen_violation_guard(&self) -> Option<FrozenConfigViolation> {
++        self.frozen.as_ref().map(|state| state.violation.clone())
++    }
++
++    pub(crate) fn ensure_config_mutable(&self, operation: &'static str) -> std::io::Result<()> {
++        match self.frozen.as_ref() {
++            Some(state) => Err(state.violation.violate(operation)),
++            None => Ok(()),
+         }
+     }
+ 
+@@ -86,6 +175,7 @@
+     where
+         I: IntoIterator<Item = (String, bool)>,
+     {
++        self.ensure_config_mutable("runtime feature mutation").map_err(|_| ())?;
+         let mut runtime_feature_enablement =
+             self.runtime_feature_enablement.write().map_err(|_| ())?;
+         runtime_feature_enablement.extend(enablement);
+@@ -98,6 +188,9 @@
+         chatgpt_base_url: String,
+         http_client_factory: codex_http_client::HttpClientFactory,
+     ) {
++        if self.ensure_config_mutable("cloud loader replacement").is_err() {
++            return;
++        }
+         let loader = cloud_config_bundle_loader(
+             auth_manager,
+             chatgpt_base_url,
+@@ -112,6 +205,9 @@
+     }
+ 
+     pub(crate) fn clear_cloud_config_bundle_loader(&self) {
++        if self.ensure_config_mutable("cloud loader clearing").is_err() {
++            return;
++        }
+         if let Ok(mut guard) = self.cloud_config_bundle.write() {
+             *guard = CloudConfigBundleLoader::default();
+         } else {
+@@ -120,6 +216,9 @@
+     }
+ 
+     pub(crate) async fn sync_default_client_residency_requirement(&self) {
++        if self.ensure_config_mutable("default client residency mutation").is_err() {
++            return;
++        }
+         match self.load_latest_config(/*fallback_cwd*/ None).await {
+             Ok(config) => {
+                 set_default_client_residency_requirement(config.enforce_residency.value());
+@@ -147,6 +246,9 @@
+     /// Loads system, user, and runtime settings without discovering a project
+     /// from the app-server process's working directory.
+     pub(crate) async fn load_non_project_config(&self) -> std::io::Result<Config> {
++        if self.frozen.is_some() {
++            return self.load_latest_config(None).await;
++        }
+         let mut manager = self.clone();
+         manager.loader_overrides.ignore_project_config = true;
+         manager.load_latest_config(/*fallback_cwd*/ None).await
+@@ -156,6 +258,13 @@
+         &self,
+         thread_config: &Config,
+     ) -> std::io::Result<Config> {
++        if let Some(state) = self.frozen.as_ref() {
++            state.violation.check()?;
++            if thread_config != state.config.as_ref() {
++                return Err(state.violation.violate("foreign thread configuration refresh"));
++            }
++            return Ok(state.config.as_ref().clone());
++        }
+         let refreshed_config = self
+             .load_latest_config(Some(thread_config.cwd.to_path_buf()))
+             .await?;
+@@ -168,6 +277,9 @@
+     }
+ 
+     pub(crate) async fn load_default_config(&self) -> std::io::Result<Config> {
++        if self.frozen.is_some() {
++            return self.load_latest_config(None).await;
++        }
+         let mut loader_overrides = self.loader_overrides.clone();
+         loader_overrides.ignore_user_config = true;
+         let mut config = ConfigBuilder::default()
+@@ -220,6 +332,17 @@
+         mut typesafe_overrides: ConfigOverrides,
+         fallback_cwd: Option<PathBuf>,
+     ) -> std::io::Result<Config> {
++        if let Some(state) = self.frozen.as_ref() {
++            state.violation.check()?;
++            if !cli_overrides.is_empty()
++                || request_overrides.is_some()
++                || !Self::frozen_overrides_match(&state.config, &typesafe_overrides)
++                || fallback_cwd.as_ref().is_some_and(|cwd| *cwd != state.config.cwd.to_path_buf())
++            {
++                return Err(state.violation.violate("configuration override or foreign cwd"));
++            }
++            return Ok(state.config.as_ref().clone());
++        }
+         let mut request_overrides = request_overrides.unwrap_or_default();
+         if let Some(value) = request_overrides.remove("bypass_hook_trust") {
+             typesafe_overrides.bypass_hook_trust = Some(value.as_bool().ok_or_else(|| {
+@@ -265,6 +388,13 @@
+         &self,
+         cwd: Option<AbsolutePathBuf>,
+     ) -> std::io::Result<ConfigLayerStack> {
++        if let Some(state) = self.frozen.as_ref() {
++            state.violation.check()?;
++            if cwd.as_ref().is_some_and(|cwd| cwd != &state.config.cwd) {
++                return Err(state.violation.violate("foreign configuration-layer cwd"));
++            }
++            return Ok(state.config.config_layer_stack.clone());
++        }
+         load_config_layers_state(
+             LOCAL_FS.as_ref(),
+             &self.codex_home,
+@@ -278,6 +408,63 @@
+             self.thread_config_loader.as_ref(),
+         )
+         .await
++    }
++
++    fn frozen_overrides_match(config: &Config, overrides: &ConfigOverrides) -> bool {
++        let ConfigOverrides {
++            model,
++            review_model,
++            cwd,
++            approval_policy,
++            approvals_reviewer,
++            sandbox_mode,
++            permission_profile,
++            default_permissions,
++            persisted_permission_profile_id,
++            model_provider,
++            service_tier,
++            codex_self_exe,
++            codex_linux_sandbox_exe,
++            main_execve_wrapper_exe,
++            default_zsh_path,
++            base_instructions,
++            developer_instructions,
++            personality,
++            compact_prompt,
++            show_raw_agent_reasoning,
++            tools_web_search_request,
++            ephemeral,
++            bypass_hook_trust,
++            additional_writable_roots,
++            workspace_roots,
++        } = overrides;
++        model.is_none()
++            && review_model.is_none()
++            && cwd.is_none()
++            && approval_policy.is_none()
++            && approvals_reviewer.is_none()
++            && sandbox_mode.is_none()
++            && permission_profile.is_none()
++            && default_permissions.is_none()
++            && persisted_permission_profile_id.is_none()
++            && model_provider.is_none()
++            && service_tier.is_none()
++            && codex_self_exe.is_none()
++            && (codex_linux_sandbox_exe.is_none()
++                || codex_linux_sandbox_exe == &config.codex_linux_sandbox_exe)
++            && (main_execve_wrapper_exe.is_none()
++                || main_execve_wrapper_exe == &config.main_execve_wrapper_exe)
++            && default_zsh_path.is_none()
++            && base_instructions.is_none()
++            && developer_instructions.is_none()
++            && personality.is_none()
++            && compact_prompt.is_none()
++            && show_raw_agent_reasoning.is_none()
++            && tools_web_search_request.is_none()
++            && ephemeral.is_none()
++            && bypass_hook_trust.is_none()
++            && additional_writable_roots.is_empty()
++            && workspace_roots.is_none()
+     }
+ 
+     fn apply_runtime_feature_enablement(&self, config: &mut Config) {
+@@ -366,3 +553,328 @@
+         }
+     }
+ }
++
++// Modified by Ouro: derived-config snapshot tests, without account or server startup.
++#[cfg(test)]
++mod cmux_config_contract {
++    use super::*;
++    use codex_app_server_protocol::ConfigBatchWriteParams;
++    use codex_app_server_protocol::ConfigEdit;
++    use codex_app_server_protocol::ConfigValueWriteParams;
++    use codex_app_server_protocol::MergeStrategy;
++    use codex_protocol::config_types::Personality;
++    use codex_protocol::config_types::SandboxMode;
++    use codex_protocol::models::PermissionProfile;
++    use codex_protocol::protocol::AskForApproval;
++    use tempfile::TempDir;
++
++    struct Fixture {
++        home: TempDir,
++        loader: LoaderOverrides,
++        config: Arc<Config>,
++        paths: Arg0DispatchPaths,
++    }
++
++    impl Fixture {
++        async fn new() -> std::io::Result<Self> {
++            let home = TempDir::new()?;
++            let catalog = home.path().join("models.json");
++            std::fs::write(
++                &catalog,
++                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../models-manager/models.json")),
++            )?;
++            std::fs::write(
++                home.path().join("config.toml"),
++                format!(
++                    "model = \"gpt-5.5\"\napproval_policy = \"never\"\nmodel_catalog_json = {catalog:?}\n"
++                ),
++            )?;
++            std::fs::write(
++                home.path().join("requirements.toml"),
++                "allowed_approval_policies = [\"never\"]\n",
++            )?;
++            let loader = LoaderOverrides {
++                managed_config_path: Some(home.path().join("managed.toml")),
++                system_config_path: Some(home.path().join("system.toml")),
++                system_requirements_path: Some(home.path().join("requirements.toml")),
++                ignore_project_config: true,
++                ..LoaderOverrides::without_managed_config_for_tests()
++            };
++            let mut config = ConfigBuilder::default()
++                .codex_home(home.path().to_path_buf())
++                .loader_overrides(loader.clone())
++                .harness_overrides(ConfigOverrides {
++                    cwd: Some(home.path().to_path_buf()),
++                    ..ConfigOverrides::default()
++                })
++                .cloud_config_bundle(CloudConfigBundleLoader::default())
++                .thread_config_loader(Arc::new(codex_config::NoopThreadConfigLoader))
++                .build()
++                .await?;
++            config.codex_self_exe = Some(home.path().join("owned-host"));
++            config.codex_linux_sandbox_exe = Some(home.path().join("owned-sandbox"));
++            config.main_execve_wrapper_exe = Some(home.path().join("owned-wrapper"));
++            let mut paths = Arg0DispatchPaths::default();
++            paths.codex_self_exe = config.codex_self_exe.clone();
++            paths.codex_linux_sandbox_exe = config.codex_linux_sandbox_exe.clone();
++            paths.main_execve_wrapper_exe = config.main_execve_wrapper_exe.clone();
++            Ok(Self {
++                home,
++                loader,
++                config: Arc::new(config),
++                paths,
++            })
++        }
++
++        fn frozen(&self) -> std::io::Result<ConfigManager> {
++            ConfigManager::new_frozen(Arc::clone(&self.config), self.paths.clone())
++        }
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_snapshot_survives_file_changes() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        std::fs::write(fixture.home.path().join("config.toml"), "invalid = [\n")?;
++        std::fs::write(fixture.home.path().join("requirements.toml"), "invalid = [\n")?;
++        std::fs::write(fixture.home.path().join("models.json"), "not JSON")?;
++        assert!(!fixture.config.model_catalog.as_ref().unwrap().models.is_empty());
++        assert_eq!(manager.load_latest_config(None).await?, *fixture.config);
++        assert_eq!(manager.load_non_project_config().await?, *fixture.config);
++        assert_eq!(manager.load_default_config().await?, *fixture.config);
++        assert_eq!(
++            manager
++                .load_with_overrides(None, ConfigOverrides::default())
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager
++                .load_with_cli_overrides(&[], None, ConfigOverrides::default(), None)
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager
++                .load_for_cwd(
++                    None,
++                    ConfigOverrides::default(),
++                    Some(fixture.config.cwd.to_path_buf()),
++                )
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager
++                .load_latest_config_for_thread(fixture.config.as_ref())
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager.load_config_layers(None).await?,
++            fixture.config.config_layer_stack
++        );
++        assert!(!manager.frozen_violation_guard().unwrap().is_violated());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_requirements_are_preserved() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let expected = fixture.config.config_layer_stack.requirements_toml().clone();
++        assert_eq!(expected.allowed_approval_policies, Some(vec![AskForApproval::Never]));
++        let manager = fixture.frozen()?;
++        std::fs::write(
++            fixture.home.path().join("requirements.toml"),
++            "allowed_approval_policies = [\"untrusted\"]\n",
++        )?;
++        assert_eq!(
++            manager.load_config_layers(None).await?.requirements_toml(),
++            &expected
++        );
++        assert_eq!(manager.read_requirements().await.unwrap(), Some(expected));
++        assert_eq!(manager.load_default_config().await?, *fixture.config);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_normal_config_reload_is_unchanged() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = ConfigManager::new_for_tests(
++            fixture.home.path().to_path_buf(),
++            Vec::new(),
++            fixture.loader.clone(),
++            CloudConfigBundleLoader::default(),
++        );
++        assert!(manager.frozen_violation_guard().is_none());
++        let first = manager
++            .load_latest_config(Some(fixture.config.cwd.to_path_buf()))
++            .await?;
++        assert_eq!(first.model.as_deref(), Some("gpt-5.5"));
++        std::fs::write(
++            fixture.home.path().join("config.toml"),
++            "model = \"changed-model\"\napproval_policy = \"never\"\n",
++        )?;
++        let second = manager
++            .load_latest_config(Some(fixture.config.cwd.to_path_buf()))
++            .await?;
++        assert_eq!(second.model.as_deref(), Some("changed-model"));
++        assert_ne!(first.config_layer_stack, second.config_layer_stack);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_overrides_are_exhaustive() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let path = fixture.home.path().join("foreign");
++        let absolute = AbsolutePathBuf::from_absolute_path(path.clone())?;
++        macro_rules! change {
++            ($name:literal, $field:ident, $value:expr) => {
++                ($name, ConfigOverrides {
++                    $field: $value,
++                    ..ConfigOverrides::default()
++                })
++            };
++        }
++        let cases = vec![
++            change!("model", model, Some("foreign".to_string())),
++            change!("review_model", review_model, Some("foreign".to_string())),
++            change!("cwd", cwd, Some(fixture.config.cwd.to_path_buf())),
++            change!("approval_policy", approval_policy, Some(AskForApproval::Never)),
++            change!("approvals_reviewer", approvals_reviewer, Some(codex_config::types::ApprovalsReviewer::User)),
++            change!("sandbox_mode", sandbox_mode, Some(SandboxMode::ReadOnly)),
++            change!("permission_profile", permission_profile, Some(PermissionProfile::Disabled)),
++            change!("default_permissions", default_permissions, Some("foreign".to_string())),
++            change!("persisted_permission_profile_id", persisted_permission_profile_id, Some("foreign".to_string())),
++            change!("model_provider", model_provider, Some("openai".to_string())),
++            change!("service_tier_nested_null", service_tier, Some(None)),
++            change!("service_tier_value", service_tier, Some(Some("default".to_string()))),
++            change!("codex_self_exe", codex_self_exe, fixture.config.codex_self_exe.clone()),
++            change!("codex_linux_sandbox_exe", codex_linux_sandbox_exe, Some(path.clone())),
++            change!("main_execve_wrapper_exe", main_execve_wrapper_exe, Some(path.clone())),
++            change!("default_zsh_path", default_zsh_path, Some(absolute.clone())),
++            change!("base_instructions", base_instructions, Some(String::new())),
++            change!("developer_instructions", developer_instructions, Some(String::new())),
++            change!("personality", personality, Some(Personality::None)),
++            change!("compact_prompt", compact_prompt, Some(String::new())),
++            change!("show_raw_agent_reasoning", show_raw_agent_reasoning, Some(false)),
++            change!("tools_web_search_request", tools_web_search_request, Some(false)),
++            change!("ephemeral", ephemeral, Some(false)),
++            change!("bypass_hook_trust", bypass_hook_trust, Some(false)),
++            change!("additional_writable_roots", additional_writable_roots, vec![path]),
++            change!("workspace_roots_empty", workspace_roots, Some(Vec::new())),
++            change!("workspace_roots", workspace_roots, Some(vec![absolute])),
++        ];
++        for (name, overrides) in cases {
++            let manager = fixture.frozen()?;
++            assert!(
++                manager.load_with_overrides(None, overrides).await.is_err(),
++                "frozen manager accepted semantic override {name}"
++            );
++            assert!(manager.frozen_violation_guard().unwrap().is_violated(), "{name}");
++            assert!(manager.load_latest_config(None).await.is_err(), "{name}");
++        }
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_only_exact_synthesized_paths_are_allowed() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        let overrides = ConfigOverrides {
++            codex_linux_sandbox_exe: fixture.config.codex_linux_sandbox_exe.clone(),
++            main_execve_wrapper_exe: fixture.config.main_execve_wrapper_exe.clone(),
++            ..ConfigOverrides::default()
++        };
++        assert_eq!(manager.load_with_overrides(None, overrides).await?, *fixture.config);
++        assert!(!manager.frozen_violation_guard().unwrap().is_violated());
++        let mut foreign = fixture.paths.clone();
++        foreign.codex_self_exe = Some(fixture.home.path().join("foreign-host"));
++        assert!(ConfigManager::new_frozen(Arc::clone(&fixture.config), foreign).is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_other_loader_inputs_are_rejected() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .load_with_overrides(Some(HashMap::new()), ConfigOverrides::default())
++            .await
++            .is_err());
++        let manager = fixture.frozen()?;
++        let cli = vec![("model".to_string(), TomlValue::String("foreign".to_string()))];
++        assert!(manager
++            .load_with_cli_overrides(&cli, None, ConfigOverrides::default(), None)
++            .await
++            .is_err());
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .load_latest_config(Some(fixture.home.path().join("foreign")))
++            .await
++            .is_err());
++        let manager = fixture.frozen()?;
++        let mut foreign_thread = fixture.config.as_ref().clone();
++        foreign_thread.model = Some("foreign".to_string());
++        assert!(manager.load_latest_config_for_thread(&foreign_thread).await.is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_mutation_is_terminal() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        let clone = manager.clone();
++        assert!(manager
++            .extend_runtime_feature_enablement([("code_mode".to_string(), false)])
++            .is_err());
++        assert!(clone.frozen_violation_guard().unwrap().is_violated());
++        assert!(clone.load_latest_config(None).await.is_err());
++        let manager = fixture.frozen()?;
++        manager.clear_cloud_config_bundle_loader();
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        assert!(manager.load_default_config().await.is_err());
++        let manager = fixture.frozen()?;
++        manager.sync_default_client_residency_requirement().await;
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        assert!(manager.load_latest_config(None).await.is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_persistence_rejects_before_disk_effects() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let path = fixture.home.path().join("config.toml");
++        let original = std::fs::read(&path)?;
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .write_value(ConfigValueWriteParams {
++                key_path: "model".to_string(),
++                value: serde_json::json!("foreign"),
++                merge_strategy: MergeStrategy::Replace,
++                file_path: None,
++                expected_version: None,
++            })
++            .await
++            .is_err());
++        assert_eq!(std::fs::read(&path)?, original);
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .batch_write(ConfigBatchWriteParams {
++                edits: vec![ConfigEdit {
++                    key_path: "model".to_string(),
++                    value: serde_json::json!("foreign"),
++                    merge_strategy: MergeStrategy::Replace,
++                }],
++                file_path: None,
++                expected_version: None,
++                reload_user_config: true,
++            })
++            .await
++            .is_err());
++        assert_eq!(std::fs::read(&path)?, original);
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        Ok(())
++    }
++}
+diff --git a/codex-rs/app-server/src/config_manager_service.rs b/codex-rs/app-server/src/config_manager_service.rs
+--- a/codex-rs/app-server/src/config_manager_service.rs
++++ b/codex-rs/app-server/src/config_manager_service.rs
+@@ -1,3 +1,4 @@
++// Modified by Ouro: refuse frozen persistence before resolving or writing a file.
+ use crate::config_layer::config_layer_metadata_to_api;
+ use crate::config_layer::config_layer_to_api;
+ use crate::config_manager::ConfigManager;
+@@ -219,6 +220,8 @@
+         expected_version: Option<String>,
+         edits: Vec<(String, JsonValue, MergeStrategy)>,
+     ) -> Result<ConfigWriteResponse, ConfigManagerError> {
++        self.ensure_config_mutable("configuration persistence")
++            .map_err(|err| ConfigManagerError::io("frozen configuration persistence refused", err))?;
+         let allowed_path = self
+             .user_config_path()
+             .map_err(|err| ConfigManagerError::io("failed to resolve user config path", err))?;
+diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
+--- a/codex-rs/app-server/src/in_process.rs
++++ b/codex-rs/app-server/src/in_process.rs
+@@ -123,6 +123,48 @@
+                 ..
+             })
+     )
++}
++
++// Modified by Ouro: preserve ordinary forwarding through a channel-only test seam.
++enum InProcessNotificationMode {
++    Ordinary,
++    Frozen,
++}
++
++#[derive(Debug, PartialEq, Eq)]
++enum InProcessNotificationDelivery {
++    Forwarded,
++    Dropped,
++    Closed,
++}
++
++async fn forward_in_process_notification(
++    mode: InProcessNotificationMode,
++    event_tx: &mpsc::Sender<InProcessServerEvent>,
++    notification: ServerNotification,
++) -> InProcessNotificationDelivery {
++    if matches!(mode, InProcessNotificationMode::Frozen)
++        || server_notification_requires_delivery(&notification)
++    {
++        if event_tx
++            .send(InProcessServerEvent::ServerNotification(Box::new(notification)))
++            .await
++            .is_err()
++        {
++            InProcessNotificationDelivery::Closed
++        } else {
++            InProcessNotificationDelivery::Forwarded
++        }
++    } else {
++        match event_tx.try_send(InProcessServerEvent::ServerNotification(Box::new(notification))) {
++            Ok(()) => InProcessNotificationDelivery::Forwarded,
++            Err(mpsc::error::TrySendError::Full(_)) => {
++                warn!("dropping in-process server notification (queue full)");
++                InProcessNotificationDelivery::Dropped
++            }
++            Err(mpsc::error::TrySendError::Closed(_)) => InProcessNotificationDelivery::Closed,
++        }
++    }
+ }
+ 
+ /// Input needed to start an in-process app-server runtime.
+@@ -710,30 +752,14 @@
+                         }
+                         OutgoingMessage::AppServerNotification(envelope) => {
+                             let notification = envelope.notification;
+-                            if server_notification_requires_delivery(&notification) {
+-                                if event_tx
+-                                    .send(InProcessServerEvent::ServerNotification(Box::new(
+-                                        notification,
+-                                    )))
+-                                    .await
+-                                    .is_err()
+-                                {
+-                                    break;
+-                                }
+-                            } else if let Err(send_error) =
+-                                event_tx.try_send(InProcessServerEvent::ServerNotification(
+-                                    Box::new(notification),
+-                                ))
+-                            {
+-                                match send_error {
+-                                    mpsc::error::TrySendError::Full(_) => {
+-                                        warn!("dropping in-process server notification (queue full)");
+-                                        continue;
+-                                    }
+-                                    mpsc::error::TrySendError::Closed(_) => {
+-                                        break;
+-                                    }
+-                                }
++                            match forward_in_process_notification(
++                                InProcessNotificationMode::Ordinary,
++                                &event_tx,
++                                notification,
++                            ).await {
++                                InProcessNotificationDelivery::Forwarded => {}
++                                InProcessNotificationDelivery::Dropped => continue,
++                                InProcessNotificationDelivery::Closed => break,
+                             }
+                         }
+                     }
+@@ -1040,3 +1066,178 @@
+         ));
+     }
+ }
++
++// Modified by Ouro: controlled channel-only forwarding probes; no backend startup.
++#[cfg(test)]
++mod cmux_forward_contract {
++    use super::*;
++    use codex_app_server_protocol::ThreadNameUpdatedNotification;
++    use codex_app_server_protocol::ThreadQueueChangedNotification;
++    use std::future::Future;
++    use std::task::Poll;
++
++    fn ordinary(label: &str) -> ServerNotification {
++        ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
++            thread_id: "owned-thread".to_string(),
++            thread_name: Some(label.to_string()),
++        })
++    }
++
++    fn label(event: InProcessServerEvent) -> String {
++        match event {
++            InProcessServerEvent::ServerNotification(notification) => match *notification {
++                ServerNotification::ThreadNameUpdated(update) => update.thread_name.unwrap(),
++                _ => panic!("expected exact ordinary notification"),
++            },
++            _ => panic!("expected exact server notification"),
++        }
++    }
++
++    async fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
++        let mut future = future;
++        std::future::poll_fn(|context| Poll::Ready(future.as_mut().poll(context))).await
++    }
++
++    #[tokio::test]
++    async fn cmux_normal_event_forwarding_compatibility() {
++        timeout(Duration::from_secs(2), async {
++            let (sender, mut receiver) = mpsc::channel(1);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("empty"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            assert_eq!(label(receiver.recv().await.unwrap()), "empty");
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("first"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("dropped"),
++                )
++                .await,
++                InProcessNotificationDelivery::Dropped
++            );
++            assert_eq!(label(receiver.recv().await.unwrap()), "first");
++            assert!(matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
++
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("before-required"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            let required = ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
++                thread_id: "owned-thread".to_string(),
++            });
++            let mut pending = Box::pin(forward_in_process_notification(
++                InProcessNotificationMode::Ordinary,
++                &sender,
++                required,
++            ));
++            assert!(poll_once(pending.as_mut()).await.is_pending());
++            assert_eq!(label(receiver.recv().await.unwrap()), "before-required");
++            assert_eq!(pending.await, InProcessNotificationDelivery::Forwarded);
++            assert!(matches!(
++                receiver.recv().await.unwrap(),
++                InProcessServerEvent::ServerNotification(notification)
++                    if matches!(*notification, ServerNotification::ThreadQueueChanged(_))
++            ));
++            drop(receiver);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("closed"),
++                )
++                .await,
++                InProcessNotificationDelivery::Closed
++            );
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
++                        thread_id: "owned-thread".to_string(),
++                    }),
++                )
++                .await,
++                InProcessNotificationDelivery::Closed
++            );
++        })
++        .await
++        .expect("ordinary forwarding compatibility fixture exceeded its bound");
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_delivery_applies_backpressure() {
++        timeout(Duration::from_secs(2), async {
++            let (sender, mut receiver) = mpsc::channel(1);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Frozen,
++                    &sender,
++                    ordinary("first"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            let mut pending = Box::pin(forward_in_process_notification(
++                InProcessNotificationMode::Frozen,
++                &sender,
++                ordinary("second"),
++            ));
++            let observed = poll_once(pending.as_mut()).await;
++            assert!(
++                observed.is_pending(),
++                "CMUX_FROZEN_FORWARDING_BACKPRESSURE_REQUIRED: actual forwarding returned {observed:?} while capacity1 was full"
++            );
++            assert_eq!(label(receiver.recv().await.unwrap()), "first");
++            assert_eq!(pending.await, InProcessNotificationDelivery::Forwarded);
++            assert_eq!(label(receiver.recv().await.unwrap()), "second");
++        })
++        .await
++        .expect("forwarding backpressure fixture exceeded its bound");
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_delivery_reports_closed_consumer() {
++        timeout(Duration::from_secs(2), async {
++            let (sender, receiver) = mpsc::channel(1);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Frozen,
++                    &sender,
++                    ordinary("first"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            let mut pending = Box::pin(forward_in_process_notification(
++                InProcessNotificationMode::Frozen,
++                &sender,
++                ordinary("unconsumed"),
++            ));
++            assert!(poll_once(pending.as_mut()).await.is_pending());
++            drop(receiver);
++            assert_eq!(pending.await, InProcessNotificationDelivery::Closed);
++        })
++        .await
++        .expect("closed-consumer forwarding fixture exceeded its bound");
++    }
++}
