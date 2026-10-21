@@ -515,6 +515,39 @@ class ManagedCodexBuildTests(unittest.TestCase):
         self.assertEqual((source.root / name).read_bytes(), self.files[name])
         self.assertFalse((self.root / "stage").exists())
 
+    def test_checked_control_patch_path_is_validated_without_widening_neighbors(self):
+        source = self.root / "checked-control-source"
+        name = "codex-rs/app-server/src/outgoing_message.rs"
+        target = source / name
+        target.parent.mkdir(parents=True)
+        original = b"pub fn ordinary() {}\n"
+        target.write_bytes(original)
+        integration = self.root / "checked-control.patch"
+        integration.write_text(
+            f"diff --git a/{name} b/{name}\n"
+            f"--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n"
+            "-pub fn ordinary() {}\n+pub fn checked() {}\n"
+        )
+        self.assertEqual(BUILD._patch_paths(source, integration), {name})
+        self.assertEqual(target.read_bytes(), original)
+        neighbor = "codex-rs/app-server/src/outgoing_message_extra.rs"
+        (source / neighbor).write_bytes(original)
+        rejected = self.root / "neighbor.patch"
+        rejected.write_text(integration.read_text().replace(name, neighbor))
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._patch_paths(source, rejected)
+        self.assertEqual((source / neighbor).read_bytes(), original)
+
+    def test_sdk_patch_allowlist_is_exactly_the_six_reviewed_sources(self):
+        self.assertEqual(BUILD.PATCH_PATHS, frozenset({
+            "codex-rs/app-server/src/config_manager.rs",
+            "codex-rs/app-server/src/config_manager_service.rs",
+            "codex-rs/app-server/src/in_process.rs",
+            "codex-rs/app-server/src/outgoing_message.rs",
+            "codex-rs/core/src/tools/mod.rs",
+            "codex-rs/core/src/lib.rs",
+        }))
+
     def test_full_owned_helper_suite_is_allowed_but_upstream_suites_stay_bounded(self):
         accepted = None
         try:

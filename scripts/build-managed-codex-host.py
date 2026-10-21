@@ -34,6 +34,7 @@ PATCH_PATHS = frozenset({
     "codex-rs/app-server/src/config_manager.rs",
     "codex-rs/app-server/src/config_manager_service.rs",
     "codex-rs/app-server/src/in_process.rs",
+    "codex-rs/app-server/src/outgoing_message.rs",
     "codex-rs/core/src/tools/mod.rs",
     "codex-rs/core/src/lib.rs",
 })
