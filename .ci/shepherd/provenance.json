@@ -1,0 +1,21 @@
+{
+  "upstream": "openai/codex",
+  "commit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+  "tree": "74ba48a4b6b086beb9226a79ffe0f3d9f6d40f52",
+  "licenses": {
+    "LICENSE": {
+      "gitBlob": "4606e72e042564097e8780d66c1d4dcb611869bd",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+    },
+    "NOTICE": {
+      "gitBlob": "2805899d56d0332d175cfc613c67d45d6f006db7",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+    }
+  },
+  "modifiedFiles": {
+    "codex-rs/app-server/src/config_manager.rs": "8eeb880e38dc88d6946b330e3481e40b50b7173ada2139e8dc310e20c9e477a4",
+    "codex-rs/app-server/src/in_process.rs": "7abb2569238e738caff88235a6f884a1f2b60a8dd7074c56dbb2e2fc2ee0d1b5"
+  },
+  "modifications": "Ouro adds pure source-only frozen API existence tests; no SDK behavior change or backend startup. This first test patch is intentionally expected to fail compilation on missing APIs; it is not the final integration patch.",
+  "qualification": false
+}
