@@ -156,6 +156,53 @@ class ManagedCodexBuildTests(unittest.TestCase):
             destination = self.root / f"source-release-{len(list(self.root.iterdir()))}"
             yield BUILD.acquire_sdk(destination)
 
+    def sha2_member_fixture(self):
+        manifest = (
+            '[workspace]\nmembers = []\n[workspace.dependencies]\nsha2 = "0.10"\n'
+        ).encode()
+        lock = (
+            'version = 4\n\n[[package]]\nname = "sha2"\nversion = "0.10.9"\n'
+            'source = "registry+fixture"\nchecksum = "sha2-0109"\n\n'
+            '[[package]]\nname = "sha2"\nversion = "0.11.0"\n'
+            'source = "registry+fixture"\nchecksum = "sha2-0110"\n'
+        ).encode()
+        member = {
+            "package": {"version": "0.1.0"},
+            "dependencies": {"sha2": {"workspace": True}},
+        }
+        return manifest, lock, member
+
+    def test_sha2_member_qualifies_only_existing_workspace_0109_edge(self):
+        manifest, lock, member = self.sha2_member_fixture()
+        actual_manifest, actual_lock = BUILD._workspace_member(manifest, lock, member)
+        before, after = tomllib.loads(lock.decode()), tomllib.loads(actual_lock.decode())
+        self.assertEqual(after["package"][:-1], before["package"])
+        self.assertEqual(after["package"][-1], {
+            "name": BUILD.MEMBER, "version": "0.1.0", "dependencies": ["sha2 0.10.9"],
+        })
+        expected = tomllib.loads(manifest.decode())
+        expected["workspace"]["members"] = [BUILD.MEMBER]
+        self.assertEqual(tomllib.loads(actual_manifest.decode()), expected)
+
+    def test_sha2_member_refuses_other_workspace_range(self):
+        manifest, lock, member = self.sha2_member_fixture()
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._workspace_member(manifest.replace(b'"0.10"', b'"0.11"'), lock, member)
+
+    def test_sha2_member_refuses_unreviewed_locked_version_pair(self):
+        manifest, lock, member = self.sha2_member_fixture()
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._workspace_member(manifest, lock.replace(b'"0.10.9"', b'"0.10.10"'), member)
+
+    def test_sha2_member_refuses_extra_source_ambiguity(self):
+        manifest, lock, member = self.sha2_member_fixture()
+        extra = (
+            b'\n[[package]]\nname = "sha2"\nversion = "0.10.9"\n'
+            b'source = "registry+foreign"\nchecksum = "foreign"\n'
+        )
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._workspace_member(manifest, lock + extra, member)
+
     def test_release_lock_projection_preserves_source_external_graph_and_other_bytes(self):
         with self.release_source() as source:
             original = (source.root / "codex-rs/Cargo.lock").read_bytes()

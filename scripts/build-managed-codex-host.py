@@ -474,6 +474,11 @@ def _workspace_member(manifest_bytes, lock_bytes, member):
         value = workspace_dependencies[name]
         package = value.get("package", name) if isinstance(value, dict) else name
         matches = [item for item in lock["package"] if item["name"] == package]
+        if (package == "sha2" and value == "0.10" and len(matches) == 2
+                and sorted(item["version"] for item in matches) == ["0.10.9", "0.11.0"]):
+            # Qualify only our new edge for this exact pinned workspace ambiguity.
+            dependencies.add("sha2 0.10.9")
+            continue
         if len(matches) != 1:
             raise BuildError(f"Ambiguous or missing upstream lock dependency: {package}")
         dependencies.add(package)
