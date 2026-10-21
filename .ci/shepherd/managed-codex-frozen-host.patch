@@ -1,0 +1,1772 @@
+diff --git a/codex-rs/app-server/src/config_manager.rs b/codex-rs/app-server/src/config_manager.rs
+--- a/codex-rs/app-server/src/config_manager.rs
++++ b/codex-rs/app-server/src/config_manager.rs
+@@ -21,9 +21,99 @@
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::sync::RwLock;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ use toml::Value as TomlValue;
+ use tracing::instrument;
+ use tracing::warn;
++
++/// Read-only terminal state shared by the owned frozen configuration generation.
++#[derive(Clone)]
++pub struct FrozenConfigViolation {
++    violated: Arc<AtomicBool>,
++    changed: tokio::sync::watch::Sender<bool>,
++}
++
++impl FrozenConfigViolation {
++    #[cfg(test)]
++    pub(crate) fn new_for_tests() -> Self {
++        Self::new()
++    }
++
++    fn new() -> Self {
++        let (changed, _) = tokio::sync::watch::channel(false);
++        Self {
++            violated: Arc::new(AtomicBool::new(false)),
++            changed,
++        }
++    }
++
++    pub fn is_violated(&self) -> bool {
++        self.violated.load(Ordering::Acquire)
++    }
++
++    pub(crate) async fn wait_for_violation(&self) {
++        let mut changes = self.changed.subscribe();
++        loop {
++            if self.is_violated() || *changes.borrow_and_update() {
++                return;
++            }
++            if changes.changed().await.is_err() {
++                let _ = self.violate("terminal notification channel closed");
++                return;
++            }
++        }
++    }
++
++    pub(crate) async fn until_violation<T>(
++        &self,
++        operation: &'static str,
++        future: impl std::future::Future<Output = std::io::Result<T>>,
++    ) -> std::io::Result<T> {
++        self.check()?;
++        tokio::select! {
++            biased;
++            _ = self.wait_for_violation() => Err(self.violate(operation)),
++            result = future => {
++                self.check()?;
++                match result {
++                    Ok(value) => Ok(value),
++                    Err(error) => {
++                        let _ = self.violate(operation);
++                        Err(error)
++                    }
++                }
++            }
++        }
++    }
++
++    pub(crate) fn check(&self) -> std::io::Result<()> {
++        if self.is_violated() {
++            Err(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                "frozen configuration generation has a terminal violation",
++            ))
++        } else {
++            Ok(())
++        }
++    }
++
++    pub(crate) fn violate(&self, operation: &'static str) -> std::io::Error {
++        if !self.violated.swap(true, Ordering::AcqRel) {
++            warn!(operation, "frozen configuration operation refused; generation held");
++        }
++        self.changed.send_replace(true);
++        std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            "frozen configuration operation refused; generation held",
++        )
++    }
++}
++
++struct FrozenConfigState {
++    config: Arc<Config>,
++    violation: FrozenConfigViolation,
++}
+ 
+ /// Shared app-server entry point for loading effective Codex configuration.
+ #[derive(Clone)]
+@@ -36,6 +126,7 @@
+     cloud_config_bundle: Arc<RwLock<CloudConfigBundleLoader>>,
+     arg0_paths: Arg0DispatchPaths,
+     thread_config_loader: Arc<dyn ThreadConfigLoader>,
++    frozen: Option<Arc<FrozenConfigState>>,
+ }
+ 
+ impl ConfigManager {
+@@ -57,6 +148,48 @@
+             cloud_config_bundle: Arc::new(RwLock::new(cloud_config_bundle)),
+             arg0_paths,
+             thread_config_loader,
++            frozen: None,
++        }
++    }
++
++    pub(crate) fn new_frozen(
++        config: Arc<Config>,
++        arg0_paths: Arg0DispatchPaths,
++    ) -> std::io::Result<Self> {
++        if config.codex_self_exe.as_ref() != arg0_paths.codex_self_exe.as_ref()
++            || config.codex_linux_sandbox_exe.as_ref() != arg0_paths.codex_linux_sandbox_exe.as_ref()
++            || config.main_execve_wrapper_exe.as_ref() != arg0_paths.main_execve_wrapper_exe.as_ref()
++        {
++            warn!("frozen configuration runtime-path binding refused");
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidInput,
++                "frozen configuration and owned runtime paths differ",
++            ));
++        }
++        let mut manager = Self::new(
++            config.codex_home.to_path_buf(),
++            Vec::new(),
++            LoaderOverrides::default(),
++            false,
++            CloudConfigBundleLoader::default(),
++            arg0_paths,
++            Arc::new(codex_config::NoopThreadConfigLoader),
++        );
++        manager.frozen = Some(Arc::new(FrozenConfigState {
++            config,
++            violation: FrozenConfigViolation::new(),
++        }));
++        Ok(manager)
++    }
++
++    pub(crate) fn frozen_violation_guard(&self) -> Option<FrozenConfigViolation> {
++        self.frozen.as_ref().map(|state| state.violation.clone())
++    }
++
++    pub(crate) fn ensure_config_mutable(&self, operation: &'static str) -> std::io::Result<()> {
++        match self.frozen.as_ref() {
++            Some(state) => Err(state.violation.violate(operation)),
++            None => Ok(()),
+         }
+     }
+ 
+@@ -86,6 +219,7 @@
+     where
+         I: IntoIterator<Item = (String, bool)>,
+     {
++        self.ensure_config_mutable("runtime feature mutation").map_err(|_| ())?;
+         let mut runtime_feature_enablement =
+             self.runtime_feature_enablement.write().map_err(|_| ())?;
+         runtime_feature_enablement.extend(enablement);
+@@ -98,6 +232,9 @@
+         chatgpt_base_url: String,
+         http_client_factory: codex_http_client::HttpClientFactory,
+     ) {
++        if self.ensure_config_mutable("cloud loader replacement").is_err() {
++            return;
++        }
+         let loader = cloud_config_bundle_loader(
+             auth_manager,
+             chatgpt_base_url,
+@@ -112,6 +249,9 @@
+     }
+ 
+     pub(crate) fn clear_cloud_config_bundle_loader(&self) {
++        if self.ensure_config_mutable("cloud loader clearing").is_err() {
++            return;
++        }
+         if let Ok(mut guard) = self.cloud_config_bundle.write() {
+             *guard = CloudConfigBundleLoader::default();
+         } else {
+@@ -120,6 +260,9 @@
+     }
+ 
+     pub(crate) async fn sync_default_client_residency_requirement(&self) {
++        if self.ensure_config_mutable("default client residency mutation").is_err() {
++            return;
++        }
+         match self.load_latest_config(/*fallback_cwd*/ None).await {
+             Ok(config) => {
+                 set_default_client_residency_requirement(config.enforce_residency.value());
+@@ -147,6 +290,9 @@
+     /// Loads system, user, and runtime settings without discovering a project
+     /// from the app-server process's working directory.
+     pub(crate) async fn load_non_project_config(&self) -> std::io::Result<Config> {
++        if self.frozen.is_some() {
++            return self.load_latest_config(None).await;
++        }
+         let mut manager = self.clone();
+         manager.loader_overrides.ignore_project_config = true;
+         manager.load_latest_config(/*fallback_cwd*/ None).await
+@@ -156,6 +302,13 @@
+         &self,
+         thread_config: &Config,
+     ) -> std::io::Result<Config> {
++        if let Some(state) = self.frozen.as_ref() {
++            state.violation.check()?;
++            if thread_config != state.config.as_ref() {
++                return Err(state.violation.violate("foreign thread configuration refresh"));
++            }
++            return Ok(state.config.as_ref().clone());
++        }
+         let refreshed_config = self
+             .load_latest_config(Some(thread_config.cwd.to_path_buf()))
+             .await?;
+@@ -168,6 +321,9 @@
+     }
+ 
+     pub(crate) async fn load_default_config(&self) -> std::io::Result<Config> {
++        if self.frozen.is_some() {
++            return self.load_latest_config(None).await;
++        }
+         let mut loader_overrides = self.loader_overrides.clone();
+         loader_overrides.ignore_user_config = true;
+         let mut config = ConfigBuilder::default()
+@@ -220,6 +376,17 @@
+         mut typesafe_overrides: ConfigOverrides,
+         fallback_cwd: Option<PathBuf>,
+     ) -> std::io::Result<Config> {
++        if let Some(state) = self.frozen.as_ref() {
++            state.violation.check()?;
++            if !cli_overrides.is_empty()
++                || request_overrides.is_some()
++                || !Self::frozen_overrides_match(&state.config, &typesafe_overrides)
++                || fallback_cwd.as_ref().is_some_and(|cwd| *cwd != state.config.cwd.to_path_buf())
++            {
++                return Err(state.violation.violate("configuration override or foreign cwd"));
++            }
++            return Ok(state.config.as_ref().clone());
++        }
+         let mut request_overrides = request_overrides.unwrap_or_default();
+         if let Some(value) = request_overrides.remove("bypass_hook_trust") {
+             typesafe_overrides.bypass_hook_trust = Some(value.as_bool().ok_or_else(|| {
+@@ -265,6 +432,13 @@
+         &self,
+         cwd: Option<AbsolutePathBuf>,
+     ) -> std::io::Result<ConfigLayerStack> {
++        if let Some(state) = self.frozen.as_ref() {
++            state.violation.check()?;
++            if cwd.as_ref().is_some_and(|cwd| cwd != &state.config.cwd) {
++                return Err(state.violation.violate("foreign configuration-layer cwd"));
++            }
++            return Ok(state.config.config_layer_stack.clone());
++        }
+         load_config_layers_state(
+             LOCAL_FS.as_ref(),
+             &self.codex_home,
+@@ -278,6 +452,63 @@
+             self.thread_config_loader.as_ref(),
+         )
+         .await
++    }
++
++    fn frozen_overrides_match(config: &Config, overrides: &ConfigOverrides) -> bool {
++        let ConfigOverrides {
++            model,
++            review_model,
++            cwd,
++            approval_policy,
++            approvals_reviewer,
++            sandbox_mode,
++            permission_profile,
++            default_permissions,
++            persisted_permission_profile_id,
++            model_provider,
++            service_tier,
++            codex_self_exe,
++            codex_linux_sandbox_exe,
++            main_execve_wrapper_exe,
++            default_zsh_path,
++            base_instructions,
++            developer_instructions,
++            personality,
++            compact_prompt,
++            show_raw_agent_reasoning,
++            tools_web_search_request,
++            ephemeral,
++            bypass_hook_trust,
++            additional_writable_roots,
++            workspace_roots,
++        } = overrides;
++        model.is_none()
++            && review_model.is_none()
++            && cwd.is_none()
++            && approval_policy.is_none()
++            && approvals_reviewer.is_none()
++            && sandbox_mode.is_none()
++            && permission_profile.is_none()
++            && default_permissions.is_none()
++            && persisted_permission_profile_id.is_none()
++            && model_provider.is_none()
++            && service_tier.is_none()
++            && codex_self_exe.is_none()
++            && (codex_linux_sandbox_exe.is_none()
++                || codex_linux_sandbox_exe == &config.codex_linux_sandbox_exe)
++            && (main_execve_wrapper_exe.is_none()
++                || main_execve_wrapper_exe == &config.main_execve_wrapper_exe)
++            && default_zsh_path.is_none()
++            && base_instructions.is_none()
++            && developer_instructions.is_none()
++            && personality.is_none()
++            && compact_prompt.is_none()
++            && show_raw_agent_reasoning.is_none()
++            && tools_web_search_request.is_none()
++            && ephemeral.is_none()
++            && bypass_hook_trust.is_none()
++            && additional_writable_roots.is_empty()
++            && workspace_roots.is_none()
+     }
+ 
+     fn apply_runtime_feature_enablement(&self, config: &mut Config) {
+@@ -366,3 +597,414 @@
+         }
+     }
+ }
++
++// Modified by Ouro: select only our account-free SDK component tests.
++#[cfg(test)]
++mod cmux_sdk_contract {
++    use super::*;
++// Modified by Ouro: derived-config snapshot tests, without account or server startup.
++#[cfg(test)]
++mod cmux_config_contract {
++    use super::*;
++    use codex_app_server_protocol::ConfigBatchWriteParams;
++    use codex_app_server_protocol::ConfigEdit;
++    use codex_app_server_protocol::ConfigValueWriteParams;
++    use codex_app_server_protocol::MergeStrategy;
++    use codex_protocol::config_types::Personality;
++    use codex_protocol::config_types::SandboxMode;
++    use codex_protocol::models::PermissionProfile;
++    use codex_protocol::protocol::AskForApproval;
++    use tempfile::TempDir;
++
++    struct Fixture {
++        home: TempDir,
++        loader: LoaderOverrides,
++        config: Arc<Config>,
++        paths: Arg0DispatchPaths,
++    }
++
++    impl Fixture {
++        async fn new() -> std::io::Result<Self> {
++            let home = TempDir::new()?;
++            let catalog = home.path().join("models.json");
++            std::fs::write(
++                &catalog,
++                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../models-manager/models.json")),
++            )?;
++            std::fs::write(
++                home.path().join("config.toml"),
++                format!(
++                    "model = \"gpt-5.5\"\napproval_policy = \"never\"\nmodel_catalog_json = {catalog:?}\n"
++                ),
++            )?;
++            std::fs::write(
++                home.path().join("requirements.toml"),
++                "allowed_approval_policies = [\"never\"]\n",
++            )?;
++            let loader = LoaderOverrides {
++                managed_config_path: Some(home.path().join("managed.toml")),
++                system_config_path: Some(home.path().join("system.toml")),
++                system_requirements_path: Some(home.path().join("requirements.toml")),
++                ignore_project_config: true,
++                ..LoaderOverrides::without_managed_config_for_tests()
++            };
++            let mut config = ConfigBuilder::default()
++                .codex_home(home.path().to_path_buf())
++                .loader_overrides(loader.clone())
++                .harness_overrides(ConfigOverrides {
++                    cwd: Some(home.path().to_path_buf()),
++                    ..ConfigOverrides::default()
++                })
++                .cloud_config_bundle(CloudConfigBundleLoader::default())
++                .thread_config_loader(Arc::new(codex_config::NoopThreadConfigLoader))
++                .build()
++                .await?;
++            config.codex_self_exe = Some(home.path().join("owned-host"));
++            config.codex_linux_sandbox_exe = Some(home.path().join("owned-sandbox"));
++            config.main_execve_wrapper_exe = Some(home.path().join("owned-wrapper"));
++            let mut paths = Arg0DispatchPaths::default();
++            paths.codex_self_exe = config.codex_self_exe.clone();
++            paths.codex_linux_sandbox_exe = config.codex_linux_sandbox_exe.clone();
++            paths.main_execve_wrapper_exe = config.main_execve_wrapper_exe.clone();
++            Ok(Self {
++                home,
++                loader,
++                config: Arc::new(config),
++                paths,
++            })
++        }
++
++        fn frozen(&self) -> std::io::Result<ConfigManager> {
++            ConfigManager::new_frozen(Arc::clone(&self.config), self.paths.clone())
++        }
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_snapshot_survives_file_changes() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        std::fs::write(fixture.home.path().join("config.toml"), "invalid = [\n")?;
++        std::fs::write(fixture.home.path().join("requirements.toml"), "invalid = [\n")?;
++        std::fs::write(fixture.home.path().join("models.json"), "not JSON")?;
++        assert!(!fixture.config.model_catalog.as_ref().unwrap().models.is_empty());
++        assert_eq!(manager.load_latest_config(None).await?, *fixture.config);
++        assert_eq!(manager.load_non_project_config().await?, *fixture.config);
++        assert_eq!(manager.load_default_config().await?, *fixture.config);
++        assert_eq!(
++            manager
++                .load_with_overrides(None, ConfigOverrides::default())
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager
++                .load_with_cli_overrides(&[], None, ConfigOverrides::default(), None)
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager
++                .load_for_cwd(
++                    None,
++                    ConfigOverrides::default(),
++                    Some(fixture.config.cwd.to_path_buf()),
++                )
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager
++                .load_latest_config_for_thread(fixture.config.as_ref())
++                .await?,
++            *fixture.config
++        );
++        assert_eq!(
++            manager.load_config_layers(None).await?,
++            fixture.config.config_layer_stack
++        );
++        assert!(!manager.frozen_violation_guard().unwrap().is_violated());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_requirements_are_preserved() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let expected = fixture.config.config_layer_stack.requirements_toml().clone();
++        assert_eq!(expected.allowed_approval_policies, Some(vec![AskForApproval::Never]));
++        let manager = fixture.frozen()?;
++        std::fs::write(
++            fixture.home.path().join("requirements.toml"),
++            "allowed_approval_policies = [\"untrusted\"]\n",
++        )?;
++        assert_eq!(
++            manager.load_config_layers(None).await?.requirements_toml(),
++            &expected
++        );
++        assert_eq!(manager.read_requirements().await.unwrap(), Some(expected));
++        assert_eq!(manager.load_default_config().await?, *fixture.config);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_normal_config_reload_is_unchanged() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = ConfigManager::new_for_tests(
++            fixture.home.path().to_path_buf(),
++            Vec::new(),
++            fixture.loader.clone(),
++            CloudConfigBundleLoader::default(),
++        );
++        assert!(manager.frozen_violation_guard().is_none());
++        let first = manager
++            .load_latest_config(Some(fixture.config.cwd.to_path_buf()))
++            .await?;
++        assert_eq!(first.model.as_deref(), Some("gpt-5.5"));
++        std::fs::write(
++            fixture.home.path().join("config.toml"),
++            "model = \"changed-model\"\napproval_policy = \"never\"\n",
++        )?;
++        let second = manager
++            .load_latest_config(Some(fixture.config.cwd.to_path_buf()))
++            .await?;
++        assert_eq!(second.model.as_deref(), Some("changed-model"));
++        assert_ne!(first.config_layer_stack, second.config_layer_stack);
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_overrides_are_exhaustive() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let path = fixture.home.path().join("foreign");
++        let absolute = AbsolutePathBuf::from_absolute_path(path.clone())?;
++        macro_rules! change {
++            ($name:literal, $field:ident, $value:expr) => {
++                ($name, ConfigOverrides {
++                    $field: $value,
++                    ..ConfigOverrides::default()
++                })
++            };
++        }
++        let cases = vec![
++            change!("model", model, Some("foreign".to_string())),
++            change!("review_model", review_model, Some("foreign".to_string())),
++            change!("cwd", cwd, Some(fixture.config.cwd.to_path_buf())),
++            change!("approval_policy", approval_policy, Some(AskForApproval::Never)),
++            change!("approvals_reviewer", approvals_reviewer, Some(codex_config::types::ApprovalsReviewer::User)),
++            change!("sandbox_mode", sandbox_mode, Some(SandboxMode::ReadOnly)),
++            change!("permission_profile", permission_profile, Some(PermissionProfile::Disabled)),
++            change!("default_permissions", default_permissions, Some("foreign".to_string())),
++            change!("persisted_permission_profile_id", persisted_permission_profile_id, Some("foreign".to_string())),
++            change!("model_provider", model_provider, Some("openai".to_string())),
++            change!("service_tier_nested_null", service_tier, Some(None)),
++            change!("service_tier_value", service_tier, Some(Some("default".to_string()))),
++            change!("codex_self_exe", codex_self_exe, fixture.config.codex_self_exe.clone()),
++            change!("codex_linux_sandbox_exe", codex_linux_sandbox_exe, Some(path.clone())),
++            change!("main_execve_wrapper_exe", main_execve_wrapper_exe, Some(path.clone())),
++            change!("default_zsh_path", default_zsh_path, Some(absolute.clone())),
++            change!("base_instructions", base_instructions, Some(String::new())),
++            change!("developer_instructions", developer_instructions, Some(String::new())),
++            change!("personality", personality, Some(Personality::None)),
++            change!("compact_prompt", compact_prompt, Some(String::new())),
++            change!("show_raw_agent_reasoning", show_raw_agent_reasoning, Some(false)),
++            change!("tools_web_search_request", tools_web_search_request, Some(false)),
++            change!("ephemeral", ephemeral, Some(false)),
++            change!("bypass_hook_trust", bypass_hook_trust, Some(false)),
++            change!("additional_writable_roots", additional_writable_roots, vec![path]),
++            change!("workspace_roots_empty", workspace_roots, Some(Vec::new())),
++            change!("workspace_roots", workspace_roots, Some(vec![absolute])),
++        ];
++        for (name, overrides) in cases {
++            let manager = fixture.frozen()?;
++            assert!(
++                manager.load_with_overrides(None, overrides).await.is_err(),
++                "frozen manager accepted semantic override {name}"
++            );
++            assert!(manager.frozen_violation_guard().unwrap().is_violated(), "{name}");
++            assert!(manager.load_latest_config(None).await.is_err(), "{name}");
++        }
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_only_exact_synthesized_paths_are_allowed() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        let overrides = ConfigOverrides {
++            codex_linux_sandbox_exe: fixture.config.codex_linux_sandbox_exe.clone(),
++            main_execve_wrapper_exe: fixture.config.main_execve_wrapper_exe.clone(),
++            ..ConfigOverrides::default()
++        };
++        assert_eq!(manager.load_with_overrides(None, overrides).await?, *fixture.config);
++        assert!(!manager.frozen_violation_guard().unwrap().is_violated());
++        let mut foreign = fixture.paths.clone();
++        foreign.codex_self_exe = Some(fixture.home.path().join("foreign-host"));
++        assert!(ConfigManager::new_frozen(Arc::clone(&fixture.config), foreign).is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_other_loader_inputs_are_rejected() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .load_with_overrides(Some(HashMap::new()), ConfigOverrides::default())
++            .await
++            .is_err());
++        let manager = fixture.frozen()?;
++        let cli = vec![("model".to_string(), TomlValue::String("foreign".to_string()))];
++        assert!(manager
++            .load_with_cli_overrides(&cli, None, ConfigOverrides::default(), None)
++            .await
++            .is_err());
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .load_latest_config(Some(fixture.home.path().join("foreign")))
++            .await
++            .is_err());
++        let manager = fixture.frozen()?;
++        let mut foreign_thread = fixture.config.as_ref().clone();
++        foreign_thread.model = Some("foreign".to_string());
++        assert!(manager.load_latest_config_for_thread(&foreign_thread).await.is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_mutation_is_terminal() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let manager = fixture.frozen()?;
++        let clone = manager.clone();
++        assert!(manager
++            .extend_runtime_feature_enablement([("code_mode".to_string(), false)])
++            .is_err());
++        assert!(clone.frozen_violation_guard().unwrap().is_violated());
++        assert!(clone.load_latest_config(None).await.is_err());
++        let manager = fixture.frozen()?;
++        manager.clear_cloud_config_bundle_loader();
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        assert!(manager.load_default_config().await.is_err());
++        let manager = fixture.frozen()?;
++        manager.sync_default_client_residency_requirement().await;
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        assert!(manager.load_latest_config(None).await.is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_persistence_rejects_before_disk_effects() -> std::io::Result<()> {
++        let fixture = Fixture::new().await?;
++        let path = fixture.home.path().join("config.toml");
++        let original = std::fs::read(&path)?;
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .write_value(ConfigValueWriteParams {
++                key_path: "model".to_string(),
++                value: serde_json::json!("foreign"),
++                merge_strategy: MergeStrategy::Replace,
++                file_path: None,
++                expected_version: None,
++            })
++            .await
++            .is_err());
++        assert_eq!(std::fs::read(&path)?, original);
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        let manager = fixture.frozen()?;
++        assert!(manager
++            .batch_write(ConfigBatchWriteParams {
++                edits: vec![ConfigEdit {
++                    key_path: "model".to_string(),
++                    value: serde_json::json!("foreign"),
++                    merge_strategy: MergeStrategy::Replace,
++                }],
++                file_path: None,
++                expected_version: None,
++                reload_user_config: true,
++            })
++            .await
++            .is_err());
++        assert_eq!(std::fs::read(&path)?, original);
++        assert!(manager.frozen_violation_guard().unwrap().is_violated());
++        Ok(())
++    }
++}
++
++// Modified by Ouro: terminal wakeups must not depend on receiver registration order.
++#[cfg(test)]
++mod cmux_terminal_contract {
++    use super::*;
++    use std::future::Future;
++    use std::task::Poll;
++    use std::time::Duration;
++    use tokio::sync::mpsc;
++    use tokio::time::timeout;
++
++    #[tokio::test]
++    async fn cmux_terminal_trip_before_registration_is_observed() -> std::io::Result<()> {
++        let guard = FrozenConfigViolation::new();
++        let _ = guard.violate("test before registration");
++        timeout(Duration::from_secs(1), guard.wait_for_violation())
++            .await
++            .expect("terminal state was lost before subscription");
++        let (sender, mut receiver) = mpsc::channel(1);
++        assert!(guard
++            .until_violation("post-terminal send", async {
++                sender.send(1).await.map_err(std::io::Error::other)
++            })
++            .await
++            .is_err());
++        assert!(receiver.try_recv().is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_terminal_trip_wakes_all_blocked_sends() -> std::io::Result<()> {
++        let guard = FrozenConfigViolation::new();
++        let (sender, mut receiver) = mpsc::channel(1);
++        sender.send(0).await.map_err(std::io::Error::other)?;
++        let first = guard.until_violation("first blocked send", async {
++            sender.send(1).await.map_err(std::io::Error::other)
++        });
++        let second = guard.until_violation("second blocked send", async {
++            sender.send(2).await.map_err(std::io::Error::other)
++        });
++        tokio::pin!(first);
++        tokio::pin!(second);
++        assert!(std::future::poll_fn(|context| Poll::Ready(first.as_mut().poll(context)))
++            .await
++            .is_pending());
++        assert!(std::future::poll_fn(|context| Poll::Ready(second.as_mut().poll(context)))
++            .await
++            .is_pending());
++        let _ = guard.violate("test while both sends are pending");
++        let (first_result, second_result) = timeout(Duration::from_secs(1), async {
++            tokio::join!(first, second)
++        })
++        .await
++        .expect("one blocked sender did not wake");
++        for result in [first_result, second_result] {
++            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
++        }
++        assert_eq!(receiver.recv().await, Some(0));
++        assert!(receiver.try_recv().is_err());
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_terminal_closed_send_never_becomes_success() {
++        let guard = FrozenConfigViolation::new();
++        let (sender, receiver) = mpsc::channel::<u8>(1);
++        drop(receiver);
++        assert!(guard
++            .until_violation("closed send", async {
++                sender.send(1).await.map_err(std::io::Error::other)
++            })
++            .await
++            .is_err());
++        assert!(guard.is_violated());
++        timeout(Duration::from_secs(1), guard.wait_for_violation())
++            .await
++            .expect("terminal state after closure was lost");
++        assert!(guard.is_violated());
++    }
++}
++
++}
+diff --git a/codex-rs/app-server/src/config_manager_service.rs b/codex-rs/app-server/src/config_manager_service.rs
+--- a/codex-rs/app-server/src/config_manager_service.rs
++++ b/codex-rs/app-server/src/config_manager_service.rs
+@@ -1,3 +1,4 @@
++// Modified by Ouro: refuse frozen persistence before resolving or writing a file.
+ use crate::config_layer::config_layer_metadata_to_api;
+ use crate::config_layer::config_layer_to_api;
+ use crate::config_manager::ConfigManager;
+@@ -219,6 +220,8 @@
+         expected_version: Option<String>,
+         edits: Vec<(String, JsonValue, MergeStrategy)>,
+     ) -> Result<ConfigWriteResponse, ConfigManagerError> {
++        self.ensure_config_mutable("configuration persistence")
++            .map_err(|err| ConfigManagerError::io("frozen configuration persistence refused", err))?;
+         let allowed_path = self
+             .user_config_path()
+             .map_err(|err| ConfigManagerError::io("failed to resolve user config path", err))?;
+diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
+--- a/codex-rs/app-server/src/in_process.rs
++++ b/codex-rs/app-server/src/in_process.rs
+@@ -123,6 +123,48 @@
+                 ..
+             })
+     )
++}
++
++// Modified by Ouro: preserve ordinary forwarding through a channel-only test seam.
++enum InProcessNotificationMode {
++    Ordinary,
++    Frozen,
++}
++
++#[derive(Debug, PartialEq, Eq)]
++enum InProcessNotificationDelivery {
++    Forwarded,
++    Dropped,
++    Closed,
++}
++
++async fn forward_in_process_notification(
++    mode: InProcessNotificationMode,
++    event_tx: &mpsc::Sender<InProcessServerEvent>,
++    notification: ServerNotification,
++) -> InProcessNotificationDelivery {
++    if matches!(mode, InProcessNotificationMode::Frozen)
++        || server_notification_requires_delivery(&notification)
++    {
++        if event_tx
++            .send(InProcessServerEvent::ServerNotification(Box::new(notification)))
++            .await
++            .is_err()
++        {
++            InProcessNotificationDelivery::Closed
++        } else {
++            InProcessNotificationDelivery::Forwarded
++        }
++    } else {
++        match event_tx.try_send(InProcessServerEvent::ServerNotification(Box::new(notification))) {
++            Ok(()) => InProcessNotificationDelivery::Forwarded,
++            Err(mpsc::error::TrySendError::Full(_)) => {
++                warn!("dropping in-process server notification (queue full)");
++                InProcessNotificationDelivery::Dropped
++            }
++            Err(mpsc::error::TrySendError::Closed(_)) => InProcessNotificationDelivery::Closed,
++        }
++    }
+ }
+ 
+ /// Input needed to start an in-process app-server runtime.
+@@ -710,30 +752,14 @@
+                         }
+                         OutgoingMessage::AppServerNotification(envelope) => {
+                             let notification = envelope.notification;
+-                            if server_notification_requires_delivery(&notification) {
+-                                if event_tx
+-                                    .send(InProcessServerEvent::ServerNotification(Box::new(
+-                                        notification,
+-                                    )))
+-                                    .await
+-                                    .is_err()
+-                                {
+-                                    break;
+-                                }
+-                            } else if let Err(send_error) =
+-                                event_tx.try_send(InProcessServerEvent::ServerNotification(
+-                                    Box::new(notification),
+-                                ))
+-                            {
+-                                match send_error {
+-                                    mpsc::error::TrySendError::Full(_) => {
+-                                        warn!("dropping in-process server notification (queue full)");
+-                                        continue;
+-                                    }
+-                                    mpsc::error::TrySendError::Closed(_) => {
+-                                        break;
+-                                    }
+-                                }
++                            match forward_in_process_notification(
++                                InProcessNotificationMode::Ordinary,
++                                &event_tx,
++                                notification,
++                            ).await {
++                                InProcessNotificationDelivery::Forwarded => {}
++                                InProcessNotificationDelivery::Dropped => continue,
++                                InProcessNotificationDelivery::Closed => break,
+                             }
+                         }
+                     }
+@@ -1040,3 +1066,449 @@
+         ));
+     }
+ }
++
++// Modified by Ouro: only fixed text turns and current-thread inventory are public work.
++fn validate_frozen_work_request(
++    guard: &crate::config_manager::FrozenConfigViolation,
++    request: &ClientRequest,
++    owned_thread_id: &str,
++) -> IoResult<()> {
++    guard.check()?;
++    let admitted = match request {
++        ClientRequest::TurnStart { params, .. } => {
++            let codex_app_server_protocol::TurnStartParams {
++                thread_id,
++                client_user_message_id,
++                input,
++                turn_trigger,
++                tool_output,
++                responsesapi_client_metadata,
++                additional_context,
++                environments,
++                cwd,
++                runtime_workspace_roots,
++                approval_policy,
++                approvals_reviewer,
++                sandbox_policy,
++                permissions,
++                model,
++                service_tier,
++                service_tier_for_turn,
++                effort,
++                summary,
++                personality,
++                output_schema,
++                collaboration_mode,
++                multi_agent_mode,
++                cyber_access_program,
++            } = params;
++            thread_id == owned_thread_id
++                && client_user_message_id.is_none()
++                && matches!(
++                    input.as_slice(),
++                    [codex_app_server_protocol::UserInput::Text { text, text_elements }]
++                        if text.len() <= 65536 && text_elements.is_empty()
++                )
++                && turn_trigger.is_none()
++                && tool_output.is_none()
++                && responsesapi_client_metadata.is_none()
++                && additional_context.is_none()
++                && environments.as_ref().is_some_and(Vec::is_empty)
++                && cwd.is_none()
++                && runtime_workspace_roots.is_none()
++                && approval_policy.is_none()
++                && approvals_reviewer.is_none()
++                && sandbox_policy.is_none()
++                && permissions.is_none()
++                && model.is_none()
++                && service_tier.is_none()
++                && service_tier_for_turn.is_none()
++                && effort.is_none()
++                && summary.is_none()
++                && personality.is_none()
++                && output_schema.is_none()
++                && collaboration_mode.is_none()
++                && multi_agent_mode.is_none()
++                && cyber_access_program.is_none()
++        }
++        ClientRequest::ThreadBackgroundTerminalsList { params, .. } => {
++            let codex_app_server_protocol::ThreadBackgroundTerminalsListParams {
++                thread_id,
++                cursor: _,
++                limit,
++            } = params;
++            thread_id == owned_thread_id && limit.is_none_or(|value| value > 0)
++        }
++        _ => false,
++    };
++    if !admitted || owned_thread_id.is_empty() {
++        return Err(guard.violate("unsupported frozen work request"));
++    }
++    let frame = serde_json::to_vec(request).map_err(|error| {
++        let _ = guard.violate("frozen work request serialization failed");
++        IoError::new(ErrorKind::InvalidData, error)
++    })?;
++    if frame.len() > 2 * 1024 * 1024 {
++        return Err(guard.violate("frozen work request exceeds frame bound"));
++    }
++    Ok(())
++}
++
++// Modified by Ouro: select only our account-free SDK component tests.
++#[cfg(test)]
++mod cmux_sdk_contract {
++    use super::*;
++// Modified by Ouro: controlled channel-only forwarding probes; no backend startup.
++#[cfg(test)]
++mod cmux_forward_contract {
++    use super::*;
++    use codex_app_server_protocol::ThreadNameUpdatedNotification;
++    use codex_app_server_protocol::ThreadQueueChangedNotification;
++    use std::future::Future;
++    use std::task::Poll;
++
++    fn ordinary(label: &str) -> ServerNotification {
++        ServerNotification::ThreadNameUpdated(ThreadNameUpdatedNotification {
++            thread_id: "owned-thread".to_string(),
++            thread_name: Some(label.to_string()),
++        })
++    }
++
++    fn label(event: InProcessServerEvent) -> String {
++        match event {
++            InProcessServerEvent::ServerNotification(notification) => match *notification {
++                ServerNotification::ThreadNameUpdated(update) => update.thread_name.unwrap(),
++                _ => panic!("expected exact ordinary notification"),
++            },
++            _ => panic!("expected exact server notification"),
++        }
++    }
++
++    async fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
++        let mut future = future;
++        std::future::poll_fn(|context| Poll::Ready(future.as_mut().poll(context))).await
++    }
++
++    #[tokio::test]
++    async fn cmux_normal_event_forwarding_compatibility() {
++        timeout(Duration::from_secs(2), async {
++            let (sender, mut receiver) = mpsc::channel(1);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("empty"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            assert_eq!(label(receiver.recv().await.unwrap()), "empty");
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("first"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("dropped"),
++                )
++                .await,
++                InProcessNotificationDelivery::Dropped
++            );
++            assert_eq!(label(receiver.recv().await.unwrap()), "first");
++            assert!(matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
++
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("before-required"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            let required = ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
++                thread_id: "owned-thread".to_string(),
++            });
++            let mut pending = Box::pin(forward_in_process_notification(
++                InProcessNotificationMode::Ordinary,
++                &sender,
++                required,
++            ));
++            assert!(poll_once(pending.as_mut()).await.is_pending());
++            assert_eq!(label(receiver.recv().await.unwrap()), "before-required");
++            assert_eq!(pending.await, InProcessNotificationDelivery::Forwarded);
++            assert!(matches!(
++                receiver.recv().await.unwrap(),
++                InProcessServerEvent::ServerNotification(notification)
++                    if matches!(*notification, ServerNotification::ThreadQueueChanged(_))
++            ));
++            drop(receiver);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ordinary("closed"),
++                )
++                .await,
++                InProcessNotificationDelivery::Closed
++            );
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Ordinary,
++                    &sender,
++                    ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
++                        thread_id: "owned-thread".to_string(),
++                    }),
++                )
++                .await,
++                InProcessNotificationDelivery::Closed
++            );
++        })
++        .await
++        .expect("ordinary forwarding compatibility fixture exceeded its bound");
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_delivery_applies_backpressure() {
++        timeout(Duration::from_secs(2), async {
++            let (sender, mut receiver) = mpsc::channel(1);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Frozen,
++                    &sender,
++                    ordinary("first"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            let mut pending = Box::pin(forward_in_process_notification(
++                InProcessNotificationMode::Frozen,
++                &sender,
++                ordinary("second"),
++            ));
++            let observed = poll_once(pending.as_mut()).await;
++            assert!(
++                observed.is_pending(),
++                "CMUX_FROZEN_FORWARDING_BACKPRESSURE_REQUIRED: actual forwarding returned {observed:?} while capacity1 was full"
++            );
++            assert_eq!(label(receiver.recv().await.unwrap()), "first");
++            assert_eq!(pending.await, InProcessNotificationDelivery::Forwarded);
++            assert_eq!(label(receiver.recv().await.unwrap()), "second");
++        })
++        .await
++        .expect("forwarding backpressure fixture exceeded its bound");
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_delivery_reports_closed_consumer() {
++        timeout(Duration::from_secs(2), async {
++            let (sender, receiver) = mpsc::channel(1);
++            assert_eq!(
++                forward_in_process_notification(
++                    InProcessNotificationMode::Frozen,
++                    &sender,
++                    ordinary("first"),
++                )
++                .await,
++                InProcessNotificationDelivery::Forwarded
++            );
++            let mut pending = Box::pin(forward_in_process_notification(
++                InProcessNotificationMode::Frozen,
++                &sender,
++                ordinary("unconsumed"),
++            ));
++            assert!(poll_once(pending.as_mut()).await.is_pending());
++            drop(receiver);
++            assert_eq!(pending.await, InProcessNotificationDelivery::Closed);
++        })
++        .await
++        .expect("closed-consumer forwarding fixture exceeded its bound");
++    }
++}
++
++// Modified by Ouro: typed frozen work admission, without constructing a backend.
++#[cfg(test)]
++mod cmux_frozen_request_contract {
++    use super::*;
++    use codex_app_server_protocol::ThreadBackgroundTerminalsListParams;
++    use codex_app_server_protocol::ThreadStartParams;
++    use codex_app_server_protocol::TurnStartParams;
++    use codex_app_server_protocol::UserInput;
++
++    fn turn(text: String) -> ClientRequest {
++        ClientRequest::TurnStart {
++            request_id: RequestId::Integer(7),
++            params: TurnStartParams {
++                thread_id: "owned-thread".to_string(),
++                input: vec![UserInput::Text {
++                    text,
++                    text_elements: Vec::new(),
++                }],
++                environments: Some(Vec::new()),
++                ..TurnStartParams::default()
++            },
++        }
++    }
++
++    #[test]
++    fn cmux_frozen_work_preserves_literal_and_utf8_byte_boundary() {
++        for text in [
++            " literal\n\"quoted\"\\path\t\u{00e9} ".to_string(),
++            "\u{00e9}".repeat(32768),
++        ] {
++            let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++            let request = turn(text.clone());
++            assert!(validate_frozen_work_request(&guard, &request, "owned-thread").is_ok());
++            let ClientRequest::TurnStart { params, .. } = request else {
++                unreachable!();
++            };
++            assert_eq!(
++                params.input,
++                vec![UserInput::Text {
++                    text,
++                    text_elements: Vec::new(),
++                }]
++            );
++            assert!(!guard.is_violated());
++        }
++        let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++        assert!(validate_frozen_work_request(
++            &guard,
++            &turn("x".repeat(65537)),
++            "owned-thread",
++        )
++        .is_err());
++        assert!(guard.is_violated());
++    }
++
++    #[test]
++    fn cmux_frozen_work_rejects_presence_of_turn_overrides() {
++        let ClientRequest::TurnStart { params, .. } = turn("literal".to_string()) else {
++            unreachable!();
++        };
++        let base = serde_json::to_value(&params).unwrap();
++        let changes = [
++            ("clientUserMessageId", serde_json::json!("extra")),
++            ("turnTrigger", serde_json::json!("extra")),
++            ("responsesapiClientMetadata", serde_json::json!({})),
++            ("additionalContext", serde_json::json!({})),
++            ("cwd", serde_json::json!("/foreign")),
++            ("runtimeWorkspaceRoots", serde_json::json!([])),
++            ("approvalPolicy", serde_json::json!("never")),
++            ("approvalsReviewer", serde_json::json!("user")),
++            ("permissions", serde_json::json!("read-only")),
++            ("model", serde_json::json!("gpt-5.5")),
++            ("serviceTierForTurn", serde_json::json!("default")),
++            ("personality", serde_json::json!("none")),
++            ("outputSchema", serde_json::json!({})),
++        ];
++        for (field, value) in changes {
++            let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++            let mut changed = base.clone();
++            changed[field] = value;
++            let params: TurnStartParams = serde_json::from_value(changed).unwrap();
++            let request = ClientRequest::TurnStart {
++                request_id: RequestId::Integer(7),
++                params,
++            };
++            assert!(
++                validate_frozen_work_request(&guard, &request, "owned-thread").is_err(),
++                "accepted turn override {field}"
++            );
++            assert!(guard.is_violated(), "{field}");
++        }
++        let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++        let mut nested_null = params;
++        nested_null.service_tier = Some(None);
++        assert!(validate_frozen_work_request(
++            &guard,
++            &ClientRequest::TurnStart {
++                request_id: RequestId::Integer(7),
++                params: nested_null,
++            },
++            "owned-thread",
++        )
++        .is_err());
++    }
++
++    #[test]
++    fn cmux_frozen_work_requires_explicit_empty_environments_and_one_text_item() {
++        for mutation in 0..4 {
++            let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++            let ClientRequest::TurnStart { mut params, .. } = turn("literal".to_string()) else {
++                unreachable!();
++            };
++            match mutation {
++                0 => params.environments = None,
++                1 => params.input.clear(),
++                2 => params.input.push(params.input[0].clone()),
++                3 => {
++                    params.input = vec![UserInput::Image {
++                        detail: None,
++                        url: "https://example.invalid/image".to_string(),
++                    }]
++                }
++                _ => unreachable!(),
++            }
++            assert!(validate_frozen_work_request(
++                &guard,
++                &ClientRequest::TurnStart {
++                    request_id: RequestId::Integer(7),
++                    params,
++                },
++                "owned-thread",
++            )
++            .is_err());
++            assert!(guard.is_violated());
++        }
++    }
++
++    #[test]
++    fn cmux_frozen_work_rejects_foreign_threads_and_public_thread_creation() {
++        let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++        assert!(validate_frozen_work_request(
++            &guard,
++            &turn("literal".to_string()),
++            "foreign-thread",
++        )
++        .is_err());
++        let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++        assert!(validate_frozen_work_request(
++            &guard,
++            &ClientRequest::ThreadStart {
++                request_id: RequestId::Integer(8),
++                params: ThreadStartParams::default(),
++            },
++            "owned-thread",
++        )
++        .is_err());
++    }
++
++    #[test]
++    fn cmux_frozen_shell_pages_are_current_thread_only() {
++        for thread_id in ["owned-thread", "foreign-thread"] {
++            let guard = crate::config_manager::FrozenConfigViolation::new_for_tests();
++            let request = ClientRequest::ThreadBackgroundTerminalsList {
++                request_id: RequestId::String("page-7".to_string()),
++                params: ThreadBackgroundTerminalsListParams {
++                    thread_id: thread_id.to_string(),
++                    cursor: Some("literal-cursor".to_string()),
++                    limit: Some(64),
++                },
++            };
++            assert_eq!(
++                validate_frozen_work_request(&guard, &request, "owned-thread").is_ok(),
++                thread_id == "owned-thread"
++            );
++        }
++    }
++}
++
++}
+diff --git a/codex-rs/app-server/src/outgoing_message.rs b/codex-rs/app-server/src/outgoing_message.rs
+--- a/codex-rs/app-server/src/outgoing_message.rs
++++ b/codex-rs/app-server/src/outgoing_message.rs
+@@ -450,27 +450,83 @@
+         result: Result,
+     ) {
+         let entry = self.take_connection_callback(connection_id, &id).await;
+-
+         match entry {
+             Some((id, entry)) => {
+-                let completed_at_ms = now_unix_timestamp_ms();
+-                if entry.verification_owner.is_none()
+-                    && let Ok(response) = entry.request.response_from_result(result.clone())
+-                {
+-                    tracing::info!("<- response: {response:?}");
+-                    if !matches!(response, ServerResponse::PermissionsRequestApproval { .. }) {
+-                        self.analytics_events_client
+-                            .track_server_response(completed_at_ms, response);
+-                    }
+-                }
+-                if entry.callback.send(Ok(result)).is_err() {
+-                    warn!("could not notify callback for {id:?}: receiver dropped");
++                if let Err(error) = self.deliver_client_response(id, entry, result) {
++                    warn!("{error}");
+                 }
+             }
+             None => {
+                 warn!("could not find callback for {id:?}");
+             }
+         }
++    }
++
++    pub(crate) async fn notify_frozen_client_response(
++        &self,
++        connection_id: ConnectionId,
++        id: RequestId,
++        result: Result,
++    ) -> std::io::Result<()> {
++        let entry = self
++            .take_connection_callback_validated(connection_id, &id, |request| {
++                if !matches!(request, ServerRequest::DynamicToolCall { .. }) {
++                    return Err(std::io::Error::new(
++                        std::io::ErrorKind::PermissionDenied,
++                        "frozen CONTROL only responds to registered native dynamic tools",
++                    ));
++                }
++                let parsed: codex_app_server_protocol::DynamicToolCallResponse =
++                    serde_json::from_value(result.clone()).map_err(|error| {
++                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
++                    })?;
++                if !matches!(
++                    parsed.content_items.as_slice(),
++                    [codex_app_server_protocol::DynamicToolCallOutputContentItem::InputText { text }]
++                        if text.len() <= 262144
++                ) || serde_json::to_value(&parsed).map_err(|error| {
++                    std::io::Error::new(std::io::ErrorKind::InvalidData, error)
++                })? != result
++                {
++                    return Err(std::io::Error::new(
++                        std::io::ErrorKind::InvalidData,
++                        "frozen native-tool response is not exact bounded text",
++                    ));
++                }
++                Ok(())
++            })
++            .await?;
++        let (id, entry) = entry.ok_or_else(|| {
++            std::io::Error::new(
++                std::io::ErrorKind::NotFound,
++                format!("could not find callback for {id:?}"),
++            )
++        })?;
++        self.deliver_client_response(id, entry, result)
++    }
++
++    fn deliver_client_response(
++        &self,
++        id: RequestId,
++        entry: PendingCallbackEntry,
++        result: Result,
++    ) -> std::io::Result<()> {
++        let completed_at_ms = now_unix_timestamp_ms();
++        if entry.verification_owner.is_none()
++            && let Ok(response) = entry.request.response_from_result(result.clone())
++        {
++            tracing::info!("<- response: {response:?}");
++            if !matches!(response, ServerResponse::PermissionsRequestApproval { .. }) {
++                self.analytics_events_client
++                    .track_server_response(completed_at_ms, response);
++            }
++        }
++        entry.callback.send(Ok(result)).map_err(|_| {
++            std::io::Error::new(
++                std::io::ErrorKind::BrokenPipe,
++                format!("could not notify callback for {id:?}: receiver dropped"),
++            )
++        })
+     }
+ 
+     pub(crate) async fn notify_client_error(
+@@ -542,20 +598,40 @@
+         connection_id: ConnectionId,
+         id: &RequestId,
+     ) -> Option<(RequestId, PendingCallbackEntry)> {
++        match self
++            .take_connection_callback_validated(connection_id, id, |_| {
++                Ok::<(), std::convert::Infallible>(())
++            })
++            .await
++        {
++            Ok(entry) => entry,
++            Err(impossible) => match impossible {},
++        }
++    }
++
++    async fn take_connection_callback_validated<E>(
++        &self,
++        connection_id: ConnectionId,
++        id: &RequestId,
++        validate: impl FnOnce(&ServerRequest) -> std::result::Result<(), E>,
++    ) -> std::result::Result<Option<(RequestId, PendingCallbackEntry)>, E> {
+         let mut callbacks = self.request_id_to_callback.lock().await;
+-        let entry = callbacks.get(id)?;
++        let Some(entry) = callbacks.get(id) else {
++            return Ok(None);
++        };
++        validate(&entry.request)?;
+         if let Some(owner) = entry.verification_owner {
+             if owner != connection_id {
+-                return None;
++                return Ok(None);
+             }
+             if entry.verification_identity != self.verification_identity()
+                 || entry.verification_auth_revision != self.verification_auth_revision()
+             {
+                 callbacks.remove(id);
+-                return None;
+-            }
+-        }
+-        callbacks.remove_entry(id)
++                return Ok(None);
++            }
++        }
++        Ok(callbacks.remove_entry(id))
+     }
+ 
+     pub(crate) async fn pending_requests_for_thread(
+@@ -1553,3 +1629,158 @@
+         );
+     }
+ }
++
++// Modified by Ouro: select only our account-free SDK component tests.
++#[cfg(test)]
++mod cmux_sdk_contract {
++    use super::*;
++// Modified by Ouro: frozen CONTROL needs observable callback delivery failures.
++#[cfg(test)]
++mod cmux_frozen_callback_contract {
++    use super::*;
++    use codex_app_server_protocol::DynamicToolCallOutputContentItem;
++    use codex_app_server_protocol::DynamicToolCallParams;
++    use codex_app_server_protocol::DynamicToolCallResponse;
++    use std::io;
++
++    fn outgoing() -> (OutgoingMessageSender, mpsc::Receiver<OutgoingEnvelope>) {
++        let (sender, receiver) = mpsc::channel(1);
++        (
++            OutgoingMessageSender::new(
++                sender,
++                codex_analytics::AnalyticsEventsClient::disabled(),
++            ),
++            receiver,
++        )
++    }
++
++    fn payload() -> ServerRequestPayload {
++        ServerRequestPayload::DynamicToolCall(DynamicToolCallParams {
++            thread_id: "thread".to_string(),
++            turn_id: "turn".to_string(),
++            call_id: "call".to_string(),
++            namespace: None,
++            tool: "native_command".to_string(),
++            arguments: serde_json::json!({}),
++        })
++    }
++
++    fn response() -> Result {
++        serde_json::to_value(DynamicToolCallResponse {
++            content_items: vec![DynamicToolCallOutputContentItem::InputText {
++                text: "literal command result\n".to_string(),
++            }],
++            success: true,
++        })
++        .unwrap()
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_checked_callback_delivers_exact_registered_response() -> io::Result<()> {
++        let (outgoing, mut messages) = outgoing();
++        let (id, waiter) = outgoing
++            .send_request_to_connections(Some(&[ConnectionId(1)]), payload(), None)
++            .await;
++        assert!(messages.recv().await.is_some());
++        let value = response();
++        outgoing
++            .notify_frozen_client_response(ConnectionId(1), id.clone(), value.clone())
++            .await?;
++        assert_eq!(waiter.await.unwrap(), Ok(value.clone()));
++        assert_eq!(
++            outgoing
++                .notify_frozen_client_response(ConnectionId(1), id, value)
++                .await
++                .unwrap_err()
++                .kind(),
++            io::ErrorKind::NotFound
++        );
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_checked_callback_preserves_typed_id_and_pending_work() -> io::Result<()> {
++        let (outgoing, mut messages) = outgoing();
++        let (id, mut waiter) = outgoing
++            .send_request_to_connections(Some(&[ConnectionId(1)]), payload(), None)
++            .await;
++        assert!(messages.recv().await.is_some());
++        let RequestId::Integer(integer) = id.clone() else {
++            panic!("actual server request generator did not issue an integer ID");
++        };
++        assert_eq!(
++            outgoing
++                .notify_frozen_client_response(
++                    ConnectionId(1),
++                    RequestId::String(integer.to_string()),
++                    response(),
++                )
++                .await
++                .unwrap_err()
++                .kind(),
++            io::ErrorKind::NotFound
++        );
++        assert!(matches!(
++            waiter.try_recv(),
++            Err(oneshot::error::TryRecvError::Empty)
++        ));
++        outgoing
++            .notify_frozen_client_response(ConnectionId(1), id, response())
++            .await?;
++        assert_eq!(waiter.await.unwrap(), Ok(response()));
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_checked_callback_validates_before_removing_pending_work() -> io::Result<()> {
++        let (outgoing, mut messages) = outgoing();
++        let (id, mut waiter) = outgoing
++            .send_request_to_connections(Some(&[ConnectionId(1)]), payload(), None)
++            .await;
++        assert!(messages.recv().await.is_some());
++        let mut extra = response();
++        extra["foreign"] = serde_json::json!(true);
++        for invalid in [serde_json::json!({"contentItems": []}), extra] {
++            assert_eq!(
++                outgoing
++                    .notify_frozen_client_response(ConnectionId(1), id.clone(), invalid)
++                    .await
++                    .unwrap_err()
++                    .kind(),
++                io::ErrorKind::InvalidData
++            );
++            assert!(matches!(
++                waiter.try_recv(),
++                Err(oneshot::error::TryRecvError::Empty)
++            ));
++        }
++        outgoing
++            .notify_frozen_client_response(ConnectionId(1), id, response())
++            .await?;
++        assert_eq!(waiter.await.unwrap(), Ok(response()));
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn cmux_frozen_checked_callback_reports_closed_receiver() {
++        let (outgoing, mut messages) = outgoing();
++        let (id, waiter) = outgoing
++            .send_request_to_connections(Some(&[ConnectionId(1)]), payload(), None)
++            .await;
++        assert!(messages.recv().await.is_some());
++        drop(waiter);
++        assert_eq!(
++            outgoing
++                .notify_frozen_client_response(ConnectionId(1), id.clone(), response())
++                .await
++                .unwrap_err()
++                .kind(),
++            io::ErrorKind::BrokenPipe
++        );
++        let (): () = outgoing
++            .notify_client_response(ConnectionId(1), id, response())
++            .await;
++    }
++}
++
++}
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -65,28 +65,48 @@
+     }
+ }
+ 
+-pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
+-    model_info.tool_mode.unwrap_or_else(|| {
+-        if turn_context.config.features.enabled(Feature::CodeModeOnly) {
++/// Returns requested and effective modes using the runtime's own derivation.
++pub fn cmux_native_profile_tool_modes(
++    config: &crate::config::Config,
++    model_info: &ModelInfo,
++    code_mode_available: bool,
++) -> (ToolMode, ToolMode) {
++    let requested = model_info.tool_mode.unwrap_or_else(|| {
++        if config.features.enabled(Feature::CodeModeOnly) {
+             ToolMode::CodeModeOnly
+-        } else if turn_context.config.features.enabled(Feature::CodeMode) {
++        } else if config.features.enabled(Feature::CodeMode) {
+             ToolMode::CodeMode
+         } else {
+             ToolMode::Direct
+         }
+-    })
+-}
+-
+-pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
+-    let requested_tool_mode = requested_tool_mode(turn_context, model_info);
+-    if !turn_context.code_mode_available
+-        && requested_tool_mode == ToolMode::CodeMode
+-        && !turn_context.config.code_mode.disable_in_process_fallback
++    });
++    let effective = if !code_mode_available
++        && requested == ToolMode::CodeMode
++        && !config.code_mode.disable_in_process_fallback
+     {
+         ToolMode::Direct
+     } else {
+-        requested_tool_mode
+-    }
++        requested
++    };
++    (requested, effective)
++}
++
++pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
++    cmux_native_profile_tool_modes(
++        &turn_context.config,
++        model_info,
++        turn_context.code_mode_available,
++    )
++    .0
++}
++
++pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
++    cmux_native_profile_tool_modes(
++        &turn_context.config,
++        model_info,
++        turn_context.code_mode_available,
++    )
++    .1
+ }
+ 
+ /// Format the combined exec output for sending back to the model.
+@@ -140,3 +160,87 @@
+         exec_output.aggregated_output.text.clone()
+     }
+ }
++
++// Modified by Ouro: exercise the same pure tool-mode derivation used at runtime.
++#[cfg(test)]
++mod cmux_direct_mode_contract {
++    use super::*;
++    use codex_models_manager::model_info::model_info_from_slug;
++
++    #[tokio::test]
++    async fn cmux_direct_mode_explicit_direct_survives_both_availability_outcomes() {
++        let mut config = crate::config::test_config().await;
++        let model = ModelInfo {
++            tool_mode: Some(ToolMode::Direct),
++            ..model_info_from_slug("gpt-5.5")
++        };
++        for code_mode_only in [false, true] {
++            config
++                .features
++                .set_enabled(Feature::CodeModeOnly, code_mode_only)
++                .unwrap();
++            for code_mode in [false, true] {
++                config
++                    .features
++                    .set_enabled(Feature::CodeMode, code_mode)
++                    .unwrap();
++                for available in [false, true] {
++                    for no_fallback in [false, true] {
++                        config.code_mode.disable_in_process_fallback = no_fallback;
++                        assert_eq!(
++                            cmux_native_profile_tool_modes(&config, &model, available),
++                            (ToolMode::Direct, ToolMode::Direct)
++                        );
++                    }
++                }
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn cmux_direct_mode_uses_actual_precedence_and_fallback_rules() {
++        let mut config = crate::config::test_config().await;
++        for selector in [
++            None,
++            Some(ToolMode::Direct),
++            Some(ToolMode::CodeMode),
++            Some(ToolMode::CodeModeOnly),
++        ] {
++            let model = ModelInfo {
++                tool_mode: selector,
++                ..model_info_from_slug("gpt-5.5")
++            };
++            for code_mode_only in [false, true] {
++                config
++                    .features
++                    .set_enabled(Feature::CodeModeOnly, code_mode_only)
++                    .unwrap();
++                for code_mode in [false, true] {
++                    config
++                        .features
++                        .set_enabled(Feature::CodeMode, code_mode)
++                        .unwrap();
++                    let requested = match selector {
++                        Some(mode) => mode,
++                        None if code_mode_only => ToolMode::CodeModeOnly,
++                        None if code_mode => ToolMode::CodeMode,
++                        None => ToolMode::Direct,
++                    };
++                    for available in [false, true] {
++                        for no_fallback in [false, true] {
++                            config.code_mode.disable_in_process_fallback = no_fallback;
++                            let expected = match (requested, available, no_fallback) {
++                                (ToolMode::CodeMode, false, false) => ToolMode::Direct,
++                                _ => requested,
++                            };
++                            assert_eq!(
++                                cmux_native_profile_tool_modes(&config, &model, available),
++                                (requested, expected)
++                            );
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -128,6 +128,7 @@
+ pub use thread_manager::local_agent_graph_store_from_state_db;
+ pub use thread_manager::passthrough_image_store;
+ pub use thread_manager::thread_store_from_config;
++pub use tools::cmux_native_profile_tool_modes;
+ pub use tools::handlers::WaitForEnvironmentToolConfig;
+ pub use web_search::web_search_action_detail;
+ pub use windows_sandbox_read_grants::grant_read_root_non_elevated;
