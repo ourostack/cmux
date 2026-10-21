@@ -1,0 +1,34 @@
+name: Shepherd CI capacity probe
+
+on:
+  push:
+    branches:
+      - worker/shepherd-v1-ci-capacity-20261020
+
+permissions:
+  contents: read
+
+jobs:
+  capacity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report ephemeral runner capacity and installed compiler versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'os='; uname -s
+          printf 'architecture='; uname -m
+          printf 'runner_os=%s\n' "$RUNNER_OS"
+          printf 'runner_arch=%s\n' "$RUNNER_ARCH"
+          printf 'image_os=%s\n' "${ImageOS:-not-set}"
+          printf 'image_version=%s\n' "${ImageVersion:-not-set}"
+          df -B1 --output=source,fstype,size,used,avail,target / /mnt
+          export RUSTUP_AUTO_INSTALL=0
+          for compiler in rustc cargo swift clang; do
+            if command -v "$compiler" >/dev/null 2>&1; then
+              "$compiler" --version
+            else
+              printf '%s=not-installed\n' "$compiler"
+            fi
+          done
