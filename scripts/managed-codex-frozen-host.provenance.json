@@ -22,7 +22,7 @@
     "codex-rs/app-server/src/request_processors/thread_processor.rs": "37a4451e58673b3577c432207a510a7322fd10af5e1e535bb2be8317d5fcb1d9",
     "codex-rs/app-server/src/message_processor.rs": "2186e5e1ec407c66ff8627008c7f319d22aa76f68bccb6c04ed454b0b8f22fa8"
   },
-  "modifications": "Ouro source-owned frozen SDK extension: sealed derived configuration, deferred explicit bootstrap, bounded typed no-steering admission/root/callback ownership, independent pumps and checked CONTROL, positive actual listener witness and linearized terminal publication/accounting. Ordinary SDK paths unchanged. All56 selected account-free app-server SDK source tests passed under source review138. Two included Core mode-query tests remain unexecuted. No actual backend/bootstrap, native/Root integration, production policy enforcement, installation, release or runtime/V1 qualification.",
+  "modifications": "Ouro source-owned frozen SDK extension: sealed derived configuration, deferred explicit bootstrap, bounded typed no-steering admission/root/callback ownership, independent pumps and checked CONTROL, positive actual listener witness and linearized terminal publication/accounting. Ordinary SDK paths unchanged. All56 selected account-free app-server SDK source tests passed under source review138; both existing Core mode-query component tests passed separately in primary-project source run39620530060 under review147. No actual backend/bootstrap, native/Root integration, production profile-policy enforcement, installation, release or runtime/V1 qualification.",
   "qualification": false,
   "patch": {
     "path": "scripts/managed-codex-frozen-host.patch",
@@ -45,10 +45,21 @@
     "commit": "5cc953c056c54fe7cb1e0b8447688eda769a5710",
     "run": 39596684194,
     "selectedTestsPassed": 56,
-    "actualCoreTestsExecuted": false,
+    "actualCoreTestsExecuted": true,
     "effectfulBootstrapExecuted": false,
     "nativeIntegrationQualified": false,
-    "runtimeQualified": false
+    "runtimeQualified": false,
+    "coreModeComponentValidation": {
+      "review": 147,
+      "repository": "ourostack/ouroboros",
+      "commit": "031cc59f1b069c6ff324de37d599b6464c95a476",
+      "run": 39620530060,
+      "selectedTestsPassed": 2,
+      "sourceSelector": "cmux_direct_mode_contract",
+      "productionProfilePolicyEnforced": false,
+      "effectfulBootstrapExecuted": false,
+      "runtimeQualified": false
+    }
   },
   "noticePaths": {
     "LICENSE": "scripts/managed-codex-frozen-host.LICENSE",
