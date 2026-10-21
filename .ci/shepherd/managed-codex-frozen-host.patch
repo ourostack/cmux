@@ -1,0 +1,34 @@
+diff --git a/codex-rs/app-server/src/config_manager.rs b/codex-rs/app-server/src/config_manager.rs
+--- a/codex-rs/app-server/src/config_manager.rs
++++ b/codex-rs/app-server/src/config_manager.rs
+@@ -366,3 +366,12 @@
+         }
+     }
+ }
++
++// Modified by Ouro: source-only checks for the explicit frozen SDK API.
++#[cfg(test)]
++mod cmux_frozen_api_contract {
++    #[test]
++    fn cmux_frozen_constructor_api_is_explicit() {
++        let _constructor = super::ConfigManager::new_frozen;
++    }
++}
+diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
+--- a/codex-rs/app-server/src/in_process.rs
++++ b/codex-rs/app-server/src/in_process.rs
+@@ -1040,3 +1040,14 @@
+         ));
+     }
+ }
++
++// Modified by Ouro: source-only checks; never construct or start a backend.
++#[cfg(test)]
++mod cmux_frozen_api_contract {
++    #[test]
++    fn cmux_frozen_start_api_is_explicit() {
++        let _start = super::start_frozen;
++        let _args_size = std::mem::size_of::<super::FrozenInProcessStartArgs>();
++        let _handle_size = std::mem::size_of::<super::FrozenInProcessHandle>();
++    }
++}
