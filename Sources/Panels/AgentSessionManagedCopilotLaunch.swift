@@ -7,9 +7,7 @@ import Foundation
 /// Owned source-candidate composition, never a runtime/profile qualification.
 @MainActor
 final class AgentSessionManagedCopilotLaunch {
-    enum StartError: Error {
-        case nativeProfileUnqualified
-    }
+    typealias StartError = AgentSessionManagedNativeOwner.ProfileError
 
     enum CloseError: Error {
         case supervisorExitUnobserved(
@@ -19,156 +17,13 @@ final class AgentSessionManagedCopilotLaunch {
         case commandWorkUnsettled(outstanding: Int)
     }
 
-    struct Scope: Equatable {
-        let hostInstance: UUID
-        let workspaceID: UUID
-        let surfaceID: UUID
-        let generation: UInt64
-    }
-
-    /// A native object capability, never decoded from bridge or provider data.
-    @MainActor final class NativeCodingOwner {
-        private enum ProfileRequirement {
-            case qualifiedNativeProfile
-            #if SHEPHERD_SOURCE_TEST
-            case controlledSourceFixture
-            #endif
-        }
-
-        private struct QualifiedNativeProfile: Hashable {
-            let executableSHA256: String
-            let profileSHA256: String
-            let rendererID: String
-        }
-        private static let qualifiedNativeProfiles: Set<QualifiedNativeProfile> = []
-
-        static func hasQualifiedNativeProfile(rendererID: String) -> Bool {
-            qualifiedNativeProfiles.contains { $0.rendererID == rendererID }
-        }
-
-        static let executionDisclosure =
-            "General-purpose foreground coding commands run as your OS account, with no sandbox " +
-            "and no per-call SDK permission prompt. They can access or change files and use the network " +
-            "where your account has access. The project folder is a working directory, not confinement."
-        private static let hostInstance = UUID()
-        let scope: Scope
-        let projectMandate = UUID()
-        let workingDirectory: String
-        let rendererID: String
-        private let host: AgentPIDProcessIdentity
-        private weak var owningStore: AnyObject?
-        private let isCurrentOwner: @MainActor () -> Bool
-        private weak var lifetime: AgentSessionManagedSession?
-        private var consumed = false
-        private var revoked = false
-        private var revocationSink: (() -> Void)?
-        private let profileRequirement: ProfileRequirement
-
-        static func issueForFreshNativePanel(
-            newPanelID: UUID, workspaceID: UUID, rendererID: String, workingDirectory: String,
-            owningStore: AnyObject, isCurrentOwner: @escaping @MainActor () -> Bool
-        ) -> NativeCodingOwner? {
-            NativeCodingOwner(
-                newPanelID: newPanelID, workspaceID: workspaceID, rendererID: rendererID,
-                workingDirectory: workingDirectory, owningStore: owningStore,
-                isCurrentOwner: isCurrentOwner, profileRequirement: .qualifiedNativeProfile
-            )
-        }
-
-        #if SHEPHERD_SOURCE_TEST
-        convenience init?(
-            newPanelID: UUID, workspaceID: UUID, rendererID: String, workingDirectory: String,
-            owningStore: AnyObject, isCurrentOwner: @escaping @MainActor () -> Bool
-        ) {
-            self.init(
-                newPanelID: newPanelID, workspaceID: workspaceID, rendererID: rendererID,
-                workingDirectory: workingDirectory, owningStore: owningStore,
-                isCurrentOwner: isCurrentOwner, profileRequirement: .controlledSourceFixture
-            )
-        }
-        #endif
-
-        private init?(
-            newPanelID: UUID, workspaceID: UUID, rendererID: String, workingDirectory: String,
-            owningStore: AnyObject, isCurrentOwner: @escaping @MainActor () -> Bool,
-            profileRequirement: ProfileRequirement
-        ) {
-            guard ["react", "solid"].contains(rendererID),
-                  let host = AgentPIDProcessIdentity(pid: getpid()),
-                  let directory = try? AgentSessionManagedCopilotLaunch.canonicalPath(workingDirectory),
-                  isCurrentOwner() else { return nil }
-            self.scope = Scope(
-                hostInstance: Self.hostInstance, workspaceID: workspaceID, surfaceID: newPanelID, generation: 1
-            )
-            self.workingDirectory = directory
-            self.rendererID = rendererID
-            self.host = host
-            self.owningStore = owningStore
-            self.isCurrentOwner = isCurrentOwner
-            self.profileRequirement = profileRequirement
-        }
-
-        func consume(
-            for store: AnyObject, scope: Scope, workingDirectory: String, projectMandate: UUID
-        ) -> Bool {
-            guard !consumed, owningStore === store, self.scope == scope,
-                  self.projectMandate == projectMandate,
-                  (try? AgentSessionManagedCopilotLaunch.canonicalPath(workingDirectory)) == self.workingDirectory,
-                  isCurrent else {
-                revoke()
-                return false
-            }
-            consumed = true
-            return true
-        }
-
-        func installRevocationSink(for store: AnyObject, _ sink: @escaping () -> Void) -> Bool {
-            guard consumed, owningStore === store, revocationSink == nil, isCurrent else { return false }
-            revocationSink = sink
-            return true
-        }
-
-        func bind(to lifetime: AgentSessionManagedSession) -> Bool {
-            guard consumed, self.lifetime == nil, isCurrent,
-                  lifetime.ownsWorkingDirectory(workingDirectory) else {
-                revoke()
-                return false
-            }
-            self.lifetime = lifetime
-            return true
-        }
-
-        var isCurrent: Bool {
-            !revoked && owningStore != nil && AgentPIDProcessIdentity(pid: getpid()) == host && isCurrentOwner()
-        }
-
-        func authorizes(_ lifetime: AgentSessionManagedSession) -> Bool {
-            consumed && self.lifetime === lifetime && isCurrent
-        }
-
-        func requireQualifiedProfile(executableSHA256: String, profileSHA256: String) throws {
-            switch profileRequirement {
-            case .qualifiedNativeProfile:
-                guard Self.qualifiedNativeProfiles.contains(QualifiedNativeProfile(
-                    executableSHA256: executableSHA256, profileSHA256: profileSHA256, rendererID: rendererID
-                )) else { throw StartError.nativeProfileUnqualified }
-            #if SHEPHERD_SOURCE_TEST
-            case .controlledSourceFixture:
-                break
-            #endif
-            }
-        }
-
-        func revoke() {
-            guard !revoked else { return }
-            revoked = true
-            revocationSink?()
-        }
-    }
+    typealias Scope = AgentSessionManagedNativeOwner.Scope
+    typealias NativeCodingOwner = AgentSessionManagedNativeOwner
 
     static let arguments = ["--headless", "--no-auto-update", "--stdio", "--allow-all"]
     let lifetime: AgentSessionManagedSession
     let adapter: CopilotManagedSession
+    var providerAdapter: any AgentSessionManagedProviderAdapter { adapter }
     let codingAuthority: AgentSessionManagedCommandService.NativeCodingAuthority?
     let executableSHA256: String
     let profileSHA256: String
@@ -211,7 +66,7 @@ final class AgentSessionManagedCopilotLaunch {
         try Task.checkCancellation()
         let directory = try canonicalPath(workingDirectory)
         if let nativeCodingOwner {
-            guard nativeCodingOwner.scope == scope,
+            guard nativeCodingOwner.provider == .copilot, nativeCodingOwner.scope == scope,
                   nativeCodingOwner.projectMandate == codingProjectMandate,
                   nativeCodingOwner.workingDirectory == directory,
                   nativeCodingOwner.isCurrent else { throw CancellationError() }

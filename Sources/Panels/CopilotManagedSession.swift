@@ -4,7 +4,7 @@ import Foundation
 
 /// Private owner-input transport and work evidence. Automatic input is not exposed.
 @MainActor
-final class CopilotManagedSession {
+final class CopilotManagedSession: AgentSessionManagedProviderAdapter {
     enum Phase: String {
         case idle, connecting, creating, configuring, awaitingReadback, configurationObserved, held
         case sending, awaitingRoot, inspectingWork, workObserved
@@ -26,15 +26,9 @@ final class CopilotManagedSession {
             && commandAuthorityIsLive
     }
     var inputState: ShepherdManagedSessionState? { turnLedger?.state }
+    var configurationObserved: Bool { phase == .configurationObserved }
 
-    struct SupervisorInputProgress {
-        let inputID: UUID
-        let identity: ShepherdManagedSessionIdentity
-        let editorInserted = true
-        var backendWriteAdmitted = false
-        var providerInputID: String?
-        var failureReason: String?
-    }
+    typealias SupervisorInputProgress = AgentSessionManagedInputProgress
 
     private var supervisorInputs: [UUID: SupervisorInputProgress] = [:]
     private var supervisorProgressSinks: [UUID: (SupervisorInputProgress) -> Void] = [:]

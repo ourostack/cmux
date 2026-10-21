@@ -11,14 +11,14 @@ final class AgentSessionManagedShepherdBoundary {
     }
 
     struct Target {
-        let nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+        let nativeOwner: AgentSessionManagedNativeOwner
         let store: AgentSessionProcessStore
         let renderer: AgentSessionManagedRendererController
         let sessionID: String
     }
 
     private final class Observation {
-        weak var owner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?
+        weak var owner: AgentSessionManagedNativeOwner?
         weak var store: AgentSessionProcessStore?
         weak var renderer: AgentSessionManagedRendererController?
         let sessionID: String
@@ -247,11 +247,12 @@ final class AgentSessionManagedShepherdBoundary {
         }
     }
 
-    private func update(_ id: UUID, progress: CopilotManagedSession.SupervisorInputProgress) {
+    private func update(_ id: UUID, progress: AgentSessionManagedInputProgress) {
         guard let record = records[id] else { return }
-        guard progress.inputID == id, progress.identity == record.identity, progress.editorInserted,
-              !record.backendWriteAdmitted || progress.backendWriteAdmitted,
-              record.providerInputID == nil || record.providerInputID == progress.providerInputID else {
+        guard progress.matches(
+            inputID: id, identity: record.identity, backendWriteAdmitted: record.backendWriteAdmitted,
+            providerInputID: record.providerInputID
+        ) else {
             record.cancellation.cancel()
             record.reason = "progress_identity_mismatch"
             return
@@ -288,7 +289,8 @@ final class AgentSessionManagedShepherdBoundary {
               state.identity.hostInstance == target.nativeOwner.scope.hostInstance,
               state.identity.workspaceID == target.nativeOwner.scope.workspaceID,
               state.identity.surfaceID == target.nativeOwner.scope.surfaceID,
-              state.identity.surfaceGeneration == target.nativeOwner.scope.generation else { return nil }
+              state.identity.surfaceGeneration == target.nativeOwner.scope.generation,
+              state.identity.provider == target.nativeOwner.provider else { return nil }
         return state
     }
 

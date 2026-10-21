@@ -36,6 +36,8 @@ class ManagedProcessStoreTests(unittest.TestCase):
             "Sources/Panels/CodexAppServerQueuedInput.swift", "Sources/Panels/AgentSessionOwnedProcessLauncher.swift",
             "Sources/Panels/AgentSessionManagedSession.swift", "Sources/Panels/AgentSessionManagedCommand.swift",
             "Sources/Panels/AgentSessionManagedCopilotLaunch.swift",
+            "Sources/Panels/AgentSessionManagedNativeOwner.swift",
+            "Sources/Panels/AgentSessionManagedProviderAdapter.swift",
             "Sources/Panels/AgentSessionManagedRendererController.swift",
             "Sources/Panels/AgentSessionManagedRendererReservation.swift",
             "Sources/Panels/AgentSessionManagedCommandService.swift", "Sources/Panels/CopilotManagedSession.swift",
@@ -138,6 +140,52 @@ let package = Package(name: "ManagedStoreSource", platforms: [.macOS(.v14)],
         }, indent=2))
         self.assertEqual(result.returncode, 0, evidence.read_text())
         return json.loads(result.stdout)
+
+    def test_native_owner_binding_rejects_foreign_provider_before_backend_identity(self):
+        result = self.run_store("native-provider-binding")
+        self.assertEqual(result["events"], 0, result)
+        for provider in ("copilot", "codex", "claude"):
+            with self.subTest(provider=provider):
+                check = result["providers"][provider]
+                self.assertTrue(check["identityMissing"], result)
+                self.assertEqual(check["accepted"], provider == "copilot", result)
+                self.assertEqual(check["ownerCurrent"], provider == "copilot", result)
+
+    def test_native_owner_binding_requires_exact_scope_before_backend_identity(self):
+        result = self.run_store("native-scope-binding")
+        self.assertEqual(result["events"], 0, result)
+        for candidate, check in result["providers"].items():
+            with self.subTest(candidate=candidate):
+                self.assertTrue(check["identityMissing"], result)
+                self.assertEqual(check["accepted"], candidate == "exact", result)
+                self.assertEqual(check["ownerCurrent"], candidate == "exact", result)
+
+    def test_common_native_owner_binds_only_its_declared_provider_without_qualifying_any_profile(self):
+        result = self.run_store("native-provider-owner-matrix")
+        self.assertEqual(result["events"], 0, result)
+        self.assertFalse(result["storeActive"], result)
+        self.assertEqual(len(result["providers"]), 9, result)
+        for pair, check in result["providers"].items():
+            with self.subTest(pair=pair):
+                owner, lifetime = pair.split("-")
+                self.assertTrue(check["identityMissing"], result)
+                for field in ("accepted", "ownerCurrent", "authorizes"):
+                    self.assertEqual(check[field], owner == lifetime, result)
+                self.assertFalse(check["reactQualified"], result)
+                self.assertFalse(check["solidQualified"], result)
+
+    def test_shared_progress_rejects_foreign_provider_with_all_other_ids_identical(self):
+        result = self.run_store("native-progress-provider-binding")
+        self.assertEqual(result["events"], 0, result)
+        self.assertFalse(result["storeActive"], result)
+        self.assertEqual(len(result["checks"]), 24, result)
+        for pair, accepted in result["checks"].items():
+            with self.subTest(pair=pair):
+                if pair.startswith(("wrong-input-", "write-regression-", "ack-regression-")):
+                    self.assertFalse(accepted, result)
+                else:
+                    expected, observed = pair.split("-")
+                    self.assertEqual(accepted, expected == observed, result)
 
     def test_managed_socket_methods_bypass_relay_and_keep_the_classic_namespace_distinct(self):
         result = self.run_store("managed-socket-route")

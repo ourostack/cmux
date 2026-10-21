@@ -1,16 +1,17 @@
 import CmuxControlSocket
 import Foundation
 
+enum AgentSessionManagedProjection {
+    case assistant(String)
+    case commandStarted(String, AgentSessionManagedCommand)
+    case commandCompleted(String, AgentSessionManagedCommand, Int32, String)
+    case turnComplete
+}
+
 /// Provider event attribution and positive work evidence, never profile qualification or input admission.
 @MainActor
 final class CopilotManagedTurnLedger {
-    enum Projection {
-        case assistant(String)
-        case commandStarted(String, AgentSessionManagedCommand)
-        case commandCompleted(String, AgentSessionManagedCommand, Int32, String)
-        case turnComplete
-    }
-
+    typealias Projection = AgentSessionManagedProjection
     enum WorkReadback: String, CaseIterable {
         case refresh, tasks, schedules, pendingTools
     }

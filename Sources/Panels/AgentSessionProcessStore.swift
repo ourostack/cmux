@@ -65,7 +65,7 @@ final class AgentSessionProcessStore {
     ) -> ShepherdManagedSessionState? {
         guard ownsManagedCodingOwner(candidate), let owner = managedCopilot,
               owner.nativeCodingOwner === candidate, let launch = owner.launch,
-              let state = launch.adapter.inputState, state.identity == launch.lifetime.identity,
+              let state = launch.providerAdapter.inputState, state.identity == launch.lifetime.identity,
               managedCopilot === owner, owner.launch === launch,
               owner.started, !owner.isClosing, !owner.failed else { return nil }
         return state
@@ -82,21 +82,21 @@ final class AgentSessionProcessStore {
     func beginManagedSupervisorInput(
         sessionId: String, submission: AgentSessionManagedRendererController.Submission,
         nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner,
-        progress: ((CopilotManagedSession.SupervisorInputProgress) -> Void)? = nil
+        progress: ((AgentSessionManagedInputProgress) -> Void)? = nil
     ) -> Bool {
         guard ownsManagedCodingOwner(nativeOwner), let owner = managedCopilot,
               owner.sessionID == sessionId, owner.nativeCodingOwner === nativeOwner,
               let launch = owner.launch else { return false }
-        return launch.adapter.beginSupervisorInput(
+        return launch.providerAdapter.beginSupervisorInput(
             submission, nativeOwner: nativeOwner, owningStore: self, progress: progress
         )
     }
 
     func managedSupervisorInputProgress(
         sessionId: String, inputID: UUID
-    ) -> CopilotManagedSession.SupervisorInputProgress? {
+    ) -> AgentSessionManagedInputProgress? {
         guard let owner = managedCopilot, owner.sessionID == sessionId else { return nil }
-        return owner.launch?.adapter.supervisorInputProgress(inputID)
+        return owner.launch?.providerAdapter.supervisorInputProgress(inputID)
     }
 
     func startManagedCopilot(

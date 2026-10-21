@@ -1,5 +1,6 @@
 import CmuxFoundation
 import Darwin
+import CmuxControlSocket
 import Foundation
 
 @main
@@ -68,6 +69,104 @@ struct ManagedProcessStoreFixture {
         let store = AgentSessionProcessStore()
         var events: [[String: Any]] = []
         store.eventSink = { events.append($0) }
+        if scenario == "native-progress-provider-binding" {
+            let host = UUID(), workspace = UUID(), surface = UUID(), inputID = UUID()
+            func identity(_ provider: ShepherdManagedProvider) throws -> ShepherdManagedSessionIdentity {
+                guard let result = ShepherdManagedSessionIdentity(
+                    hostInstance: host, workspaceID: workspace, surfaceID: surface,
+                    backendPID: getpid(), backendStartSeconds: 1, backendStartMicroseconds: 0,
+                    provider: provider, providerSessionID: "same-provider-session", surfaceGeneration: 1,
+                    executableSHA256: String(repeating: "a", count: 64),
+                    profileSHA256: String(repeating: "b", count: 64)
+                ) else { throw POSIXError(.EINVAL) }
+                return result
+            }
+            var checks: [String: Bool] = [:]
+            for expected in [ShepherdManagedProvider.copilot, .codex, .claude] {
+                for observed in [ShepherdManagedProvider.copilot, .codex, .claude] {
+                    var progress = AgentSessionManagedInputProgress(inputID: inputID, identity: try identity(observed))
+                    progress.backendWriteAdmitted = true
+                    progress.providerInputID = "same-provider-input"
+                    checks["\(expected.rawValue)-\(observed.rawValue)"] = progress.matches(
+                        inputID: inputID, identity: try identity(expected),
+                        backendWriteAdmitted: true, providerInputID: "same-provider-input"
+                    )
+                    checks["wrong-input-\(expected.rawValue)-\(observed.rawValue)"] = progress.matches(
+                        inputID: UUID(), identity: try identity(expected),
+                        backendWriteAdmitted: true, providerInputID: "same-provider-input"
+                    )
+                }
+                var progress = AgentSessionManagedInputProgress(inputID: inputID, identity: try identity(expected))
+                checks["write-regression-\(expected.rawValue)"] = progress.matches(
+                    inputID: inputID, identity: try identity(expected),
+                    backendWriteAdmitted: true, providerInputID: nil
+                )
+                progress.backendWriteAdmitted = true
+                progress.providerInputID = "different-input"
+                checks["ack-regression-\(expected.rawValue)"] = progress.matches(
+                    inputID: inputID, identity: try identity(expected),
+                    backendWriteAdmitted: true, providerInputID: "same-provider-input"
+                )
+            }
+            return ["checks": checks, "events": events.count, "storeActive": store.hasActiveProviderSession]
+        }
+        if scenario == "native-provider-binding" || scenario == "native-scope-binding" ||
+            scenario == "native-provider-owner-matrix" {
+            var checks: [String: [String: Bool]] = [:]
+            let panel = UUID(), workspace = UUID(), nonce = UUID()
+            let cases = scenario == "native-provider-binding"
+                ? ["copilot", "codex", "claude"] : scenario == "native-provider-owner-matrix"
+                ? ["copilot-copilot", "copilot-codex", "copilot-claude", "codex-copilot", "codex-codex",
+                   "codex-claude", "claude-copilot", "claude-codex", "claude-claude"]
+                : ["exact", "host", "workspace", "surface", "generation", "cwd"]
+            for candidate in cases {
+                let parts = candidate.split(separator: "-").map(String.init)
+                let declared = parts.last ?? candidate
+                let provider: ShepherdManagedProvider = declared == "codex" ? .codex
+                    : declared == "claude" ? .claude : .copilot
+                let ownerProvider = parts.count == 2
+                    ? ShepherdManagedProvider(rawValue: parts[0])! : .copilot
+                guard let owner = AgentSessionManagedNativeOwner(
+                    newPanelID: panel, workspaceID: workspace, rendererID: "react",
+                    workingDirectory: directory.path, owningStore: store, isCurrentOwner: { true },
+                    provider: ownerProvider
+                ), owner.consume(
+                    for: store, scope: owner.scope, workingDirectory: owner.workingDirectory,
+                    projectMandate: owner.projectMandate
+                ) else { throw POSIXError(.EINVAL) }
+                let output = Pipe(), error = Pipe()
+                defer {
+                    try? output.fileHandleForWriting.close()
+                    try? error.fileHandleForWriting.close()
+                }
+                let lifetime = try AgentSessionManagedSession(
+                    nonce: nonce, hostInstance: candidate == "host" ? UUID() : owner.scope.hostInstance,
+                    workspaceID: candidate == "workspace" ? UUID() : owner.scope.workspaceID,
+                    surfaceID: candidate == "surface" ? UUID() : owner.scope.surfaceID,
+                    surfaceGeneration: candidate == "generation" ? 2 : owner.scope.generation, provider: provider,
+                    executableURL: executable,
+                    executableIdentity: .capture(path: executable.path),
+                    executableSHA256: String(repeating: "a", count: 64),
+                    profileSHA256: String(repeating: "b", count: 64),
+                    workingDirectory: candidate == "cwd" ? "/" : owner.workingDirectory,
+                    stdout: output.fileHandleForReading, stderr: error.fileHandleForReading
+                )
+                let identityMissing = lifetime.identity == nil
+                let accepted = owner.bind(to: lifetime)
+                checks[candidate] = [
+                    "identityMissing": identityMissing, "accepted": accepted,
+                    "ownerCurrent": owner.isCurrent, "authorizes": owner.authorizes(lifetime),
+                    "reactQualified": AgentSessionManagedNativeOwner.hasQualifiedNativeProfile(
+                        rendererID: "react", provider: ownerProvider
+                    ),
+                    "solidQualified": AgentSessionManagedNativeOwner.hasQualifiedNativeProfile(
+                        rendererID: "solid", provider: ownerProvider
+                    ),
+                ]
+                try lifetime.abandon()
+            }
+            return ["providers": checks, "events": events.count, "storeActive": store.hasActiveProviderSession]
+        }
         if scenario.hasPrefix("native-coding-production-") {
             return try await runProductionNativeCoding(
                 scenario, store: store, executable: executable, directory: directory

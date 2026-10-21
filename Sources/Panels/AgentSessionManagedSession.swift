@@ -119,6 +119,12 @@ final class AgentSessionManagedSession {
     private var abandoned = false
 
     var hasActuallyDrainedStreams: Bool { stdoutEOF && stderrEOF }
+    var declaredProvider: ShepherdManagedProvider { provider }
+
+    func ownsNativeScope(hostInstance: UUID, workspaceID: UUID, surfaceID: UUID, generation: UInt64) -> Bool {
+        self.hostInstance == hostInstance && self.workspaceID == workspaceID &&
+            self.surfaceID == surfaceID && surfaceGeneration == generation
+    }
 
     func ownsWorkingDirectory(_ directory: String) -> Bool { directory == workingDirectory }
 
