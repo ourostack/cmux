@@ -52,7 +52,12 @@ beforeAll(async () => {
   }
 });
 
-function mount(renderer: RendererKind, nativeSession?: NativeManagedSession, earlyEvents: AgentEvent[] = []) {
+function mount(
+  renderer: RendererKind,
+  nativeSession?: NativeManagedSession,
+  earlyEvents: AgentEvent[] = [],
+  bundleSource: "source" | "packaged" = "source",
+) {
   const errors: string[] = [];
   const messages: string[] = [];
   let completeCommand: (() => void) | null = null;
@@ -93,10 +98,33 @@ function mount(renderer: RendererKind, nativeSession?: NativeManagedSession, ear
       },
     } } },
   });
-  const source = bundles.get(renderer);
-  if (!source) throw new Error(`Missing built ${renderer} fixture.`);
-  dom.window.eval(readFileSync(new URL("../../Resources/markdown-viewer/marked.min.js", import.meta.url), "utf8"));
-  dom.window.eval(source);
+  if (bundleSource === "packaged") {
+    const page = JSDOM.fragment(readFileSync(
+      new URL(`../../Resources/agent-session-${renderer}/index.html`, import.meta.url), "utf8",
+    ));
+    const scripts = [...page.querySelectorAll("script")];
+    if (!page.querySelector("#root") || scripts.length !== 2 || scripts.some((script) => script.src)) {
+      throw new Error(`Unexpected packaged ${renderer} page.`);
+    }
+    const escapeScript = (text: string) => text.replace(/<\/script/gi, "<\\/script").replace(/<!--/g, "<\\!--");
+    expect(scripts[0]?.textContent?.trim()).toBe(escapeScript(readFileSync(
+      new URL("../../Resources/markdown-viewer/marked.min.js", import.meta.url), "utf8",
+    )).trim());
+    expect(scripts[1]?.textContent?.trim()).toBe(escapeScript(readFileSync(
+      new URL(`../../Resources/agent-session-${renderer}/assets/app.js`, import.meta.url), "utf8",
+    )).trim());
+    expect(page.querySelector("style")?.textContent?.trim()).toBe(readFileSync(
+      new URL(`../../Resources/agent-session-${renderer}/assets/styles.css`, import.meta.url), "utf8",
+    ).trim());
+    // Bun's JSDOM VM loses top-level var bindings within eval; these self-contained
+    // packaged scripts publish their public bridge explicitly on window.
+    for (const script of scripts) dom.window.eval(`(function () {\n${script.textContent ?? ""}\n}).call(window)`);
+  } else {
+    const source = bundles.get(renderer);
+    if (!source) throw new Error(`Missing built ${renderer} fixture.`);
+    dom.window.eval(readFileSync(new URL("../../Resources/markdown-viewer/marked.min.js", import.meta.url), "utf8"));
+    dom.window.eval(source);
+  }
   return { dom, errors, messages, completeCommand: () => {
     if (!completeCommand) throw new Error("No controlled command completion is pending.");
     completeCommand();
@@ -130,11 +158,11 @@ function composer(fixture: ReturnType<typeof mount>): ManagedComposer {
   return bridge.managedComposer;
 }
 
-function paintedFixture(renderer: RendererKind) {
+function paintedFixture(renderer: RendererKind, bundleSource: "source" | "packaged" = "source") {
   const fixture = mount(renderer, {
     providerId: "copilot", sessionId: "native-owned-session", status: "running", revision: 2,
     executionDisclosure: disclosure,
-  });
+  }, [], bundleSource);
   // JSDOM has no layout/innerText engine or OS focus; only those platform facts are controlled.
   Object.defineProperty(fixture.dom.window.document.body, "innerText", {
     configurable: true,
@@ -196,6 +224,47 @@ async function editActualComposer(fixture: ReturnType<typeof mount>, text: strin
 }
 
 for (const renderer of ["react", "solid"] as const) {
+  test(`packaged ${renderer} preserves managed literal custody through insertion and acknowledged cleanup`, async () => {
+    const fixture = paintedFixture(renderer, "packaged");
+    try {
+      const document = fixture.dom.window.document;
+      document.hasFocus = () => false;
+      await waitFor(() => document.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')?.disabled === false);
+      const lane = composer(fixture);
+      const snapshot = await paintedCapture(lane);
+      expect(snapshot.screen).toContain(disclosure);
+      const activeElement = document.activeElement;
+      const literal = "<script>literal</script>\n@owner $token";
+      const receipt = await lane.reserve(snapshot, literal);
+      if (!receipt) throw new Error("Missing packaged owned insertion receipt.");
+      fixture.advance(149);
+      expect(lane.validate(receipt)).toBe(false);
+      fixture.advance(1);
+      expect(lane.validate(receipt)).toBe(true);
+      const editor = document.querySelector<HTMLElement>("textarea, .ProseMirror");
+      if (!editor) throw new Error("Missing packaged editor.");
+      expect(editor instanceof fixture.dom.window.HTMLTextAreaElement ? editor.value
+        : Array.from(editor.querySelectorAll("p"), (paragraph) => paragraph.textContent).join("\n")).toBe(literal);
+      expect(editor.querySelector("script")).toBeNull();
+      fixture.dom.window.cmuxAgentBridge?.receive({
+        type: "provider.output", providerId: "copilot", sessionId: "native-owned-session",
+        stream: "stdout", text: "Packaged coding output",
+      });
+      await waitFor(() => document.body.textContent?.includes("Packaged coding output") === true);
+      fixture.advance(2500);
+      expect(lane.validate(receipt)).toBe(false);
+      expect(lane.consume(receipt)).toBe(true);
+      expect((await paintedCapture(lane)).editorText).toBe("");
+      expect(lane.consume(receipt)).toBe(false);
+      expect(document.activeElement).toBe(activeElement);
+      expect(document.hasFocus()).toBe(false);
+      expect(fixture.messages.filter((method) => method !== "app.context" && method !== "provider.list")).toEqual([]);
+      expect(fixture.errors).toEqual([]);
+    } finally {
+      fixture.dom.window.close();
+    }
+  });
+
   test(`actual ${renderer} consumes only its unchanged inserted literal after output and lease expiry`, async () => {
     const fixture = paintedFixture(renderer);
     try {
