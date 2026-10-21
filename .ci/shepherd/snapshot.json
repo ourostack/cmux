@@ -1,0 +1,32 @@
+{
+  "repository": "ourostack/cmux",
+  "upstream_commit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
+  "upstream_tree": "74ba48a4b6b086beb9226a79ffe0f3d9f6d40f52",
+  "qualification": false,
+  "files": {
+    "LICENSE.codex": {
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+      "bytes": 10926
+    },
+    "NOTICE.codex": {
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+      "bytes": 242
+    },
+    "build-managed-codex-host.py": {
+      "sha256": "2bbef622ca436226cf5f6b7432d5a81159cf7a2148afae49c80832604d9e9f2a",
+      "bytes": 35932
+    },
+    "managed-codex-frozen-host.patch": {
+      "sha256": "038af2358c9facdcad3650365913cbb2e456b2771f418da69227cd068b4afd42",
+      "bytes": 140863
+    },
+    "provenance.json": {
+      "sha256": "ae3c4f2463ef01ee438b253e58ef7e2ea7b74b7561e8dc5fadac7d595c8aa3a6",
+      "bytes": 1735
+    },
+    "runner.py": {
+      "sha256": "03d843bd90a9449c5a1d4945c0d0b85f54a2300f97a90c91da0d0a8d02d87e8f",
+      "bytes": 21802
+    }
+  }
+}
