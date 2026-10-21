@@ -1,4 +1,5 @@
 """Tiny owned-stage fixtures only: no network, Rust build, provider, or app."""
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import io
@@ -129,6 +130,143 @@ class ManagedCodexBuildTests(unittest.TestCase):
             )
             tool.chmod(0o700)
         return rust
+
+    @contextmanager
+    def release_source(self, *, count=150, version="0.0.0", duplicate=False, malformed=False):
+        blocks = []
+        for index in range(count):
+            name = "codex-app-server" if index == 0 else f"codex-local-{index:03d}"
+            if duplicate and index == 1:
+                name = "codex-app-server"
+            if malformed and index == 0:
+                name = ""
+            blocks.append(f'[[package]]\nname = "{name}"\nversion = "{version}"\n'
+                          'dependencies = ["serde"]\n')
+        lock = ('# retained source comment\nversion = 4\n\n' + "\n".join(blocks)
+                + '\n[[package]]\nname = "serde"\nversion = "1.0.0"\n'
+                'source = "registry+fixture"\nchecksum = "abc"\n').encode()
+        files = dict(self.files, **{"codex-rs/Cargo.lock": lock})
+        tree, root_tree = tree_for(files)
+        with patch.object(BUILD, "UPSTREAM_TREE", root_tree), \
+             patch.object(BUILD, "RELEASE_MANIFEST_BLOB",
+                          git_hash("blob", files["codex-rs/Cargo.toml"]), create=True), \
+             patch.object(BUILD, "RELEASE_LOCK_BLOB", git_hash("blob", lock), create=True), \
+             patch.object(BUILD, "_fetch_tree", return_value=tree), \
+             patch.object(BUILD, "_fetch_archive", return_value=archive_for(files)):
+            destination = self.root / f"source-release-{len(list(self.root.iterdir()))}"
+            yield BUILD.acquire_sdk(destination)
+
+    def test_release_lock_projection_preserves_source_external_graph_and_other_bytes(self):
+        with self.release_source() as source:
+            original = (source.root / "codex-rs/Cargo.lock").read_bytes()
+            stage = BUILD.prepare_stage(source.root, self.root / "stage", None, None)
+            actual = (stage.root / "codex-rs/Cargo.lock").read_bytes()
+            upstream = tomllib.loads(original.decode())
+            projected = tomllib.loads(actual.decode())
+            local = [item for item in projected["package"] if "source" not in item]
+            self.assertEqual(len(local), 150)
+            self.assertEqual({item["version"] for item in local}, {"0.154.0"})
+            self.assertEqual(actual, original.replace(b'version = "0.0.0"', b'version = "0.154.0"'))
+            self.assertEqual((source.root / "codex-rs/Cargo.lock").read_bytes(), original)
+            self.assertEqual((stage.root / "codex-rs/Cargo.toml").read_bytes(),
+                             self.files["codex-rs/Cargo.toml"])
+            self.assertEqual([item for item in projected["package"] if "source" in item],
+                             [item for item in upstream["package"] if "source" in item])
+            for before, after in zip(upstream["package"], projected["package"]):
+                self.assertEqual({key: value for key, value in before.items() if key != "version"},
+                                 {key: value for key, value in after.items() if key != "version"})
+            owner = json.loads((stage.root / BUILD.STAGE_OWNER).read_text())
+            proof = owner["release_lock_projection"]
+            self.assertEqual(proof["original_lock_sha256"], hashlib.sha256(original).hexdigest())
+            self.assertEqual(proof["projected_lock_sha256"], hashlib.sha256(actual).hexdigest())
+            self.assertEqual(len(proof["local_packages"]), 150)
+            self.assertEqual(proof["local_packages"]["codex-app-server"],
+                             {"from": "0.0.0", "to": "0.154.0"})
+            self.assertEqual(BUILD._stage(stage.root), stage)
+
+    def test_release_lock_projection_composes_member_and_compiler_receipt(self):
+        with self.release_source() as source:
+            stage = BUILD.prepare_stage(source.root, self.root / "stage", self.member(), None)
+            packages = tomllib.loads((stage.root / "codex-rs/Cargo.lock").read_text())["package"]
+            self.assertEqual(next(item for item in packages if item["name"] == BUILD.MEMBER)["version"],
+                             "0.1.0")
+            self.assertEqual({item["version"] for item in packages
+                              if "source" not in item and item["name"] != BUILD.MEMBER}, {"0.154.0"})
+            with patch.object(BUILD, "_free_bytes", return_value=61 * 1024**3):
+                result = BUILD.run_locked(stage, self.root / "target", self.compiler(),
+                                          ["test", "-p", BUILD.MEMBER])
+            owner = json.loads((stage.root / BUILD.STAGE_OWNER).read_text())
+            receipt = json.loads(result.receipt.read_text())
+            self.assertEqual(receipt["release_lock_projection"], owner["release_lock_projection"])
+            self.assertIn("--locked", receipt["command"])
+            self.assertFalse(receipt["qualification"])
+
+    def test_release_lock_projection_refuses_mixed_pair_before_writes(self):
+        with self.release_source() as source:
+            for name in ("RELEASE_MANIFEST_BLOB", "RELEASE_LOCK_BLOB"):
+                destination = self.root / name
+                with patch.object(BUILD, name, "0" * 40):
+                    with self.assertRaises(BUILD.BuildError):
+                        BUILD.prepare_stage(source.root, destination, None, None)
+                self.assertFalse(destination.exists())
+
+    def test_release_lock_projection_refuses_invalid_local_records_before_writes(self):
+        for index, options in enumerate((
+                {"count": 149}, {"version": "0.0.1"}, {"duplicate": True}, {"malformed": True})):
+            with self.subTest(options=options), self.release_source(**options) as source:
+                destination = self.root / f"bad-release-{index}"
+                with self.assertRaises(BUILD.BuildError):
+                    BUILD.prepare_stage(source.root, destination, None, None)
+                self.assertFalse(destination.exists())
+
+    def test_release_lock_projection_metadata_is_revalidated_without_mutation(self):
+        with self.release_source() as source:
+            stage = BUILD.prepare_stage(source.root, self.root / "stage", None, None)
+            owner_path = stage.root / BUILD.STAGE_OWNER
+            owner = json.loads(owner_path.read_text())
+            owner["release_lock_projection"] = {"local_packages": {}, "qualification": True}
+            owner_path.write_text(json.dumps(owner))
+            before = {path: path.read_bytes() for path in (owner_path, stage.root / "codex-rs/Cargo.lock")}
+            with self.assertRaises(BUILD.BuildError):
+                BUILD.prepare_stage(source.root, stage.root, None, None)
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_release_lock_projection_rejects_external_drift_even_with_rewritten_inventory(self):
+        with self.release_source() as source:
+            stage = BUILD.prepare_stage(source.root, self.root / "stage", None, None)
+            lock = stage.root / "codex-rs/Cargo.lock"
+            lock.write_bytes(lock.read_bytes().replace(b'checksum = "abc"', b'checksum = "foreign"'))
+            owner_path = stage.root / BUILD.STAGE_OWNER
+            owner = json.loads(owner_path.read_text())
+            owner["files"] = BUILD._snapshot(stage.root, [BUILD.STAGE_OWNER])
+            owner_path.write_text(json.dumps(owner))
+            changed = lock.read_bytes()
+            with self.assertRaises(BUILD.BuildError):
+                BUILD.prepare_stage(source.root, stage.root, None, None)
+            self.assertEqual(lock.read_bytes(), changed)
+
+    def test_release_lock_projection_refuses_preprojection_stage_without_migrating(self):
+        with self.release_source() as source:
+            stage = BUILD.prepare_stage(source.root, self.root / "stage", None, None)
+            lock = stage.root / "codex-rs/Cargo.lock"
+            lock.write_bytes((source.root / "codex-rs/Cargo.lock").read_bytes())
+            owner_path = stage.root / BUILD.STAGE_OWNER
+            owner = json.loads(owner_path.read_text())
+            owner.pop("release_lock_projection", None)
+            owner["files"] = BUILD._snapshot(stage.root, [BUILD.STAGE_OWNER])
+            owner_path.write_text(json.dumps(owner))
+            before = owner_path.read_bytes(), lock.read_bytes()
+            with self.assertRaises(BUILD.BuildError):
+                BUILD.prepare_stage(source.root, stage.root, None, None)
+            self.assertEqual((owner_path.read_bytes(), lock.read_bytes()), before)
+
+    def test_release_lock_projection_leaves_already_consistent_fixture_unchanged(self):
+        source = self.source()
+        stage = BUILD.prepare_stage(source.root, self.root / "stage", None, None)
+        self.assertEqual((stage.root / "codex-rs/Cargo.lock").read_bytes(),
+                         self.files["codex-rs/Cargo.lock"])
+        self.assertIsNone(json.loads((stage.root / BUILD.STAGE_OWNER).read_text()).get(
+            "release_lock_projection"))
 
     def test_acquisition_is_complete_exact_and_does_not_rewrite_existing_source(self):
         source = self.source()

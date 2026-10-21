@@ -22,6 +22,8 @@ import uuid
 
 UPSTREAM_COMMIT = "6b9826e3aa83b1a5947db50f4332cb9c65f1b340"
 UPSTREAM_TREE = "74ba48a4b6b086beb9226a79ffe0f3d9f6d40f52"
+RELEASE_MANIFEST_BLOB = "3cf0d009a8ecede0fb207cc9ec40ebef30f59b09"
+RELEASE_LOCK_BLOB = "45fca1b150822ec5f09689acef48c346b61a7afd"
 SOURCE_OWNER = ".cmux-managed-codex-source.json"
 STAGE_OWNER = ".cmux-managed-codex-stage.json"
 MAX_ARCHIVE = 128 * 1024 * 1024
@@ -272,6 +274,7 @@ def prepare_stage(source: Path, stage: Path, member: Path | None, patch: Path | 
     workspace = source.root / "codex-rs"
     manifest = (workspace / "Cargo.toml").read_bytes()
     lock = (workspace / "Cargo.lock").read_bytes()
+    lock, release_projection = _release_lock_projection(manifest, lock)
     if member_manifest is not None:
         manifest, lock = _workspace_member(manifest, lock, member_manifest)
     if not stage.exists():
@@ -296,6 +299,7 @@ def prepare_stage(source: Path, stage: Path, member: Path | None, patch: Path | 
         "patch_paths": sorted(patch_paths), "member_files": sorted(member_files),
         "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest() if patch is not None else None,
         "member_sha256": hashlib.sha256(json.dumps(member_files, sort_keys=True).encode()).hexdigest(),
+        "release_lock_projection": release_projection,
         "files": _snapshot(stage, [STAGE_OWNER]),
     }
     with (stage / STAGE_OWNER).open("w" if previous else "x") as handle:
@@ -347,6 +351,9 @@ def _stage(root):
             raise BuildError(f"Stage changes an undeclared source or mode: {name}")
     manifest = (source.root / "codex-rs/Cargo.toml").read_bytes()
     lock = (source.root / "codex-rs/Cargo.lock").read_bytes()
+    lock, release_projection = _release_lock_projection(manifest, lock)
+    if owner.get("release_lock_projection") != release_projection:
+        raise BuildError("Stage release-local lock projection metadata changed")
     if member_files:
         actual_member, member_manifest = _member_contents(root / "codex-rs" / MEMBER)
         if set(actual_member) != set(member_files):
@@ -391,6 +398,64 @@ def _member_contents(member):
             }:
                 raise BuildError("Every member dependency must inherit the pinned workspace")
     return files, manifest
+
+
+def _release_lock_projection(manifest_bytes, lock_bytes):
+    manifest_blob = _git_hash("blob", manifest_bytes)
+    lock_blob = _git_hash("blob", lock_bytes)
+    if manifest_blob != RELEASE_MANIFEST_BLOB and lock_blob != RELEASE_LOCK_BLOB:
+        return lock_bytes, None
+    if manifest_blob != RELEASE_MANIFEST_BLOB or lock_blob != RELEASE_LOCK_BLOB:
+        raise BuildError("Mixed release workspace manifest/lock projection pair")
+    manifest = tomllib.loads(manifest_bytes.decode())
+    lock = tomllib.loads(lock_bytes.decode())
+    packages = lock.get("package")
+    if manifest.get("workspace", {}).get("package", {}).get("version") != "0.154.0":
+        raise BuildError("Release workspace version is not the pinned 0.154.0")
+    if not isinstance(packages, list) or not all(
+        isinstance(package, dict)
+        and isinstance(package.get("name"), str)
+        and re.fullmatch(r"[A-Za-z0-9_-]+", package["name"])
+        and isinstance(package.get("version"), str)
+        and ("source" not in package or isinstance(package["source"], str))
+        for package in packages
+    ):
+        raise BuildError("Malformed release lock package identity")
+    identities = [(package["name"], package["version"], package.get("source")) for package in packages]
+    local = [package for package in packages if "source" not in package]
+    if (len(set(identities)) != len(identities) or len(local) != 150
+            or len({package["name"] for package in local}) != 150
+            or any(package["version"] != "0.0.0" for package in local)):
+        raise BuildError("Release lock must contain exactly 150 unique local 0.0.0 packages")
+    mapping = {package["name"]: {"from": "0.0.0", "to": "0.154.0"}
+               for package in sorted(local, key=lambda package: package["name"])}
+    expected = json.loads(json.dumps(lock))
+    for package in expected["package"]:
+        if "source" not in package:
+            package["version"] = "0.154.0"
+    blocks = re.split(rb"(?m)(?=^\[\[package\]\]$)", lock_bytes)
+    changed = 0
+    for index, block in enumerate(blocks):
+        if not block.startswith(b"[[package]]"):
+            continue
+        package = tomllib.loads(block.decode())["package"][0]
+        if "source" not in package:
+            blocks[index], count = re.subn(
+                rb'(?m)^version = "0\.0\.0"$', b'version = "0.154.0"', block, count=1)
+            if count != 1:
+                raise BuildError("Cannot project exact release-local version bytes")
+            changed += count
+    projected = b"".join(blocks)
+    if changed != 150 or tomllib.loads(projected.decode()) != expected:
+        raise BuildError("Release lock projection changed an undeclared field or dependency")
+    return projected, {
+        "kind": "pinned-release-local-version-projection",
+        "manifest_git_blob": manifest_blob, "original_lock_git_blob": lock_blob,
+        "original_lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+        "projected_lock_sha256": hashlib.sha256(projected).hexdigest(),
+        "local_packages": mapping, "external_package_count": len(packages) - len(local),
+        "qualification": False,
+    }
 
 
 def _workspace_member(manifest_bytes, lock_bytes, member):
@@ -638,6 +703,7 @@ def run_locked(stage: StageManifest, target: Path, rust_bin: Path, cargo_args: l
             "rust_bin": str(rust_bin), "stage_token": owner["token"],
             "patch_sha256": owner["patch_sha256"], "member_sha256": owner["member_sha256"],
             "stage_files_sha256": hashlib.sha256(json.dumps(stage.files, sort_keys=True).encode()).hexdigest(),
+            "release_lock_projection": owner.get("release_lock_projection"),
             "compiler_preset": {
                 key: environment[key] for key in (
                     "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"
