@@ -24,6 +24,7 @@ protocol AgentSessionManagedProviderAdapter: AnyObject {
     var configurationObserved: Bool { get }
     var inputState: ShepherdManagedSessionState? { get }
     var hasCompleteWorkEvidence: Bool { get }
+    var holdReason: String? { get }
     var failureSink: ((String) -> Void)? { get set }
     var projectionSink: ((AgentSessionManagedProjection) -> Void)? { get set }
 

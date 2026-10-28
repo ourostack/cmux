@@ -2,19 +2,22 @@ import { expect, test } from "bun:test";
 import { makeClientId } from "./ids";
 import {
   autoStartProvider,
+  autoStartStateEquals,
   canStartProvider,
   canSelectProvider,
   canStopProvider,
   formatTemplate,
   initialState,
+  managedExecutionDisclosure,
   messageForError,
+  pickAutoStartState,
   reduceSession,
   sendInput,
   shouldAutoStartProvider,
   statusLabel,
   type Action,
 } from "./sessionModel";
-import type { AppContext, ProviderInfo } from "./types";
+import type { AgentEvent, AppContext, ProviderInfo } from "./types";
 
 const theme = {
   isDark: true,
@@ -1445,4 +1448,373 @@ test("client ids do not require crypto.randomUUID", () => {
       delete (globalThis as { crypto?: unknown }).crypto;
     }
   }
+});
+
+const nativeCodexIntent = {
+  providerId: "codex",
+  status: "starting",
+  executionDisclosure: "Native-owned foreground OS-account execution; no sandbox.",
+} as const;
+
+const nativeCodexSession = {
+  providerId: "codex",
+  sessionId: "native-codex-session",
+  status: "running",
+  revision: 2,
+  executionDisclosure: "Native-owned foreground OS-account execution; no sandbox.",
+} as const;
+
+test("managed Codex intent blocks manual start and selection before native metadata exists", () => {
+  for (const renderer of ["react", "solid"] as const) {
+    for (const intentStatus of ["starting", "unavailable"] as const) {
+      const loaded = reduceSession(initialState(renderer), {
+        type: "context",
+        context: {
+          ...context, renderer, nativeManagedIntent: { ...nativeCodexIntent, status: intentStatus },
+        },
+      });
+      const state = reduceSession(loaded, { type: "providers", providers });
+      expect(state.status).toBe(intentStatus === "starting" ? "starting" : "failed");
+      expect(state.runningSessionId).toBeUndefined();
+      expect(state.selectedProviderId).toBe("codex");
+      expect(canStartProvider(state)).toBe(false);
+      expect(canSelectProvider(state)).toBe(false);
+      expect(shouldAutoStartProvider(state)).toBe(false);
+      expect(state.context?.nativeManagedIntent?.executionDisclosure).toBe(
+        "Native-owned foreground OS-account execution; no sandbox.",
+      );
+      if (intentStatus === "unavailable") expect(state.bootstrapError).toBeTruthy();
+    }
+  }
+});
+
+test("managed Codex native snapshots recover every lifecycle revision for both renderers", () => {
+  for (const renderer of ["react", "solid"] as const) {
+    for (const [status, revision] of [["starting", 1], ["running", 2], ["stopping", 3], ["failed", 4]] as const) {
+      const draft = reduceSession(initialState(renderer), {
+        type: "setInput", input: "preserved native owner draft", inputVersion: "native-owner-edit",
+      });
+      const state = reduceSession(draft, {
+        type: "context",
+        context: {
+          ...context, renderer, nativeManagedIntent: nativeCodexIntent,
+          nativeSession: { ...nativeCodexSession, status, revision },
+        },
+      });
+      expect(state.status).toBe(status);
+      expect(state.runningSessionId).toBe("native-codex-session");
+      expect(state.selectedProviderId).toBe("codex");
+      expect(state.input).toBe("preserved native owner draft");
+      expect(state.inputVersion).toBe("native-owner-edit");
+      expect(canStartProvider(state)).toBe(false);
+      expect(canSelectProvider(state)).toBe(false);
+    }
+  }
+});
+
+test("managed Codex revocation retains occupied stop and cannot be revived by stale native events", () => {
+  const loaded = reduceSession(initialState("react"), {
+    type: "context",
+    context: { ...context, nativeManagedIntent: nativeCodexIntent, nativeSession: nativeCodexSession },
+  });
+  const revoked = reduceSession(loaded, {
+    type: "event",
+    event: {
+      type: "provider.nativeIntent", nativeIntent: { ...nativeCodexIntent, status: "unavailable" },
+    },
+  });
+  expect(revoked.status).toBe("failed");
+  expect(revoked.runningSessionId).toBe("native-codex-session");
+  expect(canStopProvider(revoked)).toBe(true);
+  expect(canStartProvider(revoked)).toBe(false);
+  expect(canSelectProvider(revoked)).toBe(false);
+  const staleEvents: AgentEvent[] = [
+    { type: "provider.nativeIntent", nativeIntent: nativeCodexIntent },
+    {
+      type: "provider.started", providerId: "codex", sessionId: "native-codex-session",
+      executablePath: "/native/cmux-managed-codex-host", arguments: ["--private-stdio"],
+      nativeSession: nativeCodexSession,
+    },
+  ];
+  for (const event of staleEvents) {
+    const state = reduceSession(revoked, { type: "event", event });
+    expect(state.status).toBe("failed");
+    expect(state.context?.nativeManagedIntent?.status).toBe("unavailable");
+    expect(state.runningSessionId).toBe("native-codex-session");
+    expect(canStopProvider(state)).toBe(true);
+  }
+});
+
+test("managed Codex exit never enables generic start or provider selection", () => {
+  for (const exitStatus of [0, 1]) {
+    const loaded = reduceSession(initialState("solid"), {
+      type: "context",
+      context: {
+        ...context, renderer: "solid", nativeManagedIntent: nativeCodexIntent, nativeSession: nativeCodexSession,
+      },
+    });
+    const providersLoaded = reduceSession(loaded, { type: "providers", providers });
+    const exited = reduceSession(providersLoaded, {
+      type: "event",
+      event: { type: "provider.exit", providerId: "codex", sessionId: "native-codex-session", status: exitStatus },
+    });
+    expect(exited.runningSessionId).toBeUndefined();
+    expect(exited.context?.nativeManagedIntent?.providerId).toBe("codex");
+    expect(canStartProvider(exited)).toBe(false);
+    expect(canSelectProvider(exited)).toBe(false);
+    expect(shouldAutoStartProvider(exited)).toBe(false);
+    const selected = reduceSession(exited, { type: "selectProvider", providerId: "claude" });
+    expect(selected.selectedProviderId).toBe("codex");
+  }
+});
+
+test("managed Codex context rejects foreign provider metadata instead of falling back to manual", () => {
+  const state = reduceSession(initialState("react"), {
+    type: "context",
+    context: {
+      ...context, nativeManagedIntent: nativeCodexIntent,
+      nativeSession: { ...nativeCodexSession, providerId: "copilot" },
+    },
+  });
+  expect(state.status).toBe("failed");
+  expect(state.bootstrapError).toBeTruthy();
+  expect(state.context?.nativeSession).toBeUndefined();
+  expect(canStartProvider(state)).toBe(false);
+  expect(canSelectProvider(state)).toBe(false);
+  expect(state.selectedProviderId).toBe("codex");
+});
+
+test("managed Codex ignores same-id lifecycle and output events from another provider", () => {
+  const loaded = reduceSession(initialState("react"), {
+    type: "context",
+    context: { ...context, nativeManagedIntent: nativeCodexIntent, nativeSession: nativeCodexSession },
+  });
+  expect(loaded.status).toBe("running");
+  expect(loaded.runningSessionId).toBe("native-codex-session");
+  const foreignEvents: AgentEvent[] = [
+    {
+      type: "provider.started", providerId: "copilot", sessionId: "native-codex-session",
+      executablePath: "/native/copilot", arguments: ["--headless"],
+      nativeSession: { ...nativeCodexSession, providerId: "copilot" },
+    },
+    {
+      type: "provider.nativeSession", providerId: "copilot", sessionId: "native-codex-session",
+      nativeSession: { ...nativeCodexSession, providerId: "copilot", status: "failed", revision: 4 },
+    },
+    {
+      type: "provider.output", providerId: "copilot", sessionId: "native-codex-session",
+      stream: "stdout", text: "foreign provider output",
+    },
+  ];
+  for (const event of foreignEvents) {
+    const state = reduceSession(loaded, { type: "event", event });
+    expect(state).toBe(loaded);
+    expect(state.transcript.some((entry) => entry.text.includes("foreign provider output"))).toBe(false);
+  }
+});
+
+test("managed Codex early native events replay against intent without requesting a browser start", () => {
+  const earlyStarted = reduceSession(initialState("solid"), {
+    type: "event",
+    event: {
+      type: "provider.started", providerId: "codex", sessionId: "native-codex-session",
+      executablePath: "/native/cmux-managed-codex-host", arguments: ["--private-stdio"],
+      nativeSession: nativeCodexSession,
+    },
+  });
+  const earlyOutput = reduceSession(earlyStarted, {
+    type: "event",
+    event: {
+      type: "provider.output", providerId: "codex", sessionId: "native-codex-session",
+      stream: "stdout", text: "Native Codex output after context capture",
+    },
+  });
+  const state = reduceSession(earlyOutput, {
+    type: "context", context: { ...context, renderer: "solid", nativeManagedIntent: nativeCodexIntent },
+  });
+  expect(state.status).toBe("running");
+  expect(state.runningSessionId).toBe("native-codex-session");
+  expect(state.transcript.at(-1)?.text).toBe("Native Codex output after context capture");
+  expect(canStartProvider(state)).toBe(false);
+  expect(canSelectProvider(state)).toBe(false);
+});
+
+test("managed Codex intent cannot be removed or switched by a later context response", () => {
+  const loaded = reduceSession(initialState("react"), {
+    type: "context", context: { ...context, nativeManagedIntent: nativeCodexIntent },
+  });
+  const downgraded = reduceSession(loaded, {
+    type: "context", context: { ...context, initialProviderId: "claude" },
+  });
+  expect(downgraded.status).toBe("failed");
+  expect(downgraded.selectedProviderId).toBe("codex");
+  expect(downgraded.context?.nativeManagedIntent?.providerId).toBe("codex");
+  expect(canStartProvider(downgraded)).toBe(false);
+  expect(canSelectProvider(downgraded)).toBe(false);
+});
+
+test("ordinary Codex keeps manual auto-start and cannot acquire managed intent from an event", () => {
+  const loaded = reduceSession(
+    reduceSession(initialState("react"), { type: "context", context }),
+    { type: "providers", providers },
+  );
+  expect(canStartProvider(loaded)).toBe(true);
+  expect(canSelectProvider(loaded)).toBe(true);
+  expect(shouldAutoStartProvider(loaded)).toBe(true);
+  const foreignIntent = reduceSession(loaded, {
+    type: "event",
+    event: { type: "provider.nativeIntent", nativeIntent: nativeCodexIntent },
+  });
+  expect(foreignIntent).toBe(loaded);
+  const started = reduceSession(reduceSession(loaded, { type: "starting" }), {
+    type: "event",
+    event: {
+      type: "provider.started", providerId: "codex", sessionId: "manual-codex-session",
+      executablePath: "/configured/codex", arguments: ["app-server", "--listen", "stdio://"],
+    },
+  });
+  expect(started.status).toBe("running");
+  expect(started.runningSessionId).toBe("manual-codex-session");
+  expect(started.context?.nativeSession).toBeUndefined();
+  expect(started.context?.nativeManagedIntent).toBeUndefined();
+});
+
+test("revoked managed Codex stays failed after verified cleanup even when a stop was requested", () => {
+  for (const requestedStop of [false, true]) {
+    const loaded = reduceSession(initialState("react"), {
+      type: "context",
+      context: { ...context, nativeManagedIntent: nativeCodexIntent, nativeSession: nativeCodexSession },
+    });
+    const revoked = reduceSession(loaded, {
+      type: "event",
+      event: { type: "provider.nativeIntent", nativeIntent: { ...nativeCodexIntent, status: "unavailable" } },
+    });
+    const closing = requestedStop
+      ? reduceSession(revoked, { type: "stopping", sessionId: "native-codex-session" })
+      : revoked;
+    const exited = reduceSession(closing, {
+      type: "event",
+      event: { type: "provider.exit", providerId: "codex", sessionId: "native-codex-session", status: 0 },
+    });
+    expect(exited.status).toBe("failed");
+    expect(exited.runningSessionId).toBeUndefined();
+    expect(exited.context?.nativeManagedIntent?.status).toBe("unavailable");
+    expect(exited.bootstrapError).toBeTruthy();
+    expect(canStopProvider(exited)).toBe(false);
+    expect(canStartProvider(exited)).toBe(false);
+    expect(canSelectProvider(exited)).toBe(false);
+  }
+});
+
+test("early native revocation retains its hold while a later owned session identity is recovered", () => {
+  const revoked = reduceSession(initialState("solid"), {
+    type: "event",
+    event: { type: "provider.nativeIntent", nativeIntent: { ...nativeCodexIntent, status: "unavailable" } },
+  });
+  const started = reduceSession(revoked, {
+    type: "event",
+    event: {
+      type: "provider.started", providerId: "codex", sessionId: "native-codex-session",
+      executablePath: "/native/cmux-managed-codex-host", arguments: ["--private-stdio"],
+      nativeSession: nativeCodexSession,
+    },
+  });
+  const loaded = reduceSession(started, {
+    type: "context", context: { ...context, renderer: "solid", nativeManagedIntent: nativeCodexIntent },
+  });
+  expect(loaded.status).toBe("failed");
+  expect(loaded.context?.nativeManagedIntent?.status).toBe("unavailable");
+  expect(loaded.runningSessionId).toBe("native-codex-session");
+  expect(canStopProvider(loaded)).toBe(true);
+  expect(canStartProvider(loaded)).toBe(false);
+});
+
+test("malformed managed intent holds Codex without enabling the ordinary CLI path", () => {
+  for (const intent of [
+    null,
+    {},
+    { ...nativeCodexIntent, providerId: "claude" },
+    { ...nativeCodexIntent, status: "running" },
+    { ...nativeCodexIntent, executionDisclosure: "" },
+    { ...nativeCodexIntent, executionDisclosure: "x".repeat(8193) },
+  ]) {
+    const rawContext = { ...context, nativeManagedIntent: intent } as AppContext;
+    const loaded = reduceSession(initialState("react"), { type: "context", context: rawContext });
+    expect(loaded.status).toBe("failed");
+    expect(loaded.bootstrapError).toBeTruthy();
+    expect(loaded.runningSessionId).toBeUndefined();
+    expect(canStartProvider(loaded)).toBe(false);
+    expect(canSelectProvider(loaded)).toBe(false);
+  }
+});
+
+test("native execution disclosure survives metadata-free starts and held restores in both renderers", () => {
+  for (const renderer of ["react", "solid"] as const) {
+    for (const providerId of ["copilot", "codex"] as const) {
+      for (const status of ["starting", "unavailable"] as const) {
+        const loaded = reduceSession(initialState(renderer), {
+          type: "context",
+          context: {
+            ...context, renderer, initialProviderId: providerId,
+            nativeManagedIntent: { ...nativeCodexIntent, providerId, status },
+          },
+        });
+        expect(managedExecutionDisclosure(loaded)).toBe(
+          "Native-owned foreground OS-account execution; no sandbox.",
+        );
+      }
+      const occupied = reduceSession(initialState(renderer), {
+        type: "context",
+        context: {
+          ...context, renderer, initialProviderId: providerId,
+          nativeManagedIntent: { ...nativeCodexIntent, providerId },
+          nativeSession: { ...nativeCodexSession, providerId, executionDisclosure: "Current native snapshot disclosure." },
+        },
+      });
+      expect(managedExecutionDisclosure(occupied)).toBe("Current native snapshot disclosure.");
+    }
+  }
+});
+
+test("native execution disclosure does not borrow manual or malformed session metadata", () => {
+  const manual = reduceSession(initialState("react"), { type: "context", context });
+  expect(managedExecutionDisclosure(manual)).toBe("");
+  const malformed = reduceSession(initialState("solid"), {
+    type: "context",
+    context: {
+      ...context, renderer: "solid",
+      nativeManagedIntent: { ...nativeCodexIntent, executionDisclosure: "" },
+      nativeSession: { ...nativeCodexSession, providerId: "copilot", executionDisclosure: "Foreign provider disclosure." },
+    },
+  });
+  expect(malformed.status).toBe("failed");
+  expect(managedExecutionDisclosure(malformed)).toBe("");
+});
+
+test("Solid auto-start projection retains managed intent after the native session exits", () => {
+  const loaded = reduceSession(initialState("solid"), {
+    type: "context",
+    context: { ...context, renderer: "solid", nativeManagedIntent: nativeCodexIntent, nativeSession: nativeCodexSession },
+  });
+  const withProviders = reduceSession(loaded, { type: "providers", providers });
+  const exited = reduceSession(withProviders, {
+    type: "event",
+    event: { type: "provider.exit", providerId: "codex", sessionId: "native-codex-session", status: 0 },
+  });
+  const projected = pickAutoStartState(exited);
+  expect(projected.nativeManagedProviderId).toBe("codex");
+  expect(canStartProvider(projected)).toBe(false);
+  expect(shouldAutoStartProvider(projected)).toBe(false);
+  const manual = reduceSession(
+    reduceSession(initialState("solid"), { type: "context", context }),
+    { type: "providers", providers },
+  );
+  expect(shouldAutoStartProvider(pickAutoStartState(manual))).toBe(true);
+});
+
+test("Solid auto-start memo comparison cannot erase a changed native ownership mode", () => {
+  const manual = reduceSession(initialState("solid"), { type: "context", context });
+  const managed = { ...manual, nativeManagedProviderId: "codex" as const };
+  expect(autoStartStateEquals(manual, managed)).toBe(false);
+  expect(autoStartStateEquals(manual, { ...manual })).toBe(true);
 });

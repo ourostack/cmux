@@ -2,7 +2,11 @@ import Foundation
 
 @MainActor
 final class AgentSessionWebRendererSession {
-    private let ownedCoordinator = AgentSessionWebRendererCoordinator()
+    private let ownedCoordinator: AgentSessionWebRendererCoordinator
+
+    init(managedProviderID: AgentSessionProviderID? = nil) {
+        ownedCoordinator = AgentSessionWebRendererCoordinator(managedProviderID: managedProviderID)
+    }
     var onHasActiveProviderChanged: ((Bool) -> Void)? {
         didSet {
             ownedCoordinator.onHasActiveProviderChanged = onHasActiveProviderChanged
@@ -51,11 +55,13 @@ final class AgentSessionWebRendererSession {
     func prepareNativeCodingStart(
         panelId: UUID, workspaceId: UUID, rendererKind: AgentSessionRendererKind,
         workingDirectory: String, executableURL: URL,
+        providerID: AgentSessionProviderID = .copilot,
         isCurrentOwner: @escaping @MainActor () -> Bool
     ) throws {
         try ownedCoordinator.prepareNativeCodingStart(
             panelId: panelId, workspaceId: workspaceId, rendererKind: rendererKind,
-            workingDirectory: workingDirectory, executableURL: executableURL, isCurrentOwner: isCurrentOwner
+            workingDirectory: workingDirectory, executableURL: executableURL,
+            providerID: providerID, isCurrentOwner: isCurrentOwner
         )
     }
 

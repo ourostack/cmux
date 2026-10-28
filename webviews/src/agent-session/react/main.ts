@@ -50,6 +50,7 @@ import {
   canStartProvider,
   canStopProvider,
   loadInitialData,
+  managedExecutionDisclosure,
   messageForError,
   reduceSession,
   sendInput,
@@ -891,14 +892,15 @@ function SessionSurface({
   );
   const showPlanSuggestion =
     !isPlanMode && !isPlanSuggestionDismissed && /\bplan\b/i.test(state.input);
+  const disclosureText = managedExecutionDisclosure(state);
 
   return h(
     "section",
     { className: "agent-shell", "data-codex-window-type": "electron" },
-    state.context?.nativeSession
+    disclosureText
       ? h("aside", { className: "mx-4 mt-3 text-xs text-token-text-tertiary", role: "note" },
           h("div", { role: "status" }, statusLabel(state)),
-          h("p", { className: "m-0" }, state.context.nativeSession.executionDisclosure))
+          h("p", { className: "m-0" }, disclosureText))
       : null,
     h(TranscriptThread, { entries: state.transcript, copy: state.context?.copy }),
     h(

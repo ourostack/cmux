@@ -18,6 +18,7 @@ class ManagedNativePanelTests(unittest.TestCase):
         print(f"Retained actual native panel fixture: {cls.build}", file=sys.stderr)
         sources = []
         for name in [
+            "Sources/AgentSessionProvider.swift",
             "Sources/Panels/AgentSessionPanel.swift",
             "Sources/Panels/AgentSessionWebRendererSession.swift",
             "scripts/tests/fixtures/managed_native_panel.swift",

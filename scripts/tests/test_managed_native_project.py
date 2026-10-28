@@ -29,6 +29,7 @@ class ManagedNativeProjectTests(unittest.TestCase):
             "ClaudeManagedStreamDecoder.swift", "ClaudeManagedTurnLedger.swift",
             "AgentSessionManagedJSON.swift", "CodexManagedStreamDecoder.swift", "CodexManagedShellInventory.swift",
             "CodexManagedTurnLedger.swift",
+            "CodexManagedStartup.swift", "CodexManagedSession.swift", "AgentSessionManagedCodexLaunch.swift",
             "AgentSessionManagedNativeOwner.swift", "AgentSessionManagedProviderAdapter.swift",
         ]:
             with self.subTest(source=name):

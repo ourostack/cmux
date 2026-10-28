@@ -217,6 +217,7 @@
 		A9F200000000000000000003 /* AgentSessionDebugMenuButtons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F100000000000000000003 /* AgentSessionDebugMenuButtons.swift */; };
 		A9F20000000000000000001B /* AgentSessionInputWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F10000000000000000001B /* AgentSessionInputWriter.swift */; };
 		A9F200000000000000000004 /* AgentSessionLaunchPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F100000000000000000004 /* AgentSessionLaunchPlan.swift */; };
+		B11750000000000000000001 /* AgentSessionManagedCodexLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11750000000000000000002 /* AgentSessionManagedCodexLaunch.swift */; };
 		B11401000000000000000001 /* AgentSessionManagedCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11401000000000000000002 /* AgentSessionManagedCommand.swift */; };
 		B11391000000000000000001 /* AgentSessionManagedCommandService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11391000000000000000002 /* AgentSessionManagedCommandService.swift */; };
 		B11402000000000000000001 /* AgentSessionManagedCopilotLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */; };
@@ -1742,7 +1743,9 @@
 		918100000000000000000051 /* CodexHookFailureCandidate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918100000000000000000050 /* CodexHookFailureCandidate.swift */; };
 		918100000000000000000041 /* CodexHookFailureSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918100000000000000000040 /* CodexHookFailureSummary.swift */; };
 		918100000000000000000061 /* CodexHookUserInputCandidate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918100000000000000000060 /* CodexHookUserInputCandidate.swift */; };
+		B11750000000000000000003 /* CodexManagedSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11750000000000000000004 /* CodexManagedSession.swift */; };
 		B1140A000000000000000001 /* CodexManagedShellInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1140A000000000000000002 /* CodexManagedShellInventory.swift */; };
+		B11750000000000000000005 /* CodexManagedStartup.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11750000000000000000006 /* CodexManagedStartup.swift */; };
 		B11409000000000000000001 /* CodexManagedStreamDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11409000000000000000002 /* CodexManagedStreamDecoder.swift */; };
 		B1140B000000000000000001 /* CodexManagedTurnLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1140B000000000000000002 /* CodexManagedTurnLedger.swift */; };
 		918100000000000000000091 /* CodexMonitorOwnerState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 918100000000000000000090 /* CodexMonitorOwnerState.swift */; };
@@ -4986,6 +4989,7 @@
 		A9F100000000000000000003 /* AgentSessionDebugMenuButtons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSessionDebugMenuButtons.swift; sourceTree = "<group>"; };
 		A9F10000000000000000001B /* AgentSessionInputWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionInputWriter.swift; sourceTree = "<group>"; };
 		A9F100000000000000000004 /* AgentSessionLaunchPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSessionLaunchPlan.swift; sourceTree = "<group>"; };
+		B11750000000000000000002 /* AgentSessionManagedCodexLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCodexLaunch.swift; sourceTree = "<group>"; };
 		B11401000000000000000002 /* AgentSessionManagedCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCommand.swift; sourceTree = "<group>"; };
 		B11391000000000000000002 /* AgentSessionManagedCommandService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCommandService.swift; sourceTree = "<group>"; };
 		B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/AgentSessionManagedCopilotLaunch.swift; sourceTree = "<group>"; };
@@ -6357,7 +6361,9 @@
 		918100000000000000000050 /* CodexHookFailureCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexHookFailureCandidate.swift; sourceTree = "<group>"; };
 		918100000000000000000040 /* CodexHookFailureSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexHookFailureSummary.swift; sourceTree = "<group>"; };
 		918100000000000000000060 /* CodexHookUserInputCandidate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexHookUserInputCandidate.swift; sourceTree = "<group>"; };
+		B11750000000000000000004 /* CodexManagedSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedSession.swift; sourceTree = "<group>"; };
 		B1140A000000000000000002 /* CodexManagedShellInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedShellInventory.swift; sourceTree = "<group>"; };
+		B11750000000000000000006 /* CodexManagedStartup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedStartup.swift; sourceTree = "<group>"; };
 		B11409000000000000000002 /* CodexManagedStreamDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedStreamDecoder.swift; sourceTree = "<group>"; };
 		B1140B000000000000000002 /* CodexManagedTurnLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexManagedTurnLedger.swift; sourceTree = "<group>"; };
 		918100000000000000000090 /* CodexMonitorOwnerState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexMonitorOwnerState.swift; sourceTree = "<group>"; };
@@ -11698,6 +11704,8 @@
 				B11409000000000000000002 /* CodexManagedStreamDecoder.swift */,
 				B1140B000000000000000002 /* CodexManagedTurnLedger.swift */,
 				B1140A000000000000000002 /* CodexManagedShellInventory.swift */,
+				B11750000000000000000004 /* CodexManagedSession.swift */,
+				B11750000000000000000006 /* CodexManagedStartup.swift */,
 				A9F100000000000000000015 /* ClaudeStreamJSONAccumulator.swift */,
 				A9F100000000000000000016 /* CodexAppServerQueuedInput.swift */,
 				A9F100000000000000000017 /* OpenCodeEventStreamParser.swift */,
@@ -11711,6 +11719,7 @@
 				B11391000000000000000002 /* AgentSessionManagedCommandService.swift */,
 				B11401000000000000000002 /* AgentSessionManagedCommand.swift */,
 				B11402000000000000000002 /* AgentSessionManagedCopilotLaunch.swift */,
+				B11750000000000000000002 /* AgentSessionManagedCodexLaunch.swift */,
 				B11560000000000000000002 /* AgentSessionManagedNativeOwner.swift */,
 				B11560000000000000000004 /* AgentSessionManagedProviderAdapter.swift */,
 				B11403000000000000000002 /* AgentSessionManagedRendererController.swift */,
@@ -14971,6 +14980,7 @@
 				A9F200000000000000000003 /* AgentSessionDebugMenuButtons.swift in Sources */,
 				A9F20000000000000000001B /* AgentSessionInputWriter.swift in Sources */,
 				A9F200000000000000000004 /* AgentSessionLaunchPlan.swift in Sources */,
+				B11750000000000000000001 /* AgentSessionManagedCodexLaunch.swift in Sources */,
 				B11401000000000000000001 /* AgentSessionManagedCommand.swift in Sources */,
 				B11391000000000000000001 /* AgentSessionManagedCommandService.swift in Sources */,
 				B11402000000000000000001 /* AgentSessionManagedCopilotLaunch.swift in Sources */,
@@ -15613,7 +15623,9 @@
 				D4C0DE020000000000000003 /* CodeRouterSocketPeerVerifier.swift in Sources */,
 				A9F200000000000000000016 /* CodexAppServerQueuedInput.swift in Sources */,
 				A9E02000000000000000000E /* CodexAppServerSession.swift in Sources */,
+				B11750000000000000000003 /* CodexManagedSession.swift in Sources */,
 				B1140A000000000000000001 /* CodexManagedShellInventory.swift in Sources */,
+				B11750000000000000000005 /* CodexManagedStartup.swift in Sources */,
 				B11409000000000000000001 /* CodexManagedStreamDecoder.swift in Sources */,
 				B1140B000000000000000001 /* CodexManagedTurnLedger.swift in Sources */,
 				9D04DE21C5281E376C0FE450 /* CodexRestoreHookEvidence.swift in Sources */,

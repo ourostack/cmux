@@ -110,6 +110,37 @@ class ManagedCodexBuildTests(unittest.TestCase):
         (member / "src/main.rs").write_text("fn main() {}\n")
         return member
 
+    def test_member_stage_preserves_owned_notices_and_provenance(self):
+        member = self.member()
+        metadata = {
+            "LICENSE.codex": b"owned upstream attribution\n",
+            "NOTICE.codex": b"owned modification notice\n",
+            "provenance.json": b'{"qualification": false}\n',
+        }
+        for name, data in metadata.items():
+            (member / name).write_bytes(data)
+        source = self.source()
+        try:
+            stage = BUILD.prepare_stage(source.root, self.root / "stage", member, None)
+        except BUILD.BuildError as error:
+            self.fail(f"OWNED_MEMBER_ATTRIBUTION_NOT_STAGED: {error}")
+        owner = json.loads((stage.root / BUILD.STAGE_OWNER).read_text())
+        for name, data in metadata.items():
+            self.assertEqual((stage.root / "codex-rs" / BUILD.MEMBER / name).read_bytes(), data)
+            self.assertIn(name, owner["member_files"])
+        self.assertEqual(BUILD.prepare_stage(source.root, stage.root, member, None), stage)
+
+    def test_member_stage_still_refuses_other_metadata_and_linked_notices(self):
+        member = self.member()
+        foreign = member / "provenance.extra.json"
+        foreign.write_bytes(b"{}\n")
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._member_contents(member)
+        foreign.rename(self.root / "retained-unlisted-metadata.json")
+        (member / "LICENSE.codex").symlink_to(member / "Cargo.toml")
+        with self.assertRaises(BUILD.BuildError):
+            BUILD._member_contents(member)
+
     def compiler(self, *, version="1.95.0", change_lock=False):
         rust = self.root / "rust"
         rust.mkdir()

@@ -25,6 +25,21 @@ class ManagedNativeEntryTests(unittest.TestCase):
         launch = (ROOT / "Sources/Panels/AgentSessionManagedCopilotLaunch.swift").read_text()
         fixture = (ROOT / "scripts/tests/fixtures/managed_native_entry.swift").read_text()
         bodies = {
+            "__ACTUAL_PANEL_CONSTRUCTION__": "        let agentPanel = AgentSessionPanel(" + workspace.split(
+                "        let agentPanel = AgentSessionPanel(", 1
+            )[1].split("        panels[agentPanel.id] = agentPanel", 1)[0],
+            "__ACTUAL_SNAPSHOT_CONSTRUCTION__": "            agentSessionSnapshot = SessionAgentSessionPanelSnapshot(" + workspace.split(
+                "            agentSessionSnapshot = SessionAgentSessionPanelSnapshot(", 1
+            )[1].split("            projectSnapshot = nil", 1)[0],
+            "__ACTUAL_SNAPSHOT_RESTORE__": workspace.split(
+                "            guard let agentSession = snapshot.agentSession,", 1
+            )[1].split("        case .project:", 1)[0],
+            "__ACTUAL_CONTEXT_TAIL__": '            if let workingDirectory {\n                context["workingDirectory"]' + coordinator.split(
+                '            if let workingDirectory {\n                context["workingDirectory"]', 1
+            )[1].split('        case "app.pickFiles":', 1)[0],
+            "__ACTUAL_MANUAL_PROVIDER_BRANCHES__": '        case "provider.select":' + coordinator.split(
+                '        case "provider.select":', 1
+            )[1].split('        case "provider.writeLine":', 1)[0],
             "__BIND_METHOD__": coordinator.split("    func bind(", 1)[1]
                 .split("    /// Records the host", 1)[0],
             "__NATIVE_ENTRY_METHODS__": coordinator.split("    func prepareNativeCodingStart(", 1)[1]
@@ -48,6 +63,9 @@ class ManagedNativeEntryTests(unittest.TestCase):
                 "    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {", 1
             )[1].split("    func webView(\n", 1)[0],
         }
+        bodies["__ACTUAL_SNAPSHOT_RESTORE__"] = (
+            "            guard let agentSession = snapshot.agentSession," + bodies["__ACTUAL_SNAPSHOT_RESTORE__"]
+        )
         bodies["__BIND_METHOD__"] = "    func bind(" + bodies["__BIND_METHOD__"]
         bodies["__NATIVE_ENTRY_METHODS__"] = "    func prepareNativeCodingStart(" + bodies["__NATIVE_ENTRY_METHODS__"]
         bodies["__WORKSPACE_ENTRY_METHODS__"] = "    func newManagedCopilotSessionSurface(" + bodies["__WORKSPACE_ENTRY_METHODS__"]
@@ -71,9 +89,12 @@ class ManagedNativeEntryTests(unittest.TestCase):
         generated = cls.build / "NativeEntryFixture.swift"
         generated.write_text(fixture)
         sources = [str(generated)]
-        for name in ["AgentSessionPanel.swift", "AgentSessionWebRendererSession.swift"]:
-            target = cls.build / name
-            shutil.copy2(ROOT / "Sources/Panels" / name, target)
+        for name in [
+            "Panels/AgentSessionPanel.swift", "Panels/AgentSessionWebRendererSession.swift",
+            "SessionAgentSessionPanelSnapshot.swift", "AgentSessionProvider.swift",
+        ]:
+            target = cls.build / Path(name).name
+            shutil.copy2(ROOT / "Sources" / name, target)
             sources.append(str(target))
         cls.executable = cls.build / "NativeEntryFixture"
         result = subprocess.run(
@@ -138,6 +159,51 @@ class ManagedNativeEntryTests(unittest.TestCase):
 
     def test_remote_provenance_aba_permanently_revokes_an_issued_native_owner(self):
         self.scenario("remote-provenance-aba")
+
+    def test_codex_native_entry_binds_the_requested_provider_and_both_renderers(self):
+        for scenario in ["react", "solid", "canonical-directory"]:
+            with self.subTest(scenario=scenario):
+                self.scenario("codex-" + scenario)
+
+    def test_codex_context_navigation_order_and_failed_start_are_not_replayed(self):
+        for scenario in ["context-first", "navigation-first", "repeat", "start-failed", "untrusted-shell"]:
+            with self.subTest(scenario=scenario):
+                self.scenario("codex-" + scenario)
+
+    def test_codex_owner_invalidation_cannot_launch_or_bind_a_renderer(self):
+        for scenario in [
+            "other-workspace", "replacement-workspace", "missing-panel", "close", "workspace-id", "directory",
+            "provider", "project-root", "remote-transition", "remote-provenance-aba", "navigation-reload",
+            "web-process-exit", "bind-panel", "bind-workspace", "bind-renderer", "bind-directory", "bind-provider",
+            "late-task", "creation-owner-lost",
+        ]:
+            with self.subTest(scenario=scenario):
+                self.scenario("codex-" + scenario)
+
+    def test_codex_nonlocal_projects_are_refused_before_creation(self):
+        for scenario in ["remote", "remote-provenance", "cloud", "remote-report", "retired", "not-current", "file-directory"]:
+            with self.subTest(scenario=scenario):
+                self.scenario("codex-" + scenario)
+
+    def test_managed_intent_stays_native_after_owner_revocation(self):
+        for provider in ["copilot", "codex"]:
+            with self.subTest(provider=provider):
+                self.scenario(provider + "-retained-intent" if provider == "codex" else "retained-intent")
+
+    def test_managed_panels_refuse_browser_selection_and_start_after_revocation(self):
+        for scenario in ["managed-manual-refusal", "codex-managed-manual-refusal", "ordinary-manual-start"]:
+            with self.subTest(scenario=scenario):
+                self.scenario(scenario)
+
+    def test_saved_managed_intent_restores_held_without_minting_an_owner(self):
+        for scenario in [
+            "snapshot-intent", "codex-snapshot-intent", "restore-intent", "codex-restore-intent", "legacy-restore",
+        ]:
+            with self.subTest(scenario=scenario):
+                self.scenario(scenario)
+
+    def test_real_provider_enum_refuses_unsupported_native_profiles_before_issuing_an_owner(self):
+        self.scenario("unsupported-native-provider")
 
 
 if __name__ == "__main__":

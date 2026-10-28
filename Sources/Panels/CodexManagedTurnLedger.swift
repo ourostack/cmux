@@ -6,6 +6,22 @@ import Foundation
 /// catalog/configuration and lifetime exclusions; this ledger cannot qualify a profile or admit input.
 @MainActor
 final class CodexManagedTurnLedger {
+    enum Projection { case assistant(String), turnComplete }
+    private var projections: [Projection] = []
+
+    func takeProjections() -> [Projection] {
+        defer { projections.removeAll() }
+        return failureReason == nil ? projections : []
+    }
+
+    var providerInputID: String? { root?.turnID }
+    var hasPendingInspectionPage: Bool { inspection?.pendingID != nil }
+    var canRequestShellPage: Bool {
+        failureReason == nil && ingressID == nil && !decoder.hasPendingBytes
+            && root?.finalized == true && !hasPendingInspectionPage && !hasCompleteWorkEvidence
+    }
+
+    func callbackIsSettled(_ callID: String) -> Bool { callbacks[callID]?.settled == true }
     struct Callback {
         let callID: String
         let command: AgentSessionManagedCommand
@@ -457,6 +473,9 @@ final class CodexManagedTurnLedger {
                 return
             }
             if !started {
+                if kind == "agentMessage", let text = item["text"] as? String {
+                    projections.append(.assistant(text))
+                }
                 if kind == "agentMessage", let text = item["text"] as? String,
                    !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    item["phase"] == nil || item["phase"] is NSNull || item["phase"] as? String == "final_answer" {
@@ -528,6 +547,7 @@ final class CodexManagedTurnLedger {
             return
         }
         inspection = nil
+        projections.append(.turnComplete)
     }
 
     private func validTurn(_ value: [String: Any], status: String) -> String? {

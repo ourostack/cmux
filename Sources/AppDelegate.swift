@@ -11901,19 +11901,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     @objc func openDebugManagedCopilotReact(_ sender: Any?) {
-        openDebugManagedCopilot(rendererKind: .react)
+        openDebugManagedCoding(providerID: .copilot, rendererKind: .react)
     }
 
     @objc func openDebugManagedCopilotSolid(_ sender: Any?) {
-        openDebugManagedCopilot(rendererKind: .solid)
+        openDebugManagedCoding(providerID: .copilot, rendererKind: .solid)
     }
 
-    private func openDebugManagedCopilot(rendererKind: AgentSessionRendererKind) {
+    @objc func openDebugManagedCodexReact(_ sender: Any?) {
+        openDebugManagedCoding(providerID: .codex, rendererKind: .react)
+    }
+
+    @objc func openDebugManagedCodexSolid(_ sender: Any?) {
+        openDebugManagedCoding(providerID: .codex, rendererKind: .solid)
+    }
+
+    private func openDebugManagedCoding(providerID: AgentSessionProviderID, rendererKind: AgentSessionRendererKind) {
+        let provider: ShepherdManagedProvider
+        switch providerID {
+        case .copilot: provider = .copilot
+        case .codex: provider = .codex
+        case .claude, .opencode:
+            NSLog("agentSession.nativeCoding.start.failed: unsupported managed provider")
+            return
+        }
         guard AgentSessionManagedCopilotLaunch.NativeCodingOwner.hasQualifiedNativeProfile(
-            rendererID: rendererKind.rawValue
+            rendererID: rendererKind.rawValue, provider: provider
         ), let manager = activeTabManagerForCommands(), let workspace = manager.selectedWorkspace else { return }
         let disclosure = NSAlert()
-        disclosure.messageText = String(
+        disclosure.messageText = providerID == .codex ? String(
+            localized: "agentSession.managedCoding.confirmCodexTitle", defaultValue: "Start a Managed Codex Coding Session?"
+        ) : String(
             localized: "agentSession.managedCoding.confirmTitle", defaultValue: "Start a Managed Copilot Coding Session?"
         )
         disclosure.informativeText = AgentSessionManagedCopilotLaunch.NativeCodingOwner.executionDisclosure
@@ -11928,16 +11946,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     workspace.bonsplitController.allPaneIds.first else {
                 throw AgentSessionBridgeError.invalidRequest
             }
-            let plan = try AgentExecutableResolver(
-                configuredExecutablePaths: AgentExecutableResolver.cmuxConfiguredExecutablePaths()
-            ).resolve(.copilot)
-            _ = try workspace.newManagedCopilotSessionSurface(
-                inPane: paneId, rendererKind: rendererKind, executableURL: plan.executableURL,
-                currentWorkspace: { [weak self, weak manager] in
-                    guard let self, let manager, self.activeTabManagerForCommands() === manager else { return nil }
-                    return manager.selectedWorkspace
+            let currentWorkspace: @MainActor () -> Workspace? = { [weak self, weak manager] in
+                guard let self, let manager, self.activeTabManagerForCommands() === manager else { return nil }
+                return manager.selectedWorkspace
+            }
+            switch providerID {
+            case .copilot:
+                let plan = try AgentExecutableResolver(
+                    configuredExecutablePaths: AgentExecutableResolver.cmuxConfiguredExecutablePaths()
+                ).resolve(.copilot)
+                _ = try workspace.newManagedCopilotSessionSurface(
+                    inPane: paneId, rendererKind: rendererKind, executableURL: plan.executableURL,
+                    currentWorkspace: currentWorkspace
+                )
+            case .codex:
+                guard let executableURL = Bundle.main.url(
+                    forResource: "cmux-managed-codex-host", withExtension: nil, subdirectory: "bin"
+                ) else {
+                    throw AgentSessionBridgeError.unsupportedTransport("managed-codex-owned-backend-missing")
                 }
-            )
+                _ = try workspace.newManagedCodexSessionSurface(
+                    inPane: paneId, rendererKind: rendererKind, executableURL: executableURL,
+                    currentWorkspace: currentWorkspace
+                )
+            case .claude, .opencode:
+                throw AgentSessionBridgeError.unsupportedTransport("managed-native-provider")
+            }
         } catch {
             NSAlert(error: error).runModal()
         }

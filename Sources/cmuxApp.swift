@@ -661,7 +661,9 @@ struct cmuxApp: App {
                     openReact: { appDelegate.openDebugAgentSessionReact(nil) },
                     openSolid: { appDelegate.openDebugAgentSessionSolid(nil) },
                     openManagedReact: { appDelegate.openDebugManagedCopilotReact(nil) },
-                    openManagedSolid: { appDelegate.openDebugManagedCopilotSolid(nil) }
+                    openManagedSolid: { appDelegate.openDebugManagedCopilotSolid(nil) },
+                    openManagedCodexReact: { appDelegate.openDebugManagedCodexReact(nil) },
+                    openManagedCodexSolid: { appDelegate.openDebugManagedCodexSolid(nil) }
                 )
 
                 Button("Open Workspaces for All Workspace Colors") {

@@ -796,7 +796,8 @@ extension Workspace {
             agentSessionSnapshot = SessionAgentSessionPanelSnapshot(
                 rendererKind: agentPanel.rendererKind,
                 providerID: agentPanel.currentProviderID,
-                workingDirectory: directory
+                workingDirectory: directory,
+                managedProviderID: agentPanel.managedProviderID
             )
             projectSnapshot = nil
         case .project:
@@ -2340,7 +2341,8 @@ extension Workspace {
                     providerID: agentSession.providerID,
                     rendererKind: agentSession.rendererKind,
                     workingDirectory: restoresUntrustedSavedDirectory ? nil : (agentSession.workingDirectory ?? snapshot.directory),
-                    focus: false
+                    focus: false,
+                    managedProviderID: agentSession.managedProviderID
                   ) else {
                 return nil
             }
@@ -10956,7 +10958,8 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
         rendererKind: AgentSessionRendererKind,
         workingDirectory: String? = nil,
         focus: Bool? = nil,
-        targetIndex: Int? = nil
+        targetIndex: Int? = nil,
+        managedProviderID: AgentSessionProviderID? = nil
     ) -> AgentSessionPanel? {
         guard !isRetiredFromOwningTabManager else { return nil }
         let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
@@ -10975,7 +10978,8 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
             workspaceId: id,
             rendererKind: rendererKind,
             initialProviderID: providerID,
-            workingDirectory: directory
+            workingDirectory: directory,
+            managedProviderID: managedProviderID
         )
         panels[agentPanel.id] = agentPanel
         panelTitles[agentPanel.id] = agentPanel.displayTitle
@@ -11034,23 +11038,49 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
         inPane paneId: PaneID, rendererKind: AgentSessionRendererKind, executableURL: URL,
         currentWorkspace: @escaping @MainActor () -> Workspace?
     ) throws -> AgentSessionPanel {
+        try newManagedCodingSessionSurface(
+            inPane: paneId, providerID: .copilot, rendererKind: rendererKind,
+            executableURL: executableURL, currentWorkspace: currentWorkspace
+        )
+    }
+
+    @discardableResult
+    func newManagedCodexSessionSurface(
+        inPane paneId: PaneID, rendererKind: AgentSessionRendererKind, executableURL: URL,
+        currentWorkspace: @escaping @MainActor () -> Workspace?
+    ) throws -> AgentSessionPanel {
+        try newManagedCodingSessionSurface(
+            inPane: paneId, providerID: .codex, rendererKind: rendererKind,
+            executableURL: executableURL, currentWorkspace: currentWorkspace
+        )
+    }
+
+    private func newManagedCodingSessionSurface(
+        inPane paneId: PaneID, providerID: AgentSessionProviderID,
+        rendererKind: AgentSessionRendererKind, executableURL: URL,
+        currentWorkspace: @escaping @MainActor () -> Workspace?
+    ) throws -> AgentSessionPanel {
+        guard providerID == .copilot || providerID == .codex else {
+            throw AgentSessionBridgeError.unsupportedTransport("managed-native-provider")
+        }
         guard currentWorkspace() === self, !isRetiredFromOwningTabManager,
               !isRemoteWorkspace, !usesRemoteDirectoryProvenance, cloudVMBinding == nil,
               remoteDirectoryReportPanelIds.isEmpty else {
-            throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-local-project")
+            throw AgentSessionBridgeError.unsupportedTransport("managed-\(providerID.rawValue)-local-project")
         }
         let directory = try AgentSessionManagedCopilotLaunch.canonicalPath(currentDirectory)
         guard try URL(fileURLWithPath: directory).resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-            throw AgentSessionBridgeError.unsupportedTransport("managed-copilot-project-directory")
+            throw AgentSessionBridgeError.unsupportedTransport("managed-\(providerID.rawValue)-project-directory")
         }
         guard let panel = newAgentSessionSurface(
-            inPane: paneId, providerID: .copilot, rendererKind: rendererKind,
-            workingDirectory: directory, focus: true
+            inPane: paneId, providerID: providerID, rendererKind: rendererKind,
+            workingDirectory: directory, focus: true, managedProviderID: providerID
         ) else { throw AgentSessionBridgeError.invalidRequest }
         do {
             try panel.rendererSession.prepareNativeCodingStart(
                 panelId: panel.id, workspaceId: id, rendererKind: rendererKind,
                 workingDirectory: directory, executableURL: executableURL,
+                providerID: providerID,
                 isCurrentOwner: { [weak self, weak panel] in
                     guard let self, let panel else { return false }
                     return currentWorkspace() === self && !self.isRetiredFromOwningTabManager &&
@@ -11058,7 +11088,7 @@ final class Workspace: Identifiable, ObservableObject, FilePreviewTabMetadataHos
                         self.cloudVMBinding == nil && self.remoteDirectoryReportPanelIds.isEmpty &&
                         self.panels[panel.id] === panel && !panel.isClosed &&
                         panel.workspaceId == self.id && panel.rendererKind == rendererKind &&
-                        panel.currentProviderID == .copilot && panel.workingDirectory == directory &&
+                        panel.currentProviderID == providerID && panel.workingDirectory == directory &&
                         (try? AgentSessionManagedCopilotLaunch.canonicalPath(self.currentDirectory)) == directory
                 }
             )

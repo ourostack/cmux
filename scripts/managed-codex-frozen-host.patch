@@ -36,7 +36,7 @@ diff --git a/codex-rs/app-server/src/config_manager.rs b/codex-rs/app-server/src
 +        self.violated.load(Ordering::Acquire)
 +    }
 +
-+    pub(crate) async fn wait_for_violation(&self) {
++    pub async fn wait_for_violation(&self) {
 +        let mut changes = self.changed.subscribe();
 +        loop {
 +            if self.is_violated() || *changes.borrow_and_update() {
@@ -326,7 +326,7 @@ diff --git a/codex-rs/app-server/src/config_manager.rs b/codex-rs/app-server/src
      }
  
      fn apply_runtime_feature_enablement(&self, config: &mut Config) {
-@@ -366,3 +597,414 @@
+@@ -366,3 +597,462 @@
          }
      }
  }
@@ -738,6 +738,54 @@ diff --git a/codex-rs/app-server/src/config_manager.rs b/codex-rs/app-server/src
 +            .expect("terminal state after closure was lost");
 +        assert!(guard.is_violated());
 +    }
++
++    #[tokio::test]
++    async fn cmux_public_violation_waiter_observes_pretripped_clone() {
++        let guard = FrozenConfigViolation::new();
++        let observer = guard.clone();
++        let _ = guard.violate("test violation before cloned waiter subscribes");
++        timeout(Duration::from_secs(1), observer.wait_for_violation())
++            .await
++            .expect("cloned read-only waiter lost the preexisting violation");
++        assert!(observer.is_violated());
++        assert!(guard.is_violated());
++    }
++
++    #[tokio::test]
++    async fn cmux_public_violation_waiter_wakes_all_with_full_output() -> std::io::Result<()> {
++        let guard = FrozenConfigViolation::new();
++        let first_observer = guard.clone();
++        let second_observer = guard.clone();
++        let (sender, mut receiver) = mpsc::channel(1);
++        sender.send(0u8).await.map_err(std::io::Error::other)?;
++        let blocked_output = sender.send(1u8);
++        let first_waiter = first_observer.wait_for_violation();
++        let second_waiter = second_observer.wait_for_violation();
++        tokio::pin!(blocked_output);
++        tokio::pin!(first_waiter);
++        tokio::pin!(second_waiter);
++        assert!(std::future::poll_fn(|cx| Poll::Ready(blocked_output.as_mut().poll(cx)))
++            .await
++            .is_pending());
++        assert!(std::future::poll_fn(|cx| Poll::Ready(first_waiter.as_mut().poll(cx)))
++            .await
++            .is_pending());
++        assert!(std::future::poll_fn(|cx| Poll::Ready(second_waiter.as_mut().poll(cx)))
++            .await
++            .is_pending());
++        let _ = guard.violate("test violation while independent output is full");
++        timeout(Duration::from_secs(1), async {
++            tokio::join!(first_waiter, second_waiter)
++        })
++        .await
++        .expect("not every direct read-only waiter woke independently of output");
++        assert!(std::future::poll_fn(|cx| Poll::Ready(blocked_output.as_mut().poll(cx)))
++            .await
++            .is_pending());
++        assert_eq!(receiver.recv().await, Some(0u8));
++        assert!(guard.is_violated());
++        Ok(())
++    }
 +}
 +
 +}
@@ -849,7 +897,7 @@ diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_
                              }
                          }
                      }
-@@ -1040,3 +1066,2686 @@
+@@ -1040,3 +1066,2748 @@
          ));
      }
  }
@@ -947,6 +995,39 @@ diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_
 +const FROZEN_RETAINED_REQUEST_LIMIT: usize = 1024;
 +const FROZEN_RETAINED_CALLBACK_LIMIT: usize = 4096;
 +const FROZEN_ID_BYTES: usize = 128;
++
++pub fn frozen_thread_start_params(
++    native_tools: Vec<codex_app_server_protocol::DynamicToolSpec>,
++) -> codex_app_server_protocol::ThreadStartParams {
++    codex_app_server_protocol::ThreadStartParams {
++        model: None,
++        model_provider: None,
++        allow_provider_model_fallback: false,
++        service_tier: None,
++        cwd: None,
++        runtime_workspace_roots: None,
++        approval_policy: None,
++        approvals_reviewer: None,
++        sandbox: None,
++        permissions: None,
++        config: None,
++        service_name: None,
++        base_instructions: None,
++        developer_instructions: None,
++        personality: None,
++        multi_agent_mode: None,
++        ephemeral: None,
++        history_mode: None,
++        session_start_source: None,
++        thread_source: None,
++        project_id: None,
++        environments: Some(Vec::new()),
++        dynamic_tools: Some(native_tools),
++        selected_capability_roots: Some(Vec::new()),
++        mock_experimental_field: None,
++        experimental_raw_events: false,
++    }
++}
 +
 +fn frozen_id_is_bounded(value: &str) -> bool {
 +    !value.is_empty() && value.len() <= FROZEN_ID_BYTES
@@ -1717,34 +1798,7 @@ diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_
 +        let response = sender.request_captured(
 +            ClientRequest::ThreadStart {
 +                request_id: RequestId::Integer(-2),
-+                params: codex_app_server_protocol::ThreadStartParams {
-+                    model: None,
-+                    model_provider: None,
-+                    allow_provider_model_fallback: false,
-+                    service_tier: None,
-+                    cwd: None,
-+                    runtime_workspace_roots: None,
-+                    approval_policy: None,
-+                    approvals_reviewer: None,
-+                    sandbox: None,
-+                    permissions: None,
-+                    config: None,
-+                    service_name: None,
-+                    base_instructions: None,
-+                    developer_instructions: None,
-+                    personality: None,
-+                    multi_agent_mode: None,
-+                    ephemeral: None,
-+                    history_mode: None,
-+                    session_start_source: None,
-+                    thread_source: None,
-+                    project_id: None,
-+                    environments: Some(Vec::new()),
-+                    dynamic_tools: Some(native_tools),
-+                    selected_capability_roots: Some(Vec::new()),
-+                    mock_experimental_field: None,
-+                    experimental_raw_events: false,
-+                },
++                params: frozen_thread_start_params(native_tools),
 +            },
 +            FrozenRequestKind::ThreadStart,
 +        ).await?.map_err(|error| IoError::new(ErrorKind::InvalidData, error.message))?;
@@ -2016,6 +2070,62 @@ diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_
 +}
 +
 +// Modified by Ouro: select only our account-free SDK component tests.
++#[cfg(test)]
++mod cmux_frozen_thread_profile_contract {
++    use super::*;
++    use codex_app_server_protocol::DynamicToolFunctionSpec;
++    use codex_app_server_protocol::DynamicToolSpec;
++    use codex_app_server_protocol::ThreadStartParams;
++
++    fn fixture_tool(label: &str) -> DynamicToolSpec {
++        DynamicToolSpec::Function(DynamicToolFunctionSpec {
++            name: format!("fixture_{label}"),
++            description: format!("retained fixture metadata {label}"),
++            input_schema: serde_json::json!({
++                "type":"object", "properties":{"literal":{"type":"string"}},
++                "required":["literal"], "additionalProperties":false,
++            }),
++            defer_loading: false,
++        })
++    }
++
++    #[test]
++    fn cmux_frozen_thread_profile_has_exact_empty_selections_without_overrides() {
++        let tools = vec![fixture_tool("one")];
++        let actual = frozen_thread_start_params(tools.clone());
++        let expected = ThreadStartParams {
++            environments: Some(Vec::new()),
++            dynamic_tools: Some(tools),
++            selected_capability_roots: Some(Vec::new()),
++            ..ThreadStartParams::default()
++        };
++        assert_eq!(actual, expected);
++        assert!(!actual.allow_provider_model_fallback);
++    }
++
++    #[test]
++    fn cmux_frozen_thread_profile_preserves_captured_registry_without_rewriting() {
++        for label in ["one", "two"] {
++            let tools = vec![fixture_tool(label)];
++            let expected = serde_json::to_value(&tools).expect("fixture registry JSON");
++            let actual = frozen_thread_start_params(tools);
++            assert_eq!(serde_json::to_value(&actual.dynamic_tools).expect("actual tools JSON"), expected);
++        }
++    }
++
++    #[test]
++    fn cmux_frozen_thread_profile_has_no_cross_call_mutable_state() {
++        let tools = vec![fixture_tool("stable")];
++        let expected = frozen_thread_start_params(tools.clone());
++        let mut changed = frozen_thread_start_params(tools.clone());
++        changed.model = Some("foreign-model".into());
++        changed.environments = None;
++        changed.dynamic_tools.as_mut().expect("fixed tools").clear();
++        assert_ne!(changed, expected);
++        assert_eq!(frozen_thread_start_params(tools), expected);
++    }
++}
++
 +#[cfg(test)]
 +mod cmux_sdk_contract {
 +    use super::*;
@@ -3536,6 +3646,24 @@ diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_
 +}
 +
 +}
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -769,6 +769,14 @@
+             .await;
+     }
+ 
++    pub(crate) async fn attach_frozen_thread_listener(
++        &self,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++    ) -> std::io::Result<()> {
++        self.thread_processor.attach_frozen_thread_listener(thread_id, connection_id).await
++    }
++
+     pub(crate) async fn try_attach_thread_listener(
+         &self,
+         thread_id: ThreadId,
 diff --git a/codex-rs/app-server/src/outgoing_message.rs b/codex-rs/app-server/src/outgoing_message.rs
 --- a/codex-rs/app-server/src/outgoing_message.rs
 +++ b/codex-rs/app-server/src/outgoing_message.rs
@@ -3857,6 +3985,96 @@ diff --git a/codex-rs/app-server/src/outgoing_message.rs b/codex-rs/app-server/s
 +}
 +
 +}
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -3567,6 +3567,26 @@
+ 
+     pub(crate) fn subscribe_running_assistant_turn_count(&self) -> watch::Receiver<usize> {
+         self.thread_watch_manager.subscribe_running_turn_count()
++    }
++
++    pub(crate) async fn attach_frozen_thread_listener(
++        &self,
++        thread_id: ThreadId,
++        connection_id: ConnectionId,
++    ) -> std::io::Result<()> {
++        let thread = self.thread_manager.get_thread(thread_id).await
++            .map_err(std::io::Error::other)?;
++        if thread.config_snapshot().await.parent_thread_id.is_some() {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::InvalidData,
++                "frozen thread unexpectedly has a parent",
++            ));
++        }
++        require_frozen_listener_attached(
++            self.ensure_conversation_listener(thread_id, connection_id, false).await,
++        )?;
++        self.thread_watch_manager.upsert_thread(&thread_id.to_string()).await;
++        Ok(())
+     }
+ 
+     /// Best-effort: ensure initialized connections are subscribed to this thread.
+@@ -6260,3 +6280,48 @@
+ #[cfg(test)]
+ #[path = "thread_processor_tests.rs"]
+ mod thread_processor_tests;
++
++// Modified by Ouro: frozen readiness requires a positive actual listener-attachment result.
++fn require_frozen_listener_attached(
++    result: Result<EnsureConversationListenerResult, JSONRPCErrorError>,
++) -> std::io::Result<()> {
++    match result {
++        Ok(EnsureConversationListenerResult::Attached) => Ok(()),
++        Ok(EnsureConversationListenerResult::ConnectionClosed) => Err(std::io::Error::new(
++            std::io::ErrorKind::BrokenPipe,
++            "frozen thread listener connection closed before attachment",
++        )),
++        Err(error) => Err(std::io::Error::other(format!(
++            "frozen thread listener failed ({}): {}", error.code, error.message,
++        ))),
++    }
++}
++
++#[cfg(test)]
++mod cmux_sdk_contract {
++    use super::*;
++
++    #[test]
++    fn cmux_frozen_listener_requires_actual_attached_result() {
++        assert!(require_frozen_listener_attached(Ok(
++            EnsureConversationListenerResult::Attached,
++        )).is_ok());
++    }
++
++    #[test]
++    fn cmux_frozen_listener_closed_connection_is_not_readiness() {
++        let error = require_frozen_listener_attached(Ok(
++            EnsureConversationListenerResult::ConnectionClosed,
++        )).unwrap_err();
++        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
++    }
++
++    #[test]
++    fn cmux_frozen_listener_propagates_actual_protocol_failure() {
++        let original = invalid_request("actual listener fixture failure");
++        let code = original.code.to_string();
++        let error = require_frozen_listener_attached(Err(original)).unwrap_err();
++        assert!(error.to_string().contains(&code));
++        assert!(error.to_string().contains("actual listener fixture failure"));
++    }
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -128,6 +128,7 @@
+ pub use thread_manager::local_agent_graph_store_from_state_db;
+ pub use thread_manager::passthrough_image_store;
+ pub use thread_manager::thread_store_from_config;
++pub use tools::cmux_native_profile_tool_modes;
+ pub use tools::handlers::WaitForEnvironmentToolConfig;
+ pub use web_search::web_search_action_detail;
+ pub use windows_sandbox_read_grants::grant_read_root_non_elevated;
 diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
 --- a/codex-rs/core/src/tools/mod.rs
 +++ b/codex-rs/core/src/tools/mod.rs
@@ -4011,111 +4229,3 @@ diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
 +        }
 +    }
 +}
-diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
---- a/codex-rs/core/src/lib.rs
-+++ b/codex-rs/core/src/lib.rs
-@@ -128,6 +128,7 @@
- pub use thread_manager::local_agent_graph_store_from_state_db;
- pub use thread_manager::passthrough_image_store;
- pub use thread_manager::thread_store_from_config;
-+pub use tools::cmux_native_profile_tool_modes;
- pub use tools::handlers::WaitForEnvironmentToolConfig;
- pub use web_search::web_search_action_detail;
- pub use windows_sandbox_read_grants::grant_read_root_non_elevated;
-diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
---- a/codex-rs/app-server/src/request_processors/thread_processor.rs
-+++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -3567,6 +3567,26 @@
- 
-     pub(crate) fn subscribe_running_assistant_turn_count(&self) -> watch::Receiver<usize> {
-         self.thread_watch_manager.subscribe_running_turn_count()
-+    }
-+
-+    pub(crate) async fn attach_frozen_thread_listener(
-+        &self,
-+        thread_id: ThreadId,
-+        connection_id: ConnectionId,
-+    ) -> std::io::Result<()> {
-+        let thread = self.thread_manager.get_thread(thread_id).await
-+            .map_err(std::io::Error::other)?;
-+        if thread.config_snapshot().await.parent_thread_id.is_some() {
-+            return Err(std::io::Error::new(
-+                std::io::ErrorKind::InvalidData,
-+                "frozen thread unexpectedly has a parent",
-+            ));
-+        }
-+        require_frozen_listener_attached(
-+            self.ensure_conversation_listener(thread_id, connection_id, false).await,
-+        )?;
-+        self.thread_watch_manager.upsert_thread(&thread_id.to_string()).await;
-+        Ok(())
-     }
- 
-     /// Best-effort: ensure initialized connections are subscribed to this thread.
-@@ -6260,3 +6280,48 @@
- #[cfg(test)]
- #[path = "thread_processor_tests.rs"]
- mod thread_processor_tests;
-+
-+// Modified by Ouro: frozen readiness requires a positive actual listener-attachment result.
-+fn require_frozen_listener_attached(
-+    result: Result<EnsureConversationListenerResult, JSONRPCErrorError>,
-+) -> std::io::Result<()> {
-+    match result {
-+        Ok(EnsureConversationListenerResult::Attached) => Ok(()),
-+        Ok(EnsureConversationListenerResult::ConnectionClosed) => Err(std::io::Error::new(
-+            std::io::ErrorKind::BrokenPipe,
-+            "frozen thread listener connection closed before attachment",
-+        )),
-+        Err(error) => Err(std::io::Error::other(format!(
-+            "frozen thread listener failed ({}): {}", error.code, error.message,
-+        ))),
-+    }
-+}
-+
-+#[cfg(test)]
-+mod cmux_sdk_contract {
-+    use super::*;
-+
-+    #[test]
-+    fn cmux_frozen_listener_requires_actual_attached_result() {
-+        assert!(require_frozen_listener_attached(Ok(
-+            EnsureConversationListenerResult::Attached,
-+        )).is_ok());
-+    }
-+
-+    #[test]
-+    fn cmux_frozen_listener_closed_connection_is_not_readiness() {
-+        let error = require_frozen_listener_attached(Ok(
-+            EnsureConversationListenerResult::ConnectionClosed,
-+        )).unwrap_err();
-+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-+    }
-+
-+    #[test]
-+    fn cmux_frozen_listener_propagates_actual_protocol_failure() {
-+        let original = invalid_request("actual listener fixture failure");
-+        let code = original.code.to_string();
-+        let error = require_frozen_listener_attached(Err(original)).unwrap_err();
-+        assert!(error.to_string().contains(&code));
-+        assert!(error.to_string().contains("actual listener fixture failure"));
-+    }
-+}
-diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
---- a/codex-rs/app-server/src/message_processor.rs
-+++ b/codex-rs/app-server/src/message_processor.rs
-@@ -769,6 +769,14 @@
-             .await;
-     }
- 
-+    pub(crate) async fn attach_frozen_thread_listener(
-+        &self,
-+        thread_id: ThreadId,
-+        connection_id: ConnectionId,
-+    ) -> std::io::Result<()> {
-+        self.thread_processor.attach_frozen_thread_listener(thread_id, connection_id).await
-+    }
-+
-     pub(crate) async fn try_attach_thread_listener(
-         &self,
-         thread_id: ThreadId,

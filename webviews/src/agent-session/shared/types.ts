@@ -40,10 +40,19 @@ export type AppContext = {
   copy: AgentSessionCopy;
   theme: AgentSessionTheme;
   nativeSession?: NativeManagedSession;
+  nativeManagedIntent?: NativeManagedIntent;
+};
+
+export type NativeManagedProviderId = "copilot" | "codex";
+
+export type NativeManagedIntent = {
+  providerId: NativeManagedProviderId;
+  status: "starting" | "unavailable";
+  executionDisclosure: string;
 };
 
 export type NativeManagedSession = {
-  providerId: "copilot";
+  providerId: NativeManagedProviderId;
   sessionId: string;
   status: "starting" | "running" | "stopping" | "failed";
   revision: number;
@@ -156,9 +165,13 @@ export type AgentEvent =
       nativeSession?: NativeManagedSession;
     }
   | {
+      type: "provider.nativeIntent";
+      nativeIntent: NativeManagedIntent;
+    }
+  | {
       type: "provider.nativeSession";
       sessionId: string;
-      providerId: "copilot";
+      providerId: NativeManagedProviderId;
       nativeSession: NativeManagedSession;
     }
   | {

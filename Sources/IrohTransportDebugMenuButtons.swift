@@ -8,6 +8,8 @@ struct IrohAndAgentSessionDebugMenuButtons: View {
     let openSolid: () -> Void
     let openManagedReact: () -> Void
     let openManagedSolid: () -> Void
+    let openManagedCodexReact: () -> Void
+    let openManagedCodexSolid: () -> Void
 
     var body: some View {
         IrohTransportDebugMenuButtons()
@@ -15,7 +17,9 @@ struct IrohAndAgentSessionDebugMenuButtons: View {
             openReact: openReact,
             openSolid: openSolid,
             openManagedReact: openManagedReact,
-            openManagedSolid: openManagedSolid
+            openManagedSolid: openManagedSolid,
+            openManagedCodexReact: openManagedCodexReact,
+            openManagedCodexSolid: openManagedCodexSolid
         )
         NotificationDebugMenuButtons()
     }

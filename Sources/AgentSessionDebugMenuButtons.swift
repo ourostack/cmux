@@ -6,6 +6,8 @@ struct AgentSessionDebugMenuButtons: View {
     let openSolid: () -> Void
     let openManagedReact: () -> Void
     let openManagedSolid: () -> Void
+    let openManagedCodexReact: () -> Void
+    let openManagedCodexSolid: () -> Void
 
     var body: some View {
         Button(
@@ -47,6 +49,33 @@ struct AgentSessionDebugMenuButtons: View {
             localized: "debug.menu.managedCopilotQualification",
             defaultValue: "Requires a qualified native Copilot binary, launch profile, and renderer."
         ))
+
+        Button(
+            String(localized: "debug.menu.openManagedCodexReact", defaultValue: "Open Managed Codex (React)...")
+        ) {
+            openManagedCodexReact()
+        }
+        .disabled(!AgentSessionManagedCopilotLaunch.NativeCodingOwner.hasQualifiedNativeProfile(
+            rendererID: "react", provider: .codex
+        ))
+        .help(String(
+            localized: "debug.menu.managedCodexQualification",
+            defaultValue: "Requires a qualified owned Codex backend, launch profile, and renderer."
+        ))
+
+        Button(
+            String(localized: "debug.menu.openManagedCodexSolid", defaultValue: "Open Managed Codex (Solid)...")
+        ) {
+            openManagedCodexSolid()
+        }
+        .disabled(!AgentSessionManagedCopilotLaunch.NativeCodingOwner.hasQualifiedNativeProfile(
+            rendererID: "solid", provider: .codex
+        ))
+        .help(String(
+            localized: "debug.menu.managedCodexQualification",
+            defaultValue: "Requires a qualified owned Codex backend, launch profile, and renderer."
+        ))
+
     }
 }
 #endif

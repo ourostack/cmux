@@ -9,9 +9,10 @@ final class AgentSessionPanel: Panel {
     private(set) var workspaceId: UUID
     let rendererKind: AgentSessionRendererKind
     let initialProviderID: AgentSessionProviderID
+    let managedProviderID: AgentSessionProviderID?
     private(set) var workingDirectory: String?
     private(set) var isClosed = false
-    let rendererSession = AgentSessionWebRendererSession()
+    let rendererSession: AgentSessionWebRendererSession
 
     private(set) var currentProviderID: AgentSessionProviderID
     private(set) var displayTitle: String
@@ -32,12 +33,16 @@ final class AgentSessionPanel: Panel {
         workspaceId: UUID,
         rendererKind: AgentSessionRendererKind,
         initialProviderID: AgentSessionProviderID = .codex,
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        managedProviderID: AgentSessionProviderID? = nil
     ) {
         self.id = UUID()
         self.workspaceId = workspaceId
         self.rendererKind = rendererKind
         self.initialProviderID = initialProviderID
+        let managedIntent = managedProviderID ?? (initialProviderID == .copilot ? .copilot : nil)
+        self.managedProviderID = managedIntent
+        self.rendererSession = AgentSessionWebRendererSession(managedProviderID: managedIntent)
         self.currentProviderID = initialProviderID
         self.workingDirectory = workingDirectory
         self.displayTitle = Self.title(provider: initialProviderID, rendererKind: rendererKind)

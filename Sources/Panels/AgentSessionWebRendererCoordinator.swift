@@ -1,5 +1,6 @@
 import AppKit
 import CmuxBrowser
+import CmuxControlSocket
 import UniformTypeIdentifiers
 import WebKit
 
@@ -12,6 +13,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     private var hasAttachedHost = false
     private var rendererKind: AgentSessionRendererKind = .react
     private var initialProviderID: AgentSessionProviderID = .codex
+    private let managedProviderID: AgentSessionProviderID?
     private var workingDirectory: String?
     private var theme: AgentSessionWebTheme = .resolve(
         appearance: .fromConfig(GhosttyConfig.loadForCmux())
@@ -46,6 +48,11 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     }
     var onProviderIDChanged: ((AgentSessionProviderID) -> Void)?
     var onRunCommand: ((String) throws -> [String: Any])?
+
+    init(managedProviderID: AgentSessionProviderID? = nil) {
+        self.managedProviderID = managedProviderID
+        super.init()
+    }
 
     func bind(
         panelId: UUID,
@@ -432,13 +439,22 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
     func prepareNativeCodingStart(
         panelId: UUID, workspaceId: UUID, rendererKind: AgentSessionRendererKind,
         workingDirectory: String, executableURL: URL,
+        providerID: AgentSessionProviderID = .copilot,
         isCurrentOwner: @escaping @MainActor () -> Bool
     ) throws {
+        guard managedProviderID == providerID else { throw AgentSessionBridgeError.invalidRequest }
+        let provider: ShepherdManagedProvider
+        switch providerID {
+        case .copilot: provider = .copilot
+        case .codex: provider = .codex
+        case .claude, .opencode: throw AgentSessionBridgeError.unsupportedTransport("managed-native-provider")
+        }
         guard !isClosed, webView == nil, nativeCodingOwner == nil, !isProviderStartPending,
               !processStore.hasActiveProviderSession else { throw AgentSessionBridgeError.invalidRequest }
         guard let owner = AgentSessionManagedCopilotLaunch.NativeCodingOwner.issueForFreshNativePanel(
             newPanelID: panelId, workspaceID: workspaceId, rendererID: rendererKind.rawValue,
-            workingDirectory: workingDirectory, owningStore: processStore, isCurrentOwner: isCurrentOwner
+            workingDirectory: workingDirectory, owningStore: processStore,
+            isCurrentOwner: isCurrentOwner, provider: provider
         ) else { throw AgentSessionBridgeError.invalidRequest }
         guard !isClosed, webView == nil, nativeCodingOwner == nil, !isProviderStartPending,
               !processStore.hasActiveProviderSession, owner.workingDirectory == workingDirectory else {
@@ -448,7 +464,7 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         self.panelId = panelId
         self.workspaceId = workspaceId
         self.rendererKind = rendererKind
-        self.initialProviderID = .copilot
+        self.initialProviderID = providerID
         self.workingDirectory = owner.workingDirectory
         nativeCodingOwner = owner
         pendingNativeCodingExecutable = executableURL
@@ -467,6 +483,21 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
         nativeCodingStartTask?.cancel()
         nativeCodingStartTask = nil
         isProviderStartPending = false
+        sendNativeManagedIntent()
+    }
+
+    private var nativeManagedIntentSnapshot: [String: Any]? {
+        guard let managedProviderID else { return nil }
+        return [
+            "providerId": managedProviderID.rawValue,
+            "status": nativeCodingOwner?.isCurrent == true ? "starting" : "unavailable",
+            "executionDisclosure": AgentSessionManagedNativeOwner.executionDisclosure,
+        ]
+    }
+
+    private func sendNativeManagedIntent() {
+        guard let intent = nativeManagedIntentSnapshot else { return }
+        sendEvent(["type": "provider.nativeIntent", "nativeIntent": intent])
     }
 
     private func startPendingNativeCodingIfReady() {
@@ -492,14 +523,25 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
                     throw CancellationError()
                 }
                 self.providerWorkingDirectory = owner.workingDirectory
-                _ = try await self.processStore.startManagedCopilot(
-                    scope: owner.scope, executableURL: executableURL, workingDirectory: owner.workingDirectory,
-                    codingProjectMandate: owner.projectMandate, nativeCodingOwner: owner
-                )
+                switch owner.provider {
+                case .copilot:
+                    _ = try await self.processStore.startManagedCopilot(
+                        scope: owner.scope, executableURL: executableURL, workingDirectory: owner.workingDirectory,
+                        codingProjectMandate: owner.projectMandate, nativeCodingOwner: owner
+                    )
+                case .codex:
+                    _ = try await self.processStore.startManagedCodex(
+                        scope: owner.scope, executableURL: executableURL, workingDirectory: owner.workingDirectory,
+                        nativeCodingOwner: owner
+                    )
+                case .claude:
+                    throw AgentSessionBridgeError.unsupportedTransport("managed-native-provider")
+                }
                 _ = self.managedRenderer(for: owner)
             } catch {
                 NSLog("agentSession.nativeCoding.start.failed: %@", String(describing: error))
                 owner.revoke()
+                self.sendNativeManagedIntent()
             }
         }
     }
@@ -847,6 +889,9 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
             if let nativeSession = processStore.nativeManagedSessionSnapshot {
                 context["nativeSession"] = nativeSession
             }
+            if let intent = nativeManagedIntentSnapshot {
+                context["nativeManagedIntent"] = intent
+            }
             return context
         case "app.pickFiles":
             return await pickLocalFiles()
@@ -862,6 +907,9 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
                 ] as [String: Any]
             }
         case "provider.select":
+            guard managedProviderID == nil else {
+                throw AgentSessionBridgeError.unsupportedTransport("managed-native-intent")
+            }
             guard !processStore.hasActiveProviderSession,
                   !isProviderStartPending else {
                 throw AgentSessionBridgeError.sessionAlreadyRunning
@@ -871,6 +919,9 @@ final class AgentSessionWebRendererCoordinator: NSObject, WKNavigationDelegate, 
             onProviderIDChanged?(provider)
             return ["providerId": provider.rawValue]
         case "provider.start":
+            guard managedProviderID == nil else {
+                throw AgentSessionBridgeError.unsupportedTransport("managed-native-intent")
+            }
             guard !isClosed else {
                 throw AgentSessionBridgeError.invalidRequest
             }

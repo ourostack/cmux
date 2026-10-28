@@ -19,7 +19,6 @@ import tomllib
 import urllib.request
 import uuid
 
-
 UPSTREAM_COMMIT = "6b9826e3aa83b1a5947db50f4332cb9c65f1b340"
 UPSTREAM_TREE = "74ba48a4b6b086beb9226a79ffe0f3d9f6d40f52"
 RELEASE_MANIFEST_BLOB = "3cf0d009a8ecede0fb207cc9ec40ebef30f59b09"
@@ -380,7 +379,7 @@ def _member_contents(member):
     files = _snapshot(member)
     for name, entry in files.items():
         if entry["mode"] == "120000" or not (
-            name in ("Cargo.toml", "LICENSE", "NOTICE")
+            name in ("Cargo.toml", "LICENSE", "NOTICE", "LICENSE.codex", "NOTICE.codex", "provenance.json")
             or (name.startswith(("src/", "tests/")) and name.endswith(".rs"))
         ):
             raise BuildError(f"Unapproved member input: {name}")
@@ -504,7 +503,86 @@ def _workspace_member(manifest_bytes, lock_bytes, member):
 def _git_environment(root):
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     return dict(environment, GIT_CEILING_DIRECTORIES=str(root.parent),
-                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_SYSTEM=os.devnull,
+                GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_COUNT="0", GIT_OPTIONAL_LOCKS="0",
+                GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/usr/bin/false",
+                SSH_ASKPASS="/usr/bin/false", GIT_NO_LAZY_FETCH="1")
+
+
+def _git_arguments(*arguments):
+    return [
+        "git", "-c", "core.fsmonitor=", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+        "-c", "core.hooksPath=" + os.devnull, "-c", "credential.helper=", *arguments,
+    ]
+
+
+def _cargo_git_gateway(target, attempt):
+    executable = shutil.which("git", path=os.defpath)
+    if executable is None or not Path(executable).is_absolute():
+        raise BuildError("Direct system Git executable required for the owned Cargo gateway")
+    executable = str(Path(executable).resolve(strict=True))
+    directory = target / ("git-posture-" + attempt)
+    directory.mkdir(mode=0o700)
+    path = directory / "git"
+    root = str(target.parent)
+    body = (
+        f"#!{Path(sys.executable).resolve()} -B\n"
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        f"root = Path({root!r})\n"
+        "if not (__debug__ and sys.dont_write_bytecode):\n"
+        "    raise SystemExit('Unoptimized Python with -B required')\n"
+        "if not Path.cwd().resolve().is_relative_to(root):\n"
+        "    raise SystemExit('Git child escaped the owned source-CI generation')\n"
+        "arguments = sys.argv[1:]\n"
+        "if any(a.startswith('-c') or a.startswith('--config-env') or 'core.fsmonitor' in a.lower()\n"
+        "       or 'core.hookspath' in a.lower() for a in arguments):\n"
+        "    raise SystemExit('Git child configuration override refused')\n"
+        "current = Path.cwd().resolve()\n"
+        "for index, argument in enumerate(arguments):\n"
+        "    value = None\n"
+        "    if argument in ('--git-dir', '--work-tree', '-C'):\n"
+        "        if index + 1 >= len(arguments):\n"
+        "            raise SystemExit('Git child path argument missing')\n"
+        "        value = arguments[index + 1]\n"
+        "    elif argument.startswith(('--git-dir=', '--work-tree=')):\n"
+        "        value = argument.split('=', 1)[1]\n"
+        "    elif argument.startswith('-C') and argument != '-C':\n"
+        "        value = argument[2:]\n"
+        "    if value is not None:\n"
+        "        resolved = (current / value).resolve()\n"
+        "        if not resolved.is_relative_to(root):\n"
+        "            raise SystemExit('Git child path escaped the owned generation')\n"
+        "        if argument in ('--git-dir', '--work-tree', '-C'):\n"
+        "            arguments[index + 1] = str(resolved)\n"
+        "        elif argument.startswith(('--git-dir=', '--work-tree=')):\n"
+        "            arguments[index] = argument.split('=', 1)[0] + '=' + str(resolved)\n"
+        "        else:\n"
+        "            arguments[index] = '-C' + str(resolved)\n"
+        "        if argument == '-C' or argument.startswith('-C'):\n"
+        "            current = resolved\n"
+        "environment = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}\n"
+        f"environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_SYSTEM={os.devnull!r},\n"
+        f"    GIT_CONFIG_GLOBAL={os.devnull!r}, GIT_CONFIG_COUNT='0', GIT_OPTIONAL_LOCKS='0',\n"
+        "    GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='/usr/bin/false',\n"
+        "    SSH_ASKPASS='/usr/bin/false', GIT_NO_LAZY_FETCH='1')\n"
+        "git_dir = os.environ.get('GIT_DIR')\n"
+        "prefix = []\n"
+        "if git_dir:\n"
+        "    owned_git_dir = (current / git_dir).resolve(strict=True)\n"
+        "    if not owned_git_dir.is_relative_to(root):\n"
+        "        raise SystemExit('Foreign Git directory refused')\n"
+        "    prefix = ['--git-dir', str(owned_git_dir)]\n"
+        f"executable = {executable!r}\n"
+        "os.execve(executable, [executable, *prefix,\n"
+        "    '-c', 'core.fsmonitor=', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',\n"
+        f"    '-c', {'core.hooksPath=' + os.devnull!r}, '-c', 'credential.helper=',\n"
+        "    *arguments], environment)\n"
+    ).encode()
+    with path.open("xb") as output:
+        output.write(body)
+    path.chmod(0o700)
+    return directory, hashlib.sha256(body).hexdigest()
 
 
 def _patch_paths(source, patch):
@@ -527,7 +605,7 @@ def _patch_paths(source, patch):
                 raise BuildError("Patch requires matching approved existing old/new file headers")
             headers.add(name)
     result = subprocess.run(
-        ["git", "apply", "--numstat", str(patch)], cwd=source,
+        _git_arguments("apply", "--numstat", str(patch)), cwd=source,
         env=_git_environment(source), capture_output=True, text=True, timeout=30,
     )
     if result.returncode:
@@ -548,7 +626,7 @@ def _patch_paths(source, patch):
 
 
 def _git_apply(root, patch, check=False):
-    command = ["git", "apply", "--whitespace=error"]
+    command = _git_arguments("apply", "--whitespace=error")
     if check:
         command.append("--check")
     result = subprocess.run(
@@ -677,8 +755,11 @@ def run_locked(stage: StageManifest, target: Path, rust_bin: Path, cargo_args: l
     attempt = uuid.uuid4().hex
     log, receipt = target / f"{attempt}.log", target / f"{attempt}.json"
     command = [str(rust_bin / "cargo"), cargo_args[0], "--locked", "--jobs", "2", *cargo_args[1:]]
-    environment = dict(os.environ, CARGO_TARGET_DIR=str(target), RUSTC=str(rust_bin / "rustc"),
-                       RUSTDOC=str(rust_bin / "rustdoc"), PATH=str(rust_bin) + os.pathsep + os.defpath,
+    gateway, gateway_sha256 = _cargo_git_gateway(target, attempt)
+    environment = dict(_git_environment(stage.root), CARGO_TARGET_DIR=str(target), RUSTC=str(rust_bin / "rustc"),
+                       RUSTDOC=str(rust_bin / "rustdoc"),
+                       PATH=str(gateway) + os.pathsep + str(rust_bin) + os.pathsep + os.defpath,
+                       CARGO_NET_GIT_FETCH_WITH_CLI="true",
                        CARGO_INCREMENTAL="0", CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0")
     minimum = free
     failure = None
@@ -706,6 +787,10 @@ def run_locked(stage: StageManifest, target: Path, rust_bin: Path, cargo_args: l
     with receipt.open("x") as handle:
         json.dump({
             "command": command, "exit_code": status, "failure": failure,
+            "git_posture": {"kind": "explicit-empty-fsmonitor-B",
+                            "cargo_git_gateway": str(gateway / "git"),
+                            "gateway_sha256": gateway_sha256,
+                            "git_config_count": 0, "git_optional_locks": 0},
             "upstream_commit": UPSTREAM_COMMIT, "source_tree": UPSTREAM_TREE,
             "source_root": str(stage.source), "stage_root": str(stage.root), "target_root": str(target),
             "rust_bin": str(rust_bin), "stage_token": owner["token"],

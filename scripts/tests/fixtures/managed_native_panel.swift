@@ -8,14 +8,11 @@ enum AgentSessionRendererKind: String {
     case react, solid
     var displayName: String { rawValue }
 }
-enum AgentSessionProviderID: String {
-    case copilot, codex, claude
-    var displayName: String { rawValue }
-}
 struct AgentSessionWebTheme {}
 enum AgentSessionManagedShepherdBoundary { struct Target {} }
 
 @MainActor final class AgentSessionWebRendererCoordinator {
+    init(managedProviderID: AgentSessionProviderID? = nil) {}
     static var onRevoke: (() -> Void)?
     static var operations: [String] = []
     var onHasActiveProviderChanged: ((Bool) -> Void)?
@@ -30,6 +27,7 @@ enum AgentSessionManagedShepherdBoundary { struct Target {} }
     func prepareNativeCodingStart(
         panelId: UUID, workspaceId: UUID, rendererKind: AgentSessionRendererKind,
         workingDirectory: String, executableURL: URL,
+        providerID: AgentSessionProviderID = .copilot,
         isCurrentOwner: @escaping @MainActor () -> Bool
     ) throws {}
     func focus() {}
