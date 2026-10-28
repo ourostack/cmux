@@ -209,6 +209,9 @@ class TerminalController {
     // The package-owned listener: path/bind/lock lifecycle, accept source,
     // backoff/rearm recovery, and the generation-counted state machine.
     nonisolated let socketServer: SocketControlServer
+    /// One boot identity and admission owner shared by all local socket clients.
+    lazy var shepherdControlBoundary = makeShepherdControlBoundary()
+    lazy var managedShepherdControlBoundary = makeManagedShepherdControlBoundary()
     /// App-owned discovery marker store injected into the listener event seam.
     nonisolated let socketPathMarkerStore: SocketPathMarkerStore
     // Accepted-connection consumer; runs until process exit (singleton).
@@ -2639,12 +2642,28 @@ class TerminalController {
                 )
                 return
             }
-            let result = await CmuxAutomationInvocationContext.$eventOrigin.withValue(commandOrigin) {
-                await processSocketLineAsync(
-                    trimmed,
-                    passwordAuthorization: passwordAuthorization,
-                    rateLimiter: rateLimiter
-                )
+            let result: (response: String?, passwordAuthorization: SocketPasswordAuthorization)
+            if Self.isShepherdSocketCommand(trimmed) {
+                result = await lineReader.performWhileConnected { [passwordAuthorization] in
+                    await CmuxAutomationInvocationContext.$eventOrigin.withValue(commandOrigin) {
+                        await self.processSocketLineAsync(
+                            trimmed,
+                            passwordAuthorization: passwordAuthorization,
+                            rateLimiter: rateLimiter,
+                            shepherdPeer: ShepherdControlPeer(
+                                peerHasSameUID: peerHasSameUID, isRemoteRelay: false
+                            )
+                        )
+                    }
+                }
+            } else {
+                result = await CmuxAutomationInvocationContext.$eventOrigin.withValue(commandOrigin) {
+                    await processSocketLineAsync(
+                        trimmed,
+                        passwordAuthorization: passwordAuthorization,
+                        rateLimiter: rateLimiter
+                    )
+                }
             }
             passwordAuthorization = result.passwordAuthorization
             if let response = result.response {
@@ -3406,6 +3425,14 @@ class TerminalController {
         params: [String: Any],
         diffViewerRegistration: DiffViewerSessionPreparation = .notNeeded
     ) -> V2MainHopOutcome {
+        if ShepherdControlRequest.Method(rawValue: request.method) != nil {
+            return .callResult(shepherdControlBoundary.handleSynchronously(request, peer: nil))
+        }
+        if AgentSessionManagedShepherdBoundary.Method(rawValue: request.method) != nil {
+            return .callResult(.err(
+                code: "access_denied", message: "Managed Shepherd requires an asynchronous verified local peer.", data: nil
+            ))
+        }
         v2RefreshKnownRefs()
 
         // Domains migrated into CmuxControlSocket's ControlCommandCoordinator
@@ -16395,6 +16422,9 @@ class TerminalController {
         let col = (params["col"] as? NSNumber)?.intValue ?? 0
         let row = (params["row"] as? NSNumber)?.intValue ?? 0
         if deltaLines != 0 {
+            if let answer = shepherdReservedMobileInputAnswer(delivery, surface: terminalTarget.surface) {
+                return answer
+            }
             terminalTarget.surface.mobileScroll(deltaLines: deltaLines, col: max(0, col), row: max(0, row))
             MobileTerminalRenderObserver.shared.noteTerminalBytes(surfaceID: terminalTarget.surfaceID)
         }
@@ -16425,6 +16455,9 @@ class TerminalController {
         }
         let col = (params["col"] as? NSNumber)?.intValue ?? 0
         let row = (params["row"] as? NSNumber)?.intValue ?? 0
+        if let answer = shepherdReservedMobileInputAnswer(delivery, surface: terminalTarget.surface) {
+            return answer
+        }
         terminalTarget.surface.mobileClick(col: max(0, col), row: max(0, row))
         MobileTerminalRenderObserver.shared.noteTerminalBytes(surfaceID: terminalTarget.surfaceID)
         let acknowledgement = MobileHostTerminalInputApplier.shared.completeAccepted(delivery)

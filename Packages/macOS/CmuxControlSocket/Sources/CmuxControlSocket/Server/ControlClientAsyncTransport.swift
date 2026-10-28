@@ -41,6 +41,14 @@ public final class ControlClientAsyncLineReader: @unchecked Sendable {
         var didRejectForMaximum = false
     }
 
+    private struct ConnectionTermination: Sendable {
+        var terminated = false
+        var cancelRequest: (@Sendable () -> Void)?
+    }
+
+    // The socket source can terminate while its owning task awaits a command.
+    // This gate only binds that task's cancellation; it never spans an await.
+    private let connectionTermination: OSAllocatedUnfairLock<ConnectionTermination>
     private let socket: Int32
     private let continuation: AsyncStream<Data>.Continuation
     private var iterator: AsyncStream<Data>.Iterator
@@ -124,6 +132,11 @@ public final class ControlClientAsyncLineReader: @unchecked Sendable {
         // itself is unbounded because the byte gate is what bounds it.
         let stream = AsyncStream<Data>.makeStream(bufferingPolicy: .unbounded)
         let streamContinuation = stream.continuation
+        let connectionTermination = OSAllocatedUnfairLock(initialState: ConnectionTermination())
+        self.connectionTermination = connectionTermination
+        streamContinuation.onTermination = { _ in
+            Self.terminateConnection(connectionTermination)
+        }
         continuation = streamContinuation
         iterator = stream.stream.makeAsyncIterator()
 
@@ -226,6 +239,47 @@ public final class ControlClientAsyncLineReader: @unchecked Sendable {
         deadlineUptimeNanoseconds = nil
         deadlineTask?.cancel()
         deadlineTask = nil
+    }
+
+    /// Runs one request whose cancellation is owned by this live connection.
+    ///
+    /// EOF, authorization revocation, stream rejection, and parent cancellation
+    /// cancel the operation even while nobody is awaiting ``nextLine``. The
+    /// operation must cooperate with cancellation and retain uncertain effects.
+    /// Like the reader, this method has one sequential connection-task owner.
+    public func performWhileConnected<Result: Sendable>(
+        _ operation: @escaping @Sendable () async -> Result
+    ) async -> Result {
+        await withTaskCancellationHandler {
+            let start = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            let task = Task {
+                for await _ in start.stream { break }
+                return await operation()
+            }
+            let terminated = connectionTermination.withLock { state in
+                state.cancelRequest = { task.cancel() }
+                return state.terminated
+            }
+            defer { connectionTermination.withLock { $0.cancelRequest = nil } }
+            if terminated || Task.isCancelled { task.cancel() }
+            start.continuation.yield(())
+            start.continuation.finish()
+            return await task.value
+        } onCancel: {
+            Self.terminateConnection(connectionTermination)
+        }
+    }
+
+    private static func terminateConnection(
+        _ gate: OSAllocatedUnfairLock<ConnectionTermination>
+    ) {
+        let cancel = gate.withLock { state in
+            state.terminated = true
+            let cancel = state.cancelRequest
+            state.cancelRequest = nil
+            return cancel
+        }
+        cancel?()
     }
 
     /// Returns the next newline-terminated UTF-8 line, or `nil` on EOF,

@@ -41,7 +41,8 @@ struct AgentSessionBridgeRequest {
 
     func providerID() throws -> AgentSessionProviderID {
         let rawValue = try requiredString("providerId")
-        guard let provider = AgentSessionProviderID(rawValue: rawValue) else {
+        guard let provider = AgentSessionProviderID(rawValue: rawValue),
+              AgentSessionProviderID.manualCases.contains(provider) else {
             throw AgentSessionBridgeError.invalidProvider(rawValue)
         }
         return provider
@@ -55,4 +56,3 @@ struct AgentSessionBridgeRequest {
         return mode
     }
 }
-

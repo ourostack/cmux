@@ -40,6 +40,10 @@ struct TerminalWorkingDirectoryResolver {
     /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)`, or nil when the process is gone
     /// or unreadable.
     nonisolated static func processCurrentWorkingDirectory(pid: pid_t) -> String? {
+        normalized(rawProcessCurrentWorkingDirectory(pid: pid))
+    }
+
+    nonisolated static func rawProcessCurrentWorkingDirectory(pid: pid_t) -> String? {
         guard pid > 0 else { return nil }
         var info = proc_vnodepathinfo()
         let expectedSize = MemoryLayout<proc_vnodepathinfo>.size
@@ -49,6 +53,6 @@ struct TerminalWorkingDirectoryResolver {
             let endIndex = rawBuffer.firstIndex(of: 0) ?? rawBuffer.endIndex
             return String(decoding: rawBuffer[..<endIndex], as: UTF8.self)
         }
-        return normalized(path)
+        return path.isEmpty ? nil : path
     }
 }

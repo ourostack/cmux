@@ -285,6 +285,9 @@ struct ClaudeHookSessionRecord: Codable {
     var autoNameRecentMessages: [AutoNamingTranscriptMessage]?
     var autoNameMessageSequence: Int?
     var hadPendingBackgroundWorkAtStop: Bool?
+    var shepherdReadiness: ShepherdHookReadinessProof? = nil
+    var shepherdWorkRevision: UUID? = nil
+    var shepherdProducer: ShepherdHookProducerState? = nil
     /// Unsandboxed Cursor shell calls that cmux asked Cursor to gate. The
     /// after/failure hooks do not carry a native approval decision, so the
     /// command identity is the only safe completion correlation available.
@@ -1869,7 +1872,7 @@ final class ClaudeHookSessionStore {
         }
     }
 
-    private func makeSessionRecord(
+    func makeSessionRecord(
         state: ClaudeHookSessionStoreFile,
         sessionId: String,
         workspaceId: String,
@@ -2053,6 +2056,7 @@ final class ClaudeHookSessionStore {
         title: String? = nil,
         now: TimeInterval
     ) {
+        record.invalidateShepherdReadiness()
         record.workspaceId = workspaceId
         if !surfaceId.isEmpty {
             record.surfaceId = surfaceId
@@ -2072,6 +2076,7 @@ final class ClaudeHookSessionStore {
                 startIdentity: processStartIdentity(pid: pid)
             )
         }
+        record.retireShepherdProducerIfOwnershipChanged()
         if let launchCommand {
             let existingHasArguments = !(record.launchCommand?.arguments.isEmpty ?? true)
             let incomingHasArguments = !launchCommand.arguments.isEmpty
@@ -6775,7 +6780,9 @@ struct CMUXCLI {
         if (command == "codex-hook" || command == "feed-hook"), processEnv["CMUX_SURFACE_ID"]?.isEmpty != false, processEnv["CMUX_WORKSPACE_ID"]?.isEmpty != false,
            !commandArgs.contains(where: { $0 == "--workspace" || $0 == "--surface" || $0.hasPrefix("--workspace=") || $0.hasPrefix("--surface=") }) { print("{}"); return } // Backwards compatibility for old installed hooks outside cmux terminals.
         if command == "hooks" {
-            if try runHooksNoSocketCommand(commandArgs: commandArgs) {
+            if try runHooksNoSocketCommand(
+                commandArgs: commandArgs, socketPath: resolvedSocketPath, socketPassword: socketPasswordArg
+            ) {
                 return
             }
             if commandArgs == ["claude", "spool-forwarder"] {
@@ -31168,6 +31175,12 @@ struct CMUXCLI {
         let hookCwd = relayOrigin ? nil : parsedInput.cwd
         let hookTranscriptPath = relayOrigin ? nil : parsedInput.transcriptPath
         let sessionStore = ClaudeHookSessionStore()
+        // Every work-bearing hook, including self-started prompts, retires the
+        // old registry proof before routing, telemetry, or other socket I/O.
+        if subcommand != "notification", subcommand != "notify",
+           let sessionID = parsedInput.sessionId {
+            try sessionStore.invalidateShepherdReadiness(sessionId: sessionID)
+        }
         func localClaudePID(mapped: ClaudeHookSessionRecord?) -> Int? {
             guard !relayOrigin else { return nil }
             return mapped?.pid ?? observedHookAgentPID
@@ -35284,11 +35297,12 @@ struct CMUXCLI {
         return Int64(info.kp_eproc.e_tdev)
     }
 
-    private func parentPID(of pid: pid_t) -> pid_t {
+    func parentPID(of pid: pid_t) -> pid_t {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.size
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else {
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0,
+              size == MemoryLayout<kinfo_proc>.size, info.kp_proc.p_pid == pid else {
             return -1
         }
         return info.kp_eproc.e_ppid
@@ -45337,7 +45351,9 @@ export default {
 
     // MARK: - Hooks namespace
 
-    private func runHooksNoSocketCommand(commandArgs: [String]) throws -> Bool {
+    private func runHooksNoSocketCommand(
+        commandArgs: [String], socketPath: String, socketPassword: String?
+    ) throws -> Bool {
         guard let first = commandArgs.first?.lowercased() else {
             print(subcommandUsage("hooks") ?? "Usage: cmux hooks <setup|uninstall|agent>")
             return true
@@ -45366,6 +45382,12 @@ export default {
             return false
 
         case "claude":
+            if try runShepherdHookNoSocketCommand(
+                commandArgs: Array(commandArgs.dropFirst()), socketPath: socketPath,
+                socketPassword: socketPassword
+            ) {
+                return true
+            }
             let action = commandArgs.dropFirst().first?.lowercased()
             guard action == "inject-settings" else {
                 return false

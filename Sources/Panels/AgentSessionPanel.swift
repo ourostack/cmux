@@ -9,8 +9,10 @@ final class AgentSessionPanel: Panel {
     private(set) var workspaceId: UUID
     let rendererKind: AgentSessionRendererKind
     let initialProviderID: AgentSessionProviderID
+    let managedProviderID: AgentSessionProviderID?
     private(set) var workingDirectory: String?
-    let rendererSession = AgentSessionWebRendererSession()
+    private(set) var isClosed = false
+    let rendererSession: AgentSessionWebRendererSession
 
     private(set) var currentProviderID: AgentSessionProviderID
     private(set) var displayTitle: String
@@ -31,12 +33,16 @@ final class AgentSessionPanel: Panel {
         workspaceId: UUID,
         rendererKind: AgentSessionRendererKind,
         initialProviderID: AgentSessionProviderID = .codex,
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        managedProviderID: AgentSessionProviderID? = nil
     ) {
         self.id = UUID()
         self.workspaceId = workspaceId
         self.rendererKind = rendererKind
         self.initialProviderID = initialProviderID
+        let managedIntent = managedProviderID ?? (initialProviderID == .copilot ? .copilot : nil)
+        self.managedProviderID = managedIntent
+        self.rendererSession = AgentSessionWebRendererSession(managedProviderID: managedIntent)
         self.currentProviderID = initialProviderID
         self.workingDirectory = workingDirectory
         self.displayTitle = Self.title(provider: initialProviderID, rendererKind: rendererKind)
@@ -65,14 +71,21 @@ final class AgentSessionPanel: Panel {
     }
 
     func close() {
+        guard !isClosed else { return }
+        rendererSession.revokeNativeCodingStart()
+        isClosed = true
         rendererSession.close()
     }
 
     func updateWorkspaceId(_ newWorkspaceId: UUID) {
+        guard workspaceId != newWorkspaceId else { return }
+        rendererSession.revokeNativeCodingStart()
         workspaceId = newWorkspaceId
     }
 
     func clearWorkingDirectory() {
+        guard workingDirectory != nil else { return }
+        rendererSession.revokeNativeCodingStart()
         workingDirectory = nil
     }
 
@@ -84,6 +97,7 @@ final class AgentSessionPanel: Panel {
 
     private func setCurrentProviderID(_ providerID: AgentSessionProviderID) {
         guard currentProviderID != providerID else { return }
+        rendererSession.revokeNativeCodingStart()
         currentProviderID = providerID
         displayTitle = Self.title(provider: providerID, rendererKind: rendererKind)
         emitDisplayStateChanged()

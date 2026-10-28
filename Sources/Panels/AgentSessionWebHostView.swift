@@ -7,6 +7,7 @@ final class AgentSessionWebHostView: NSView {
     /// Called when a retained agent web host is attached after its first pane attachment.
     var onDidReattach: (() -> Void)?
     var onGeometryChanged: (() -> Void)?
+    var onManagedRendererInvalidation: (() -> Void)?
     private(set) var geometryRevision: UInt64 = 0
     private var lastReportedAgentSessionWebHostGeometryState: AgentSessionWebHostGeometryState?
     private var hasPendingGeometryNotification = false
@@ -20,6 +21,24 @@ final class AgentSessionWebHostView: NSView {
     private static let maximumPendingScrollDelta: CGFloat = 2400
 
     override var isOpaque: Bool { false }
+
+    override var alphaValue: CGFloat {
+        willSet { if alphaValue != newValue { onManagedRendererInvalidation?() } }
+    }
+
+    override var isHidden: Bool {
+        willSet { if isHidden != newValue { onManagedRendererInvalidation?() } }
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        onManagedRendererInvalidation?()
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewWillMove(toSuperview newSuperview: NSView?) {
+        onManagedRendererInvalidation?()
+        super.viewWillMove(toSuperview: newSuperview)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -41,7 +60,9 @@ final class AgentSessionWebHostView: NSView {
     override func layout() {
         super.layout()
         if let hostedWebView, hostedWebView.superview === self {
-            hostedWebView.frame = sessionContentWidthPresentation.contentFrame(in: bounds)
+            let frame = sessionContentWidthPresentation.contentFrame(in: bounds)
+            if hostedWebView.frame != frame { onManagedRendererInvalidation?() }
+            hostedWebView.frame = frame
         }
         notifyGeometryChangedIfNeeded()
     }
@@ -51,6 +72,7 @@ final class AgentSessionWebHostView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        onManagedRendererInvalidation?()
         guard let webView = hostedWebView as? AgentSessionWebView else {
             super.mouseDown(with: event)
             return
@@ -60,6 +82,7 @@ final class AgentSessionWebHostView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        onManagedRendererInvalidation?()
         guard hostedWebView != nil else {
             super.scrollWheel(with: event)
             return
@@ -111,6 +134,7 @@ final class AgentSessionWebHostView: NSView {
           return true;
         })()
         """
+        onManagedRendererInvalidation?()
         hostedWebView.evaluateJavaScript(script) { [weak self, weak hostedWebView] _, _ in
             Task { @MainActor in
                 guard let self,
@@ -131,12 +155,26 @@ final class AgentSessionWebHostView: NSView {
     }
 
     override func setFrameOrigin(_ newOrigin: NSPoint) {
+        if frame.origin != newOrigin { onManagedRendererInvalidation?() }
         super.setFrameOrigin(newOrigin)
         markGeometryDirtyIfNeeded()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
+        if frame.size != newSize { onManagedRendererInvalidation?() }
         super.setFrameSize(newSize)
+        markGeometryDirtyIfNeeded()
+    }
+
+    override func setBoundsOrigin(_ newOrigin: NSPoint) {
+        if bounds.origin != newOrigin { onManagedRendererInvalidation?() }
+        super.setBoundsOrigin(newOrigin)
+        markGeometryDirtyIfNeeded()
+    }
+
+    override func setBoundsSize(_ newSize: NSSize) {
+        if bounds.size != newSize { onManagedRendererInvalidation?() }
+        super.setBoundsSize(newSize)
         markGeometryDirtyIfNeeded()
     }
 
@@ -169,6 +207,7 @@ final class AgentSessionWebHostView: NSView {
     }
 
     func attachWebView(_ webView: WKWebView) {
+        if hostedWebView !== webView || webView.superview !== self { onManagedRendererInvalidation?() }
         if hostedWebView !== webView {
             resetPendingScroll()
         }
@@ -190,6 +229,7 @@ final class AgentSessionWebHostView: NSView {
 
     func setSessionContentWidthPresentation(_ presentation: SessionContentWidthPresentation) {
         guard sessionContentWidthPresentation != presentation else { return }
+        onManagedRendererInvalidation?()
         sessionContentWidthPresentation = presentation
         needsLayout = true
         layoutSubtreeIfNeeded()
@@ -200,6 +240,7 @@ final class AgentSessionWebHostView: NSView {
               webView.superview === self else {
             return
         }
+        onManagedRendererInvalidation?()
         webView.removeFromSuperview()
         if hostedWebView === webView {
             resetPendingScroll()

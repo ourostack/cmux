@@ -698,9 +698,10 @@ extension CMUXCLI {
     /// A writer that keeps stdin open past the read deadline gets what it wrote
     /// by then admitted when that is complete JSON, and the neutral payload
     /// when the deadline cut it mid-document, not an unbounded wait for EOF.
-    private static func readBoundedAgentHookInput(
+    static func readBoundedAgentHookInput(
         handle: FileHandle = .standardInput,
-        timeout: TimeInterval = agentHookInputReadTimeoutSeconds
+        timeout: TimeInterval = agentHookInputReadTimeoutSeconds,
+        requiresEOF: Bool = false
     ) -> String? {
         let fileDescriptor = handle.fileDescriptor
         let deadline = Date.now.addingTimeInterval(timeout)
@@ -731,7 +732,7 @@ extension CMUXCLI {
             }
             data.append(contentsOf: buffer[0..<count])
         }
-        guard data.count <= maximumAgentHookInputBytes, !data.isEmpty,
+        guard !requiresEOF, data.count <= maximumAgentHookInputBytes, !data.isEmpty,
               (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil else {
             return nil
         }

@@ -1,9 +1,42 @@
 import Foundation
 import Darwin
 import CmuxSettings
+import CmuxControlSocket
+
+@MainActor
+private protocol AgentSessionStoreManagedLaunch: AnyObject {
+    var lifetime: AgentSessionManagedSession { get }
+    var providerAdapter: any AgentSessionManagedProviderAdapter { get }
+    var backendArguments: [String] { get }
+    func launchBackend() throws
+    func beginClose() -> Task<Void, any Error>
+    func startProviderAdapter()
+}
+
+extension AgentSessionManagedCopilotLaunch: AgentSessionStoreManagedLaunch {
+    fileprivate func startProviderAdapter() {
+        adapter.start(launchID: lifetime.launchID)
+    }
+}
+
+extension AgentSessionManagedCodexLaunch: AgentSessionStoreManagedLaunch {
+    fileprivate func startProviderAdapter() {
+        // Codex consumes its authenticated descriptor as soon as the owned transport starts.
+    }
+}
 
 @MainActor
 final class AgentSessionProcessStore {
+    enum ManagedStartError: Error {
+        case managedCleanupUnverified
+    }
+
+    private static var retainedManagedWork: [ObjectIdentifier: AgentSessionProcessStore] = [:]
+
+    private static var hasUnsettledManagedCleanup: Bool {
+        retainedManagedWork.values.contains { $0.managedCopilot?.isClosing == true }
+    }
+
     var eventSink: (([String: Any]) -> Void)?
     var activeProviderSink: ((Bool) -> Void)? {
         didSet {
@@ -11,15 +44,341 @@ final class AgentSessionProcessStore {
         }
     }
     var hasActiveProviderSession: Bool {
-        !sessions.isEmpty
+        !sessions.isEmpty || managedCopilot != nil
+    }
+    var nativeManagedSessionSnapshot: [String: Any]? {
+        guard let owner = managedCopilot, owner.nativeCodingOwner != nil else { return nil }
+        let status = owner.failed ? "failed" : owner.isClosing ? "stopping" : owner.started ? "running" : "starting"
+        return [
+            "providerId": owner.providerID.rawValue, "sessionId": owner.sessionID, "status": status,
+            "revision": owner.failed ? 4 : owner.isClosing ? 3 : owner.started ? 2 : 1,
+            "executionDisclosure": AgentSessionManagedNativeOwner.executionDisclosure,
+        ]
     }
     private var sessions: [String: AgentSessionRunningSession] = [:]
+    private final class ManagedCopilotOwner {
+        let sessionID = UUID().uuidString
+        let providerID: AgentSessionProviderID
+        var providerName: String { providerID == .copilot ? "Copilot" : providerID.displayName }
+        let nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?
+        var launch: (any AgentSessionStoreManagedLaunch)?
+        var isClosing = false
+        var stopRequested = false
+        var failed = false
+        var started = false
+        var cleanup: Task<Void, any Error>?
+
+        init(providerID: AgentSessionProviderID, nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner?) {
+            self.providerID = providerID
+            self.nativeCodingOwner = nativeCodingOwner
+        }
+    }
+    private var managedCopilot: ManagedCopilotOwner?
     private var lastEmittedHasActiveProviderSession: Bool?
     private static let terminationEscalationInterval: DispatchTimeInterval = .seconds(3)
 
-    func start(plan: AgentSessionLaunchPlan, workingDirectory: String?) async throws -> AgentSessionStartedSession {
-        guard sessions.isEmpty else {
+    func ownsManagedCodingOwner(_ candidate: AgentSessionManagedCopilotLaunch.NativeCodingOwner) -> Bool {
+        guard let owner = managedCopilot, owner.nativeCodingOwner === candidate,
+              owner.started, !owner.isClosing, !owner.failed, let launch = owner.launch else { return false }
+        guard candidate.authorizes(launch.lifetime) else { return false }
+        return managedCopilot === owner && owner.launch === launch &&
+            owner.started && !owner.isClosing && !owner.failed
+    }
+
+    func managedCodingState(
+        for candidate: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+    ) -> ShepherdManagedSessionState? {
+        guard ownsManagedCodingOwner(candidate), let owner = managedCopilot,
+              owner.nativeCodingOwner === candidate, let launch = owner.launch,
+              let state = launch.providerAdapter.inputState, state.identity == launch.lifetime.identity,
+              managedCopilot === owner, owner.launch === launch,
+              owner.started, !owner.isClosing, !owner.failed else { return nil }
+        return state
+    }
+
+    func managedCodingSessionID(
+        for candidate: AgentSessionManagedCopilotLaunch.NativeCodingOwner
+    ) -> String? {
+        guard ownsManagedCodingOwner(candidate), let owner = managedCopilot,
+              owner.nativeCodingOwner === candidate else { return nil }
+        return owner.sessionID
+    }
+
+    func beginManagedSupervisorInput(
+        sessionId: String, submission: AgentSessionManagedRendererController.Submission,
+        nativeOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner,
+        progress: ((AgentSessionManagedInputProgress) -> Void)? = nil
+    ) -> Bool {
+        guard ownsManagedCodingOwner(nativeOwner), let owner = managedCopilot,
+              owner.sessionID == sessionId, owner.nativeCodingOwner === nativeOwner,
+              let launch = owner.launch else { return false }
+        return launch.providerAdapter.beginSupervisorInput(
+            submission, nativeOwner: nativeOwner, owningStore: self, progress: progress
+        )
+    }
+
+    func managedSupervisorInputProgress(
+        sessionId: String, inputID: UUID
+    ) -> AgentSessionManagedInputProgress? {
+        guard let owner = managedCopilot, owner.sessionID == sessionId else { return nil }
+        return owner.launch?.providerAdapter.supervisorInputProgress(inputID)
+    }
+
+    func startManagedCopilot(
+        scope: AgentSessionManagedCopilotLaunch.Scope, executableURL: URL, workingDirectory: String,
+        codingProjectMandate: UUID?,
+        nativeCodingOwner: AgentSessionManagedCopilotLaunch.NativeCodingOwner? = nil,
+        launcher: AgentSessionOwnedProcessLauncher = .init()
+    ) async throws -> AgentSessionStartedSession {
+        try await startManagedProvider(
+            .copilot, scope: scope, executableURL: executableURL, workingDirectory: workingDirectory,
+            codingProjectMandate: codingProjectMandate, nativeCodingOwner: nativeCodingOwner, launcher: launcher)
+    }
+
+    func startManagedCodex(
+        scope: AgentSessionManagedNativeOwner.Scope, executableURL: URL, workingDirectory: String,
+        nativeCodingOwner: AgentSessionManagedNativeOwner,
+        launcher: AgentSessionOwnedProcessLauncher = .init()
+    ) async throws -> AgentSessionStartedSession {
+        try await startManagedProvider(
+            .codex, scope: scope, executableURL: executableURL, workingDirectory: workingDirectory,
+            codingProjectMandate: nativeCodingOwner.projectMandate, nativeCodingOwner: nativeCodingOwner,
+            launcher: launcher)
+    }
+
+    private func startManagedProvider(
+        _ provider: AgentSessionProviderID,
+        scope: AgentSessionManagedNativeOwner.Scope, executableURL: URL, workingDirectory: String,
+        codingProjectMandate: UUID?, nativeCodingOwner: AgentSessionManagedNativeOwner?,
+        launcher: AgentSessionOwnedProcessLauncher
+    ) async throws -> AgentSessionStartedSession {
+        let providerName = provider == .copilot ? "Copilot" : provider.displayName
+        guard !hasActiveProviderSession else {
             throw AgentSessionBridgeError.sessionAlreadyRunning
+        }
+        guard !Self.hasUnsettledManagedCleanup else {
+            throw ManagedStartError.managedCleanupUnverified
+        }
+        if let codingProjectMandate {
+            guard let nativeCodingOwner, nativeCodingOwner.provider.rawValue == provider.rawValue,
+                  nativeCodingOwner.consume(
+                    for: self, scope: scope, workingDirectory: workingDirectory, projectMandate: codingProjectMandate
+                  ) else {
+                throw AgentSessionBridgeError.unsupportedTransport("managed-\(provider.rawValue)-native-authorization")
+            }
+        } else if nativeCodingOwner != nil {
+            nativeCodingOwner?.revoke()
+            throw AgentSessionBridgeError.unsupportedTransport("managed-\(provider.rawValue)-native-authorization")
+        }
+        guard !Self.hasUnsettledManagedCleanup else {
+            nativeCodingOwner?.revoke()
+            throw ManagedStartError.managedCleanupUnverified
+        }
+        let owner = ManagedCopilotOwner(providerID: provider, nativeCodingOwner: nativeCodingOwner)
+        managedCopilot = owner
+        Self.retainedManagedWork[ObjectIdentifier(self)] = self
+        do {
+            if let nativeCodingOwner {
+                guard nativeCodingOwner.installRevocationSink(for: self, { [weak self, weak owner] in
+                    guard let self, let owner else { return }
+                    self.failManagedCopilot(owner, reason: "nativeOwnerRevoked")
+                }) else { throw CancellationError() }
+            }
+            emitNativeSessionState(owner)
+            emitActiveProviderStateIfNeeded()
+            try Task.checkCancellation()
+            guard !owner.isClosing else { throw CancellationError() }
+            let launch: any AgentSessionStoreManagedLaunch
+            switch provider {
+            case .copilot:
+                launch = try await AgentSessionManagedCopilotLaunch.prepare(
+                    scope: scope, executableURL: executableURL, workingDirectory: workingDirectory,
+                    codingProjectMandate: codingProjectMandate, nativeCodingOwner: nativeCodingOwner, launcher: launcher)
+            case .codex:
+                guard let nativeCodingOwner else {
+                    throw AgentSessionBridgeError.unsupportedTransport("managed-codex-native-authorization")
+                }
+                launch = try await AgentSessionManagedCodexLaunch.prepare(
+                    scope: scope, executableURL: executableURL, workingDirectory: workingDirectory,
+                    nativeOwner: nativeCodingOwner, launcher: launcher)
+            default:
+                throw AgentSessionBridgeError.unsupportedTransport(provider.transportKind)
+            }
+            owner.launch = launch
+            try Task.checkCancellation()
+            guard managedCopilot === owner, !owner.isClosing,
+                  nativeCodingOwner?.authorizes(launch.lifetime) != false else { throw CancellationError() }
+            guard !Self.hasUnsettledManagedCleanup else {
+                throw ManagedStartError.managedCleanupUnverified
+            }
+            try launch.launchBackend()
+            while launch.lifetime.phase == .awaitingBootstrap {
+                try Task.checkCancellation()
+                guard !owner.isClosing,
+                      nativeCodingOwner?.authorizes(launch.lifetime) != false else { throw CancellationError() }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            guard (launch.lifetime.phase == .awaitingProvider || provider == .codex && launch.lifetime.phase == .bound),
+                  !owner.isClosing,
+                  nativeCodingOwner?.authorizes(launch.lifetime) != false else {
+                throw AgentSessionBridgeError.providerNotReady(providerName)
+            }
+            launch.startProviderAdapter()
+            while !launch.providerAdapter.configurationObserved && launch.providerAdapter.holdReason == nil {
+                try Task.checkCancellation()
+                guard !owner.isClosing,
+                      nativeCodingOwner?.authorizes(launch.lifetime) != false else { throw CancellationError() }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            guard launch.providerAdapter.configurationObserved, !owner.isClosing,
+                  nativeCodingOwner?.authorizes(launch.lifetime) != false else {
+                throw AgentSessionBridgeError.providerNotReady(providerName)
+            }
+            launch.providerAdapter.failureSink = { [weak self, weak owner] reason in
+                guard let self, let owner else { return }
+                self.failManagedCopilot(owner, reason: reason)
+            }
+            launch.providerAdapter.projectionSink = { [weak self, weak owner, weak launch] projection in
+                guard let self, let owner, let launch else { return }
+                self.projectManagedCopilot(projection, owner: owner, launch: launch)
+            }
+            owner.started = true
+            emitNativeSessionState(owner)
+            var startedEvent: [String: Any] = [
+                "type": "provider.started", "sessionId": owner.sessionID, "providerId": provider.rawValue,
+                "executablePath": executableURL.path, "arguments": launch.backendArguments,
+            ]
+            if let nativeSession = nativeManagedSessionSnapshot { startedEvent["nativeSession"] = nativeSession }
+            eventSink?(startedEvent)
+            try Task.checkCancellation()
+            guard !owner.isClosing else { throw CancellationError() }
+            return AgentSessionStartedSession(sessionId: owner.sessionID)
+        } catch {
+            let original = error
+            let reason: String?
+            if !owner.stopRequested {
+                owner.failed = true
+                reason = owner.launch?.providerAdapter.holdReason ?? String(describing: error)
+            } else {
+                reason = nil
+            }
+            beginManagedCopilotClose(owner)
+            if let reason {
+                eventSink?([
+                    "type": "provider.output", "sessionId": owner.sessionID, "providerId": provider.rawValue,
+                    "stream": "stderr", "text": "Managed \(providerName) failed to start: \(reason)\n",
+                ])
+            }
+            if owner.launch != nil {
+                try await owner.cleanup?.value
+            } else if managedCopilot === owner {
+                nativeCodingOwner?.revoke()
+                releaseManagedWork(owner)
+                emitActiveProviderStateIfNeeded()
+                emitManagedCopilotExit(owner)
+            }
+            throw original
+        }
+    }
+
+    private func releaseManagedWork(_ owner: ManagedCopilotOwner) {
+        guard managedCopilot === owner else { return }
+        managedCopilot = nil
+        Self.retainedManagedWork.removeValue(forKey: ObjectIdentifier(self))
+    }
+
+    private func projectManagedCopilot(
+        _ projection: AgentSessionManagedProjection,
+        owner: ManagedCopilotOwner, launch: any AgentSessionStoreManagedLaunch
+    ) {
+        guard managedCopilot === owner, owner.launch === launch,
+              owner.started, !owner.isClosing, !owner.failed,
+              owner.nativeCodingOwner?.authorizes(launch.lifetime) != false,
+              managedCopilot === owner, owner.launch === launch,
+              owner.started, !owner.isClosing, !owner.failed else { return }
+        switch projection {
+        case .assistant(let text):
+            emitOutput(sessionId: owner.sessionID, providerID: owner.providerID, stream: "stdout", text: text + "\n\n")
+        case .commandStarted(let callID, let command):
+            emitActivity(sessionId: owner.sessionID, providerID: owner.providerID, activity: [
+                "activityId": callID, "kind": "command", "status": "inProgress",
+                "action": command.program, "detail": command.arguments.joined(separator: " "),
+            ])
+        case .commandCompleted(let callID, let command, let status, let output):
+            emitActivity(sessionId: owner.sessionID, providerID: owner.providerID, activity: [
+                "activityId": callID, "kind": "command", "status": status == 0 ? "completed" : "failed",
+                "action": command.program, "detail": command.arguments.joined(separator: " "),
+                "outputDelta": output,
+            ])
+        case .turnComplete:
+            emitTurnComplete(sessionId: owner.sessionID, providerID: owner.providerID)
+        }
+    }
+
+    private func emitNativeSessionState(_ owner: ManagedCopilotOwner) {
+        guard managedCopilot === owner, let nativeSession = nativeManagedSessionSnapshot else { return }
+        eventSink?([
+            "type": "provider.nativeSession", "providerId": owner.providerID.rawValue,
+            "sessionId": owner.sessionID, "nativeSession": nativeSession,
+        ])
+    }
+
+    private func emitManagedCopilotExit(_ owner: ManagedCopilotOwner) {
+        eventSink?([
+            "type": "provider.exit", "sessionId": owner.sessionID, "providerId": owner.providerID.rawValue,
+            "status": owner.failed ? 1 : 0, "stopRequested": owner.stopRequested,
+        ])
+    }
+
+    private func failManagedCopilot(_ owner: ManagedCopilotOwner, reason: String) {
+        guard managedCopilot === owner, !owner.isClosing else { return }
+        owner.failed = true
+        beginManagedCopilotClose(owner)
+        eventSink?([
+            "type": "provider.output", "sessionId": owner.sessionID, "providerId": owner.providerID.rawValue,
+            "stream": "stderr", "text": "Managed \(owner.providerName) failed: \(reason)\n",
+        ])
+    }
+
+    private func beginManagedCopilotClose(_ owner: ManagedCopilotOwner) {
+        let beganClosing = !owner.isClosing
+        owner.isClosing = true
+        owner.nativeCodingOwner?.revoke()
+        guard owner.cleanup == nil else { return }
+        guard let launch = owner.launch else {
+            if beganClosing { emitNativeSessionState(owner) }
+            return
+        }
+        let cleanup = launch.beginClose()
+        owner.cleanup = Task {
+            do {
+                try await cleanup.value
+                guard self.managedCopilot === owner else { return }
+                self.releaseManagedWork(owner)
+                self.emitActiveProviderStateIfNeeded()
+                self.emitManagedCopilotExit(owner)
+            } catch {
+                owner.failed = true
+                self.emitNativeSessionState(owner)
+                self.eventSink?([
+                    "type": "provider.output", "sessionId": owner.sessionID, "providerId": owner.providerID.rawValue,
+                    "stream": "stderr", "text": "Managed \(owner.providerName) cleanup is unverified: \(error)\n",
+                ])
+                throw error
+            }
+        }
+        if beganClosing { emitNativeSessionState(owner) }
+    }
+
+    func start(
+        plan: AgentSessionLaunchPlan, workingDirectory: String?,
+        launcher: AgentSessionOwnedProcessLauncher = .init()
+    ) async throws -> AgentSessionStartedSession {
+        guard !hasActiveProviderSession else {
+            throw AgentSessionBridgeError.sessionAlreadyRunning
+        }
+        guard AgentSessionProviderID.manualCases.contains(plan.provider) else {
+            throw AgentSessionBridgeError.unsupportedTransport(plan.provider.transportKind)
         }
         let sessionId = UUID().uuidString
         let launchArguments = plan.arguments
@@ -32,7 +391,7 @@ final class AgentSessionProcessStore {
             launchEnvironment["TMPDIR"] = scratchDirectory.path
             launchEnvironment["CMUX_AGENT_ARTIFACT_ROOT"] = scratchDirectory.path
         }
-        let process = try AgentSessionOwnedProcessLauncher().prepare(
+        let process = try launcher.prepare(
             plan: plan, workingDirectory: workingDirectory, environment: launchEnvironment
         )
 
@@ -127,6 +486,23 @@ final class AgentSessionProcessStore {
         permissionMode: AgentSessionPermissionMode = .standard,
         text: String
     ) async throws {
+        if let owner = managedCopilot, owner.sessionID == sessionId {
+            guard !owner.isClosing, let launch = owner.launch else {
+                throw AgentSessionBridgeError.providerNotReady(owner.providerName)
+            }
+            guard owner.nativeCodingOwner?.authorizes(launch.lifetime) != false else {
+                failManagedCopilot(owner, reason: "nativeOwnerUnavailable")
+                throw AgentSessionBridgeError.providerNotReady(owner.providerName)
+            }
+            guard permissionMode == .standard else {
+                failManagedCopilot(owner, reason: "unsupportedPermissionMode")
+                throw AgentSessionBridgeError.unsupportedTransport("managed-\(owner.providerID.rawValue)-permission-mode")
+            }
+            guard launch.providerAdapter.submitOwnerInput(UUID(), prompt: text, launchID: launch.lifetime.launchID) else {
+                throw AgentSessionBridgeError.providerNotReady(owner.providerName)
+            }
+            return
+        }
         guard let session = sessions[sessionId] else {
             throw AgentSessionBridgeError.sessionNotFound(sessionId)
         }
@@ -141,10 +517,17 @@ final class AgentSessionProcessStore {
             try await writeClaudeStreamJSON(text, to: session.inputWriter)
         case .opencode:
             try await postOpenCodePrompt(text, session: session)
+        case .copilot:
+            throw AgentSessionBridgeError.unsupportedTransport(session.providerID.transportKind)
         }
     }
 
     func stop(sessionId: String) throws {
+        if let owner = managedCopilot, owner.sessionID == sessionId {
+            owner.stopRequested = true
+            beginManagedCopilotClose(owner)
+            return
+        }
         guard let session = sessions[sessionId] else {
             throw AgentSessionBridgeError.sessionNotFound(sessionId)
         }
@@ -153,6 +536,10 @@ final class AgentSessionProcessStore {
     }
 
     func closeAll() {
+        if let owner = managedCopilot {
+            owner.stopRequested = true
+            beginManagedCopilotClose(owner)
+        }
         for session in sessions.values {
             session.stopRequested = true
             requestTermination(for: session)

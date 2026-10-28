@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { activityGlyph } from "../shared/activityGlyph";
-import { callNative, subscribeToAgentEvents } from "../shared/bridge";
+import { callNative, installManagedComposer, subscribeToAgentEvents } from "../shared/bridge";
+import { ManagedComposer } from "../shared/managedComposer";
 import {
   CODEX_BUTTON_BASE,
   CODEX_BUTTON_COMPOSER,
@@ -30,10 +31,11 @@ import {
   type FooterCollapseState,
 } from "../shared/footerCollapse";
 import { renderMarkdownFragment, renderPlainTextHTML } from "../shared/markdown";
+import { makeClientId } from "../shared/ids";
 import { promptTextWithAttachments } from "../shared/promptAttachments";
 import { promptTextWithAutoContext } from "../shared/promptMentions";
 import { promptTextWithPlanMode } from "../shared/promptModes";
-import { codexModelLabel, providerBadgeLabel } from "../shared/providerDisplay";
+import { codexModelLabel, providerBadgeLabel, selectedProviderForDisplay } from "../shared/providerDisplay";
 import {
   formatRateLimitPercent,
   formatRateLimitReset,
@@ -48,6 +50,7 @@ import {
   canStartProvider,
   canStopProvider,
   loadInitialData,
+  managedExecutionDisclosure,
   messageForError,
   reduceSession,
   sendInput,
@@ -269,25 +272,31 @@ function useAutoStart(state: SessionState, dispatch: React.Dispatch<Action>) {
 }
 
 export function AgentSessionApp() {
-  const [state, dispatch] = useReducer(reduceSession, initialState("react"));
+  const [state, rawDispatch] = useReducer(reduceSession, initialState("react"));
+  const [composer] = useState(() => new ManagedComposer());
+  const dispatch = useCallback((action: Action) => {
+    if (composer.allowAction(action)) rawDispatch(action);
+  }, [composer]);
   useInitialData(dispatch);
   useNativeEvents(dispatch);
   useAutoStart(state, dispatch);
-  return h(SessionSurface, { state, dispatch, renderer: "React" });
+  return h(SessionSurface, { state, dispatch, composer, renderer: "React" });
 }
 
 function SessionSurface({
   state,
   dispatch,
+  composer,
   renderer,
 }: {
   state: SessionState;
   dispatch: React.Dispatch<Action>;
+  composer: ManagedComposer;
   renderer: string;
 }) {
   "use no memo";
 
-  const provider = state.providers.find((item) => item.id === state.selectedProviderId);
+  const provider = selectedProviderForDisplay(state.providers, state.selectedProviderId);
   const canSelect = canSelectProvider(state);
   const canStart = canStartProvider(state);
   const canStop = canStopProvider(state);
@@ -329,8 +338,30 @@ function SessionSurface({
   const editorRef = useRef<PromptEditorHandle | null>(null);
   const commandSubmissionGateRef = useRef(new ComposerCommandSubmissionGate());
   const inputRevisionRef = useRef(0);
+  const inputVersionRef = useRef(state.inputVersion);
+  const setComposerInput = useCallback((input: string) => {
+    if (!composer.allowMutation()) return;
+    const inputVersion = makeClientId();
+    inputRevisionRef.current += 1;
+    inputVersionRef.current = inputVersion;
+    dispatch({ type: "setInput", input, inputVersion });
+  }, [composer, dispatch]);
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
+  useLayoutEffect(() => {
+    const unbind = composer.bind({
+      element: () => editorRef.current?.element() ?? null,
+      text: () => editorRef.current?.getText() ?? "",
+      replace: (text) => {
+        editorRef.current?.replaceText(text);
+        setComposerInput(text);
+      },
+      eligible: () => latestStateRef.current.status === "running" &&
+        latestStateRef.current.context?.nativeSession?.sessionId === latestStateRef.current.runningSessionId,
+    });
+    const uninstall = installManagedComposer(composer);
+    return () => { uninstall(); unbind(); };
+  }, [composer, setComposerInput]);
   const [menuKind, setMenuKind] = useState<ComposerMenuKind>(null);
   const [menuQuery, setMenuQuery] = useState("");
   const [menuIndex, setMenuIndex] = useState(0);
@@ -359,7 +390,7 @@ function SessionSurface({
         const shouldClear = gate.complete(submittedRevision, inputRevisionRef.current);
         const currentEditorInput = editorRef.current?.getText() ?? latestStateRef.current.input;
         if (shouldClear && currentEditorInput === submittedInput) {
-          dispatch({ type: "setInput", input: "" });
+          setComposerInput("");
         }
       })
       .catch((error) => {
@@ -374,6 +405,7 @@ function SessionSurface({
   };
 
   const submit = () => {
+    if (!composer.allowMutation()) return;
     const currentInput = editorRef.current?.getText() ?? state.input;
     const canSubmit =
       (state.status === "running" && (currentInput.length > 0 || attachments.length > 0)) ||
@@ -382,8 +414,7 @@ function SessionSurface({
       return;
     }
     if (currentInput !== state.input) {
-      inputRevisionRef.current += 1;
-      dispatch({ type: "setInput", input: currentInput });
+      setComposerInput(currentInput);
     }
     if (submitRoutedCommand(currentInput)) {
       return;
@@ -403,6 +434,7 @@ function SessionSurface({
     void sendInput(state, dispatch, {
       attachments,
       clearInput: currentInput,
+      clearInputVersion: inputVersionRef.current,
       displayText: currentInput,
       permissionMode: canConfigurePermissions ? permissionMode : "default",
       text,
@@ -643,6 +675,7 @@ function SessionSurface({
       : null,
   );
   const composerInput = h(PromptEditor, {
+    allowMutation: () => composer.allowMutation(),
     ref: editorRef,
     className: isSingleLineComposer
       ? "text-base"
@@ -655,10 +688,7 @@ function SessionSurface({
     onAutocompleteChange: updateComposerAutocomplete,
     onAutocompleteKeyDown: handleComposerAutocompleteKey,
     onPlanModeShortcut: togglePlanMode,
-    onTextChange: (input: string) => {
-      inputRevisionRef.current += 1;
-      dispatch({ type: "setInput", input });
-    },
+    onTextChange: setComposerInput,
     onSubmit: submit,
     onTriggerToken: (token: "@" | "$") => {
       setMenuKind(token === "@" ? "mention" : "skill");
@@ -862,10 +892,16 @@ function SessionSurface({
   );
   const showPlanSuggestion =
     !isPlanMode && !isPlanSuggestionDismissed && /\bplan\b/i.test(state.input);
+  const disclosureText = managedExecutionDisclosure(state);
 
   return h(
     "section",
     { className: "agent-shell", "data-codex-window-type": "electron" },
+    disclosureText
+      ? h("aside", { className: "mx-4 mt-3 text-xs text-token-text-tertiary", role: "note" },
+          h("div", { role: "status" }, statusLabel(state)),
+          h("p", { className: "m-0" }, disclosureText))
+      : null,
     h(TranscriptThread, { entries: state.transcript, copy: state.context?.copy }),
     h(
       "div",

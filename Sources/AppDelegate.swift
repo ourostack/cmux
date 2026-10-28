@@ -11900,6 +11900,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         openDebugAgentSession(rendererKind: .solid)
     }
 
+    @objc func openDebugManagedCopilotReact(_ sender: Any?) {
+        openDebugManagedCoding(providerID: .copilot, rendererKind: .react)
+    }
+
+    @objc func openDebugManagedCopilotSolid(_ sender: Any?) {
+        openDebugManagedCoding(providerID: .copilot, rendererKind: .solid)
+    }
+
+    @objc func openDebugManagedCodexReact(_ sender: Any?) {
+        openDebugManagedCoding(providerID: .codex, rendererKind: .react)
+    }
+
+    @objc func openDebugManagedCodexSolid(_ sender: Any?) {
+        openDebugManagedCoding(providerID: .codex, rendererKind: .solid)
+    }
+
+    private func openDebugManagedCoding(providerID: AgentSessionProviderID, rendererKind: AgentSessionRendererKind) {
+        let provider: ShepherdManagedProvider
+        switch providerID {
+        case .copilot: provider = .copilot
+        case .codex: provider = .codex
+        case .claude, .opencode:
+            NSLog("agentSession.nativeCoding.start.failed: unsupported managed provider")
+            return
+        }
+        guard AgentSessionManagedCopilotLaunch.NativeCodingOwner.hasQualifiedNativeProfile(
+            rendererID: rendererKind.rawValue, provider: provider
+        ), let manager = activeTabManagerForCommands(), let workspace = manager.selectedWorkspace else { return }
+        let disclosure = NSAlert()
+        disclosure.messageText = providerID == .codex ? String(
+            localized: "agentSession.managedCoding.confirmCodexTitle", defaultValue: "Start a Managed Codex Coding Session?"
+        ) : String(
+            localized: "agentSession.managedCoding.confirmTitle", defaultValue: "Start a Managed Copilot Coding Session?"
+        )
+        disclosure.informativeText = AgentSessionManagedCopilotLaunch.NativeCodingOwner.executionDisclosure
+        disclosure.addButton(withTitle: String(
+            localized: "agentSession.managedCoding.confirmStart", defaultValue: "Start Coding Session"
+        ))
+        disclosure.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        guard disclosure.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            guard activeTabManagerForCommands() === manager, manager.selectedWorkspace === workspace,
+                  let paneId = workspace.bonsplitController.focusedPaneId ??
+                    workspace.bonsplitController.allPaneIds.first else {
+                throw AgentSessionBridgeError.invalidRequest
+            }
+            let currentWorkspace: @MainActor () -> Workspace? = { [weak self, weak manager] in
+                guard let self, let manager, self.activeTabManagerForCommands() === manager else { return nil }
+                return manager.selectedWorkspace
+            }
+            switch providerID {
+            case .copilot:
+                let plan = try AgentExecutableResolver(
+                    configuredExecutablePaths: AgentExecutableResolver.cmuxConfiguredExecutablePaths()
+                ).resolve(.copilot)
+                _ = try workspace.newManagedCopilotSessionSurface(
+                    inPane: paneId, rendererKind: rendererKind, executableURL: plan.executableURL,
+                    currentWorkspace: currentWorkspace
+                )
+            case .codex:
+                guard let executableURL = Bundle.main.url(
+                    forResource: "cmux-managed-codex-host", withExtension: nil, subdirectory: "bin"
+                ) else {
+                    throw AgentSessionBridgeError.unsupportedTransport("managed-codex-owned-backend-missing")
+                }
+                _ = try workspace.newManagedCodexSessionSurface(
+                    inPane: paneId, rendererKind: rendererKind, executableURL: executableURL,
+                    currentWorkspace: currentWorkspace
+                )
+            case .claude, .opencode:
+                throw AgentSessionBridgeError.unsupportedTransport("managed-native-provider")
+            }
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
     private func openDebugAgentSession(rendererKind: AgentSessionRendererKind) {
         guard let manager = activeTabManagerForCommands(),
               let workspace = manager.selectedWorkspace,

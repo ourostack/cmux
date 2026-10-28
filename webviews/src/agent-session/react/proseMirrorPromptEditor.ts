@@ -144,14 +144,17 @@ const promptSchema = new Schema({
 
 const placeholderKey = new PluginKey<string>("agentPromptPlaceholder");
 export type PromptEditorHandle = {
+  element: () => HTMLElement | null;
   focus: () => void;
   getText: () => string;
+  replaceText: (text: string) => void;
   insertMention: (mention: PromptMention) => void;
   insertMentions: (mentions: PromptMention[]) => void;
   insertText: (text: string) => void;
 };
 
 type PromptEditorProps = {
+  allowMutation?: () => boolean;
   ariaLabel?: string;
   className?: string;
   minHeight?: string;
@@ -169,6 +172,7 @@ type PromptEditorProps = {
 export const PromptEditor = React.forwardRef<PromptEditorHandle, PromptEditorProps>(
   function PromptEditor(
     {
+      allowMutation,
       ariaLabel,
       className,
       minHeight = "2.75rem",
@@ -194,6 +198,8 @@ export const PromptEditor = React.forwardRef<PromptEditorHandle, PromptEditorPro
     const latestTriggerTokenRef = useRef(onTriggerToken);
     const latestTextRef = useRef(value);
     const latestSingleLineRef = useRef(singleLine);
+    const mutationGateRef = useRef(allowMutation);
+    mutationGateRef.current = allowMutation;
     latestSubmitRef.current = onSubmit;
     latestAutocompleteChangeRef.current = onAutocompleteChange;
     latestAutocompleteKeyDownRef.current = onAutocompleteKeyDown;
@@ -203,13 +209,23 @@ export const PromptEditor = React.forwardRef<PromptEditorHandle, PromptEditorPro
     latestSingleLineRef.current = singleLine;
 
     useImperativeHandle(ref, () => ({
+      element() {
+        return viewRef.current?.dom ?? null;
+      },
       focus() {
+        if (mutationGateRef.current?.() === false) return;
         viewRef.current?.focus();
       },
       getText() {
         return latestTextRef.current;
       },
+      replaceText(text) {
+        const view = viewRef.current;
+        if (!view || mutationGateRef.current?.() === false) return;
+        replaceEditorText(view, text);
+      },
       insertMention(mention) {
+        if (mutationGateRef.current?.() === false) return;
         const view = viewRef.current;
         if (!view) {
           return;
@@ -217,6 +233,7 @@ export const PromptEditor = React.forwardRef<PromptEditorHandle, PromptEditorPro
         insertPromptMentionAtSelection(view, mention);
       },
       insertMentions(mentions) {
+        if (mutationGateRef.current?.() === false) return;
         const view = viewRef.current;
         if (!view || mentions.length === 0) {
           return;
@@ -224,6 +241,7 @@ export const PromptEditor = React.forwardRef<PromptEditorHandle, PromptEditorPro
         insertPromptMentionsAtSelection(view, mentions);
       },
       insertText(text) {
+        if (mutationGateRef.current?.() === false) return;
         const view = viewRef.current;
         if (!view) {
           return;
@@ -251,6 +269,10 @@ export const PromptEditor = React.forwardRef<PromptEditorHandle, PromptEditorPro
           style: "min-height: 2.75rem; font-size: var(--codex-chat-font-size); height: auto; resize: none;",
         },
         dispatchTransaction(transaction) {
+          if (mutationGateRef.current?.() === false) {
+            view.updateState(view.state);
+            return;
+          }
           const nextState = view.state.apply(transaction);
           view.updateState(nextState);
           const nextText = textFromDoc(nextState.doc);
@@ -339,6 +361,7 @@ export const PromptEditor = React.forwardRef<PromptEditorHandle, PromptEditorPro
       if (!view || value === latestTextRef.current) {
         return;
       }
+      if (mutationGateRef.current?.() === false) return;
       latestTextRef.current = value;
       replaceEditorText(view, value);
     }, [value]);

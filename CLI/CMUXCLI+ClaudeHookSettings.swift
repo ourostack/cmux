@@ -1,5 +1,6 @@
 import Foundation
 import CMUXAgentLaunch
+import CmuxControlSocket
 
 extension CMUXCLI {
     /// Emits the complete cmux-owned Claude settings object without contacting
@@ -7,6 +8,10 @@ extension CMUXCLI {
     /// app-owned ordered queue, through the session's hook spool when the
     /// wrapper started a forwarder; decision hooks remain direct and synchronous.
     func emitClaudeWrapperInjectSettings() throws {
+        cliWriteStdout(try Self.claudeWrapperInjectSettingsData())
+    }
+
+    static func claudeWrapperInjectSettingsData() throws -> Data {
         let hookCLI = #""${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}""#
         let lifecycleDefinitions: [(
             event: String,
@@ -90,14 +95,19 @@ extension CMUXCLI {
         ]
 
         let settings: [String: Any] = [
+            "__cmux": [
+                "managed": "claude-hooks", "version": 1, "shepherdReadiness": 2,
+                "shepherdQualifiedExecutables": Array(
+                    Set(ShepherdHookLaunchPolicy.qualifiedBinaries.values.flatMap { $0 })
+                ).sorted(),
+            ],
             "preferredNotifChannel": "notifications_disabled",
             "hooks": hooks,
         ]
-        let data = try JSONSerialization.data(
+        return try JSONSerialization.data(
             withJSONObject: settings,
             options: [.sortedKeys, .withoutEscapingSlashes]
         )
-        cliWriteStdout(data)
     }
 
     private static func claudeQueuedHookGroup(

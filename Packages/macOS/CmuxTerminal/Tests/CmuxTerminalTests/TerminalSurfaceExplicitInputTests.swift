@@ -37,6 +37,7 @@ struct TerminalSurfaceExplicitInputTests {
         case namedKey
         case parsedInput
         case bindingAction
+        case programmaticBindingAction
         case mobileScroll
         case mobileClick
 
@@ -57,6 +58,8 @@ struct TerminalSurfaceExplicitInputTests {
                 _ = surface.sendInputResult("hello")
             case .bindingAction:
                 _ = surface.performBindingAction("scroll_to_bottom")
+            case .programmaticBindingAction:
+                _ = surface.performProgrammaticInputBindingAction("paste_from_clipboard")
             case .mobileScroll:
                 surface.mobileScroll(deltaLines: 1, col: 0, row: 0)
             case .mobileClick:
@@ -371,6 +374,299 @@ struct TerminalSurfaceExplicitInputTests {
 
         #expect(events.first == "prepare")
         #expect(events.dropFirst().contains("attach"))
+    }
+
+    @Test(arguments: ProgrammaticInput.allCases)
+    func shepherdReservationRejectsOtherProgrammaticInput(_ input: ProgrammaticInput) throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        let request = UUID()
+        let revision = try #require(fixture.surface.sendShepherdPaste(
+            "continue", requestID: request, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ))
+        cmuxTestGhosttyInputEventsReset()
+        input.send(to: fixture.surface)
+        #expect(cmuxTestGhosttyInputEventCount() == 0)
+        #expect(fixture.surface.shepherdInputRevision == revision)
+        #expect(fixture.surface.hasShepherdInputReservation)
+        #expect(fixture.paneHost.explicitInputCount == 0)
+        #expect(fixture.nativeView.deferredRuntimeInputs.isEmpty)
+    }
+
+    @Test
+    func physicalInputCancelsShepherdWithoutStealingTheAttentionCallback() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        var accepted = 0
+        fixture.surface.onExplicitInput = { accepted += 1 }
+        let request = UUID()
+        let revision = try #require(fixture.surface.sendShepherdPaste(
+            "continue", requestID: request, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ))
+        #expect(accepted == 1)
+        _ = fixture.surface.didReceiveExplicitInput()
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(fixture.surface.shepherdInputRevision == revision + 1)
+        cmuxTestGhosttyInputEventsReset()
+        #expect(!fixture.surface.sendShepherdSubmit(requestID: request))
+        #expect(cmuxTestGhosttyInputEventCount() == 0)
+        #expect(fixture.paneHost.explicitInputCount == 1)
+        fixture.surface.didAcceptExplicitInput()
+        #expect(accepted == 2)
+    }
+
+    @Test(arguments: ["cold", "clipboard", "queued", "focused", "recent", "detached", "copy-mode"])
+    func shepherdNeverQueuesOrAdmitsUnavailableInput(reason: String) {
+        let runtime = reason == "cold" ? nil : allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime?.deallocate()
+        }
+        switch reason {
+        case "clipboard": fixture.nativeView.shouldDeferRuntimeInput = true
+        case "queued": fixture.surface.pendingSocketInputBytes = 1
+        case "focused": fixture.surface.setFocus(true)
+        case "recent":
+            fixture.surface.setFocus(true)
+            fixture.surface.setFocus(false)
+        case "detached": fixture.surface.sharingViewDetached = true
+        case "copy-mode": fixture.nativeView.isKeyboardCopyModeActive = true
+        default: break
+        }
+        cmuxTestGhosttyInputEventsReset()
+        #expect(fixture.surface.sendShepherdPaste(
+            "continue", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ) == nil)
+        #expect(cmuxTestGhosttyInputEventCount() == 0)
+        #expect(fixture.surface.pendingSocketInputQueue.isEmpty)
+        #expect(fixture.nativeView.deferredRuntimeInputs.isEmpty)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+    }
+
+    @Test(arguments: ["internal", "external"])
+    func focusChangeInvalidatesShepherdReservation(path: String) throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        let request = UUID()
+        _ = try #require(fixture.surface.sendShepherdPaste(
+            "continue", requestID: request, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ))
+        if path == "external" {
+            fixture.surface.recordExternalFocusState(true)
+            fixture.surface.recordExternalFocusState(false)
+        } else {
+            fixture.surface.setFocus(true)
+            fixture.surface.setFocus(false)
+        }
+        #expect(fixture.surface.shepherdFocusRevision == 2)
+        #expect(fixture.surface.shepherdLastFocusedAt != nil)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(!fixture.surface.sendShepherdSubmit(requestID: request))
+    }
+
+    @Test
+    func staleCompletionCannotReleaseNewerReservationAndRuntimeReplacementInvalidatesIt() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        let first = UUID()
+        _ = try #require(fixture.surface.sendShepherdPaste(
+            "continue", requestID: first, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ))
+        fixture.surface.finishShepherdInputReservation(requestID: first)
+        let second = UUID()
+        _ = try #require(fixture.surface.sendShepherdPaste(
+            "continue", requestID: second, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ))
+        fixture.surface.finishShepherdInputReservation(requestID: first)
+        #expect(fixture.surface.hasShepherdInputReservation)
+        fixture.surface.surface = nil
+        fixture.surface.surface = runtime
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(!fixture.surface.sendShepherdSubmit(requestID: second))
+    }
+
+    @Test
+    func physicalBindingActionCancelsReservationAndStillDispatches() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        let request = UUID()
+        let revision = try #require(fixture.surface.sendShepherdPaste(
+            "continue", requestID: request, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ))
+        #expect(fixture.surface.performExplicitInputBindingAction("paste_from_clipboard"))
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(fixture.surface.shepherdInputRevision == revision + 1)
+        #expect(fixture.paneHost.explicitInputCount == 1)
+        #expect(fixture.nativeView.runtimeInputDeferralCallCount == 1)
+        #expect(!fixture.surface.sendShepherdSubmit(requestID: request))
+    }
+
+    @Test
+    func deferredBindingReplayExcludesReentrantShepherd() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.nativeView.shouldDeferRuntimeInput = true
+        #expect(fixture.surface.performExplicitInputBindingAction("paste_from_clipboard"))
+        let replay = try #require(fixture.nativeView.deferredRuntimeInputs.first)
+        fixture.nativeView.deferredRuntimeInputs.removeFirst()
+        fixture.nativeView.shouldDeferRuntimeInput = false
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.nativeView.onRuntimeInputDeferralCheck = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        replay()
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(fixture.paneHost.explicitInputCount == 1)
+        #expect(fixture.nativeView.runtimeInputDeferralCallCount == 2)
+        #expect(fixture.nativeView.deferredRuntimeInputs.isEmpty)
+    }
+
+    @Test
+    func stagedStartupInputRefusesShepherdAndIsDeliveredOnce() {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.surface.startupInputGate.stage(
+            "echo startup\r", generation: fixture.surface.terminalLifecycleId
+        )
+        cmuxTestGhosttyInputEventsReset()
+        #expect(!fixture.surface.acceptsShepherdImmediateInput)
+        let request = UUID()
+        #expect(fixture.surface.sendShepherdPaste(
+            "continue", requestID: request, expiresAt: ProcessInfo.processInfo.systemUptime + 1
+        ) == nil)
+        #expect(cmuxTestGhosttyInputEventCount() == 0)
+        fixture.surface.shellDidBecomeReadyForStartupInput()
+        fixture.surface.finishShepherdInputReservation(requestID: request)
+        fixture.surface.shellDidBecomeReadyForStartupInput()
+        #expect(cmuxTestGhosttyInputEventCount() == 2)
+        #expect(cmuxTestGhosttyInputEventKind(0) == 1)
+        #expect(cmuxTestGhosttyInputEventKind(1) == 1)
+        #expect(fixture.surface.acceptsShepherdImmediateInput)
+    }
+
+    @Test
+    func queuedDrainExcludesReentrantShepherdAndPreservesInputOrder() {
+        let fixture = makeFixture()
+        #expect(fixture.surface.sendTextResult("queued") == .queued)
+        #expect(fixture.surface.sendNamedKey("enter") == .queued)
+        let runtime = allocatedRuntimeSurface()
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.registry.registerRuntimeSurface(runtime, ownerId: fixture.surface.id)
+        fixture.surface.installRuntimeSurfaceForTesting(runtime)
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.nativeView.onRuntimeInputDeferralCheck = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        let revision = fixture.surface.shepherdInputRevision
+        cmuxTestGhosttyInputEventsReset()
+        fixture.surface.flushPendingSocketInputIfNeeded()
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(fixture.surface.shepherdInputRevision > revision)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(cmuxTestGhosttyInputEventCount() == 2)
+        #expect(cmuxTestGhosttyInputEventKind(0) == 1)
+        #expect(cmuxTestGhosttyInputEventKind(1) == 2)
+    }
+
+    @Test
+    func deferredQueueReplayExcludesReentrantShepherdAndAdvancesInputRevision() throws {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        fixture.nativeView.runtimeInputDeferralResponses = [false, true]
+        #expect(fixture.surface.sendInputResult("queued") == .queued)
+        let replay = try #require(fixture.nativeView.deferredRuntimeInputs.first)
+        fixture.nativeView.deferredRuntimeInputs.removeFirst()
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.nativeView.onRuntimeInputDeferralCheck = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        let revision = fixture.surface.shepherdInputRevision
+        cmuxTestGhosttyInputEventsReset()
+        replay()
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(fixture.surface.shepherdInputRevision > revision)
+        #expect(!fixture.surface.hasShepherdInputReservation)
+        #expect(cmuxTestGhosttyInputEventCount() == 1)
+        #expect(cmuxTestGhosttyInputEventKind(0) == 1)
+        #expect(fixture.nativeView.deferredRuntimeInputs.isEmpty)
+    }
+
+    @Test
+    func reentrantAttentionCallbackCannotReserveDuringAnOrdinaryWrite() {
+        let runtime = allocatedRuntimeSurface()
+        let fixture = makeFixture(runtimeSurface: runtime)
+        defer {
+            fixture.surface.releaseSurfaceForTesting()
+            runtime.deallocate()
+        }
+        var attempted = false
+        var nestedRevision: UInt64?
+        fixture.surface.onExplicitInput = {
+            guard !attempted else { return }
+            attempted = true
+            nestedRevision = fixture.surface.sendShepherdPaste(
+                "nested", requestID: UUID(), expiresAt: ProcessInfo.processInfo.systemUptime + 1
+            )
+        }
+        #expect(fixture.surface.sendTextResult("human") == .sent)
+        #expect(attempted)
+        #expect(nestedRevision == nil)
+        #expect(!fixture.surface.hasShepherdInputReservation)
     }
 
     private func makeFixture(

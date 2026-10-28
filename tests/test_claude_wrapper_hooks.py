@@ -182,7 +182,9 @@ def generated_claude_hook_settings() -> str:
         "PermissionRequest": [direct(f"{direct_cli} hooks feed --source claude", 125)],
     }
     return json.dumps(
-        {"preferredNotifChannel": "notifications_disabled", "hooks": hooks},
+        {"__cmux": {"managed": "claude-hooks", "version": 1, "shepherdReadiness": 2,
+                    "shepherdQualifiedExecutables": []},
+         "preferredNotifChannel": "notifications_disabled", "hooks": hooks},
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -314,6 +316,9 @@ def run_wrapper(
             real_dir / "claude",
             """#!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1:-}" != "--help" && -n "${FAKE_REAL_PID_LOG:-}" ]]; then
+  printf '%s\\n' "$$" > "$FAKE_REAL_PID_LOG"
+fi
 : > "$FAKE_REAL_ARGS_LOG"
 printf '%s\\n' "${CLAUDECODE-__UNSET__}" > "$FAKE_REAL_CLAUDECODE_LOG"
 printf '%s\\n' "${NODE_OPTIONS-__UNSET__}" > "$FAKE_REAL_NODE_OPTIONS_LOG"
@@ -416,6 +421,32 @@ exit 0
             """#!/usr/bin/env bash
 if [[ "${1:-}" == "hooks" && "${2:-}" == "claude" && "${3:-}" == "inject-settings" ]]; then
   printf '%s' "$FAKE_GENERATED_CLAUDE_HOOK_SETTINGS"
+  exit 0
+fi
+if [[ "${1:-}" == "hooks" && "${2:-}" == "claude" && "${3:-}" == "prepare-readiness" ]]; then
+  if [[ -n "${FAKE_SHEPHERD_PREPARE_LOG:-}" ]]; then
+    printf '%s\\n' "$@" > "$FAKE_SHEPHERD_PREPARE_LOG"
+  fi
+  settings_path=""
+  collect_settings=0
+  for arg in "$@"; do
+    if [[ "$collect_settings" == "1" ]]; then settings_path="$arg"; collect_settings=0; fi
+    if [[ "$arg" == "--settings" ]]; then collect_settings=1; fi
+  done
+  [[ -n "$settings_path" ]] || exit 9
+  if [[ -n "${FAKE_SHEPHERD_PREPARE_COPY_LOG:-}" ]]; then
+    /bin/cp "$settings_path" "$FAKE_SHEPHERD_PREPARE_COPY_LOG" || exit 9
+  fi
+  case "${FAKE_SHEPHERD_PREPARE_BEHAVIOR:-unqualified}" in
+    fail) printf 'injected readiness registration failure\\n' >&2; exit 9 ;;
+    invalid) printf '/not-a-prepared-settings-artifact\\n'; exit 0 ;;
+    copy)
+      prepared="${settings_path%/*}/shepherd-prepared.json"
+      /bin/cp "$settings_path" "$prepared" || exit 9
+      printf '%s\\n' "$prepared"
+      ;;
+    *) printf '%s\\n' "$settings_path" ;;
+  esac
   exit 0
 fi
 exit 0

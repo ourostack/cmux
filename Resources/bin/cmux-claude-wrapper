@@ -2028,10 +2028,10 @@ CMUX_CLAUDE_LIFECYCLE_HOOKS
 # Sets cmux_claude_standard_hook_settings_value to the exact bytes the bundled
 # CLI prints for `cmux hooks claude inject-settings`
 # (CLI/CMUXCLI+ClaudeHookSettings.swift: JSONSerialization with sorted keys
-# and unescaped slashes). The text is fixed: it does not depend on the
-# environment, the socket, or user settings.
+# and unescaped slashes). Only compile-time executable digest metadata varies;
+# it does not depend on the environment, socket, or user settings.
 cmux_claude_build_standard_hook_settings() {
-    local queued direct_cli
+    local queued direct_cli qualified="${1:-[]}"
     # JSON-escaped body of AgentHookSpoolProducer(agent: "claude").command(...)
     # wrapping CMUXCLI.queuedAgentHookShellCommand(agent: "claude") as its fallback.
     IFS= read -r queued <<'CMUX_CLAUDE_QUEUED_HOOK_COMMAND'
@@ -2051,7 +2051,7 @@ CMUX_CLAUDE_QUEUED_HOOK_COMMAND
     # Background agent-message wait hook (asyncRewake), on SessionStart and Stop.
     local inbox_wait='{"hooks":[{"async":true,"asyncRewake":true,"command":"'"$direct_cli"' hooks claude inbox-wait","timeout":86400,"type":"command"}],"matcher":""}'
 
-    cmux_claude_standard_hook_settings_value='{"hooks":{'
+    cmux_claude_standard_hook_settings_value='{"__cmux":{"managed":"claude-hooks","shepherdQualifiedExecutables":'"$qualified"',"shepherdReadiness":2,"version":1},"hooks":{'
     cmux_claude_standard_hook_settings_value+='"Notification":['"$q_prefix$notification$q_suffix"'"}],'
     cmux_claude_standard_hook_settings_value+='"PermissionRequest":[{"hooks":[{"command":"'"$direct_cli"' hooks feed --source claude","timeout":125,"type":"command"}],"matcher":""}],'
     cmux_claude_standard_hook_settings_value+='"PostToolUse":['"$q_prefix$push_notification$q_suffix"'PushNotification"}],'
@@ -2065,16 +2065,24 @@ CMUX_CLAUDE_QUEUED_HOOK_COMMAND
     cmux_claude_standard_hook_settings_value+='},"preferredNotifChannel":"notifications_disabled"}'
 }
 
-# Fast path for the Node check below. It accepts one exact string: the
-# bundled CLI's standard document, which satisfies every Node requirement
+# Fast path for the Node check below. It accepts the exact standard template
+# with only its bounded, hex-only build digest array varying. This is not an
+# eligibility grant: the CLI independently verifies its own build policy.
+# The template satisfies every Node requirement
 # (valid JSON object; synchronous cron-create-guard under the CronCreate
 # matcher; synchronous PermissionRequest feed; all five lifecycle hooks since
 # it sets notifications_disabled). Any other byte sequence, including a
 # different CLI version's output, returns 1 and takes the Node path unchanged.
 cmux_claude_generated_hook_settings_are_standard() {
     local value="$1"
+    local prefix='{"__cmux":{"managed":"claude-hooks","shepherdQualifiedExecutables":['
+    local tail encoded pattern='^("[0-9a-f]{64}"(,"[0-9a-f]{64}")*)?$'
+    [[ "$value" == "$prefix"* ]] || return 1
+    tail="${value#"$prefix"}"
+    encoded="${tail%%\]*}"
+    [[ "$encoded" =~ $pattern ]] && (( ${#encoded} <= 4287 )) || return 1
     local cmux_claude_standard_hook_settings_value=""
-    cmux_claude_build_standard_hook_settings
+    cmux_claude_build_standard_hook_settings "[$encoded]"
     [[ -n "$cmux_claude_standard_hook_settings_value" &&
           "$value" == "$cmux_claude_standard_hook_settings_value" ]]
 }
@@ -2367,6 +2375,48 @@ if [[ -n "$CMUX_SETTINGS_BASE_PATH" && "$CMUX_SETTINGS_PATH" != "$CMUX_SETTINGS_
     rm -f -- "$CMUX_SETTINGS_BASE_PATH"
 fi
 unset CMUX_MERGED_SETTINGS_PATH cmux_merge_status CMUX_SETTINGS_INPUTS_PATH
+
+# The original CLI document carries build-owned digest hints, not caller
+# settings. Unknown binaries retain the legacy path without another CLI call.
+cmux_claude_prepare_shepherd_settings() {
+    [[ "$OSTYPE" == darwin* && -n "$CMUX_SETTINGS_PATH" && -x /usr/bin/plutil ]] || return 0
+    local protocol count size digest allowed index prepared status
+    protocol="$(cmux_claude_plutil_raw "$HOOKS_JSON" "__cmux.shepherdReadiness" integer || true)"
+    [[ "$protocol" == "2" ]] || return 0
+    count="$(cmux_claude_plutil_raw "$HOOKS_JSON" "__cmux.shepherdQualifiedExecutables" array || true)"
+    [[ "$count" =~ ^[0-9]+$ ]] && (( count > 0 && count <= 64 )) || return 0
+    [[ -f "$REAL_CLAUDE" && -r "$REAL_CLAUDE" ]] || return 0
+    size="$(/usr/bin/stat -L -f %z -- "$REAL_CLAUDE" 2>/dev/null)" || return 0
+    [[ "$size" =~ ^[0-9]+$ ]] && (( ${#size} <= 9 && size > 0 && size <= 536870912 )) || return 0
+    digest="$(cmux_claude_wrapper_sha256_file "$REAL_CLAUDE")" || return 0
+    allowed=""
+    index=0
+    while (( index < count )); do
+        allowed="$(cmux_claude_plutil_raw "$HOOKS_JSON" "__cmux.shepherdQualifiedExecutables.$index" string || true)"
+        [[ "$allowed" == "$digest" ]] && break
+        index=$((index + 1))
+    done
+    [[ "$allowed" == "$digest" ]] || return 0
+    if prepared="$("$CMUX_CLAUDE_HOOK_CMUX_BIN" hooks claude prepare-readiness \
+        --executable "$REAL_CLAUDE" --settings "$CMUX_SETTINGS_PATH" --root-pid "$$" </dev/null)"; then
+        if [[ -z "$prepared" || ${#prepared} -gt 4096 || "$prepared" != /* \
+              || ! -s "$prepared" || -L "$prepared" \
+              || "${prepared%/*}" != "${CMUX_SETTINGS_PATH%/*}" ]]; then
+            printf 'cmux: invalid readiness settings artifact; Claude was not started\n' >&2
+            return 1
+        fi
+        CMUX_SETTINGS_PATH="$prepared"
+    else
+        status=$?
+        printf 'cmux: readiness registration failed; Claude was not started\n' >&2
+        return "$status"
+    fi
+}
+if cmux_claude_prepare_shepherd_settings; then
+    :
+else
+    exit "$?"
+fi
 
 # Capture only the compact post-merge argv. The previous implementation encoded
 # the inline JSON here as a second ARG_MAX multiplier.

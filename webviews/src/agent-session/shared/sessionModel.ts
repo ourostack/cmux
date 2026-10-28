@@ -6,6 +6,9 @@ import type {
   AgentSessionAttachment,
   AppContext,
   ComposerPermissionMode,
+  NativeManagedIntent,
+  NativeManagedProviderId,
+  NativeManagedSession,
   ProviderId,
   ProviderInfo,
 } from "./types";
@@ -39,18 +42,24 @@ export type SessionState = {
   runningSessionId?: string;
   status: "loading" | "idle" | "starting" | "running" | "stopping" | "failed";
   input: string;
+  /** Last editor edit identity, not a provider acknowledgement. */
+  inputVersion: string;
   log: LogEntry[];
   transcript: TranscriptEntry[];
   autoStartAttemptedProviderIds: ProviderId[];
   seenSessionIds: string[];
   requestedStopSessionId?: string;
+  bootstrapEvents: AgentEvent[];
+  bootstrapEventCharacters: number;
+  bootstrapError?: string;
+  nativeManagedProviderId?: NativeManagedProviderId;
 };
 
 export type Action =
   | { type: "context"; context: AppContext }
   | { type: "providers"; providers: ProviderInfo[] }
   | { type: "selectProvider"; providerId: ProviderId }
-  | { type: "setInput"; input: string }
+  | { type: "setInput"; input: string; inputVersion?: string }
   | { type: "autoStartAttempted"; providerId: ProviderId }
   | { type: "starting" }
   | { type: "startAccepted"; sessionId: string }
@@ -68,6 +77,7 @@ export type Action =
       sessionId: string;
       text: string;
       submittedInput: string;
+      submittedInputVersion: string;
     };
 
 const maxAssistantTranscriptChars = 256 * 1024;
@@ -76,29 +86,70 @@ const maxLogEntryChars = 8 * 1024;
 const assistantTruncationMarker = "[earlier assistant output truncated]\n";
 const activityTruncationMarker = "[earlier command output truncated]\n";
 const logTruncationMarker = "[earlier log output truncated]\n";
+const maxBootstrapEvents = 64;
+const maxBootstrapEventCharacters = 256 * 1024;
 
 export function initialState(_renderer: AppContext["renderer"]): SessionState {
   return {
     selectedProviderId: "codex",
     status: "loading",
     input: "",
+    inputVersion: makeClientId(),
     providers: [],
     log: [],
     transcript: [],
     autoStartAttemptedProviderIds: [],
     seenSessionIds: [],
+    bootstrapEvents: [],
+    bootstrapEventCharacters: 0,
   };
 }
 
 export function reduceSession(state: SessionState, action: Action): SessionState {
   switch (action.type) {
-    case "context":
-      return appendContextReadyLog({
+    case "context": {
+      const intent = action.context.nativeManagedIntent;
+      const previousProvider = state.nativeManagedProviderId;
+      if (previousProvider && (
+        action.context.initialProviderId !== previousProvider ||
+        state.context?.panelId !== action.context.panelId ||
+        state.context?.workspaceId !== action.context.workspaceId ||
+        (state.context?.nativeManagedIntent && !isNativeIntent(intent, previousProvider))
+      )) return nativeIntentFailure(state);
+      if (state.context?.nativeManagedIntent?.status === "unavailable" && intent?.status !== "unavailable") return state;
+      const nativeProvider = previousProvider ?? (
+        action.context.initialProviderId === "copilot" ? "copilot" :
+        intent !== undefined && action.context.initialProviderId === "codex" ? "codex" : undefined
+      );
+      const nativeContext = nativeProvider !== undefined || intent !== undefined || action.context.nativeSession !== undefined;
+      const nativeSession = nativeContext ? action.context.nativeSession : undefined;
+      let loaded = appendContextReadyLog({
         ...state,
         context: action.context,
-        selectedProviderId: action.context.initialProviderId,
-        status: "idle",
+        nativeManagedProviderId: nativeProvider,
+        selectedProviderId: nativeProvider ?? action.context.initialProviderId,
+        runningSessionId: nativeContext ? nativeSession?.sessionId : state.runningSessionId,
+        requestedStopSessionId: nativeContext
+          ? nativeSession?.status === "stopping" ? nativeSession.sessionId : undefined
+          : state.requestedStopSessionId,
+        seenSessionIds: nativeSession ? rememberSessionId(state, nativeSession.sessionId) : state.seenSessionIds,
+        bootstrapEvents: [],
+        bootstrapEventCharacters: 0,
+        status: state.bootstrapError ? "failed" : nativeSession?.status ??
+          (intent?.status === "starting" ? "starting" : "idle"),
       });
+      if (nativeContext) {
+        if (!nativeProvider || nativeProvider !== action.context.initialProviderId ||
+            (intent !== undefined && !isNativeIntent(intent, nativeProvider)) ||
+            (nativeSession && !isNativeSession(nativeSession, nativeSession.sessionId, nativeProvider))) {
+          loaded = nativeMetadataFailure(loaded, nativeSession?.sessionId);
+        } else if (intent?.status === "unavailable") {
+          loaded = nativeIntentFailure(loaded);
+        }
+      }
+      for (const event of state.bootstrapEvents) loaded = applyEvent(loaded, event);
+      return loaded;
+    }
     case "providers":
       return { ...state, providers: action.providers };
     case "selectProvider":
@@ -110,7 +161,7 @@ export function reduceSession(state: SessionState, action: Action): SessionState
         selectedProviderId: action.providerId,
       };
     case "setInput":
-      return { ...state, input: action.input };
+      return { ...state, input: action.input, inputVersion: action.inputVersion ?? makeClientId() };
     case "autoStartAttempted":
       if (state.autoStartAttemptedProviderIds.includes(action.providerId)) {
         return state;
@@ -132,6 +183,8 @@ export function reduceSession(state: SessionState, action: Action): SessionState
         seenSessionIds: rememberSessionId(state, action.sessionId),
       };
     case "stopping":
+      if (state.context?.nativeSession?.sessionId === action.sessionId &&
+          state.context.nativeSession.status === "failed") return state;
       return {
         ...state,
         status: "stopping",
@@ -167,17 +220,41 @@ export function reduceSession(state: SessionState, action: Action): SessionState
         log: appendLog(state, "error", action.message),
         transcript: appendNoticeTranscript(state, action.message, "error"),
       };
-    case "sent":
+    case "sent": {
       if (state.runningSessionId !== action.sessionId || state.requestedStopSessionId === action.sessionId) {
         return state;
       }
+      const clearsInput = state.input === action.submittedInput && state.inputVersion === action.submittedInputVersion;
       return {
         ...state,
-        input: state.input === action.submittedInput ? "" : state.input,
+        input: clearsInput ? "" : state.input,
         log: appendLog(state, "info", formatCopy(state, "sentCharsFormat", "Sent %d chars", action.text.length)),
         transcript: appendUserTranscript(state, action.displayText ?? action.text, action.attachments, action.sentAtMs),
       };
+    }
     case "event":
+      if (!state.context && state.bootstrapError) return state;
+      if (!state.context && state.status === "loading" && !state.runningSessionId) {
+        const characters = JSON.stringify(action.event).length;
+        if (state.bootstrapEvents.length >= maxBootstrapEvents ||
+            state.bootstrapEventCharacters + characters > maxBootstrapEventCharacters) {
+          const message = "Native session events overflowed before the renderer was ready. Close and reopen the panel.";
+          return {
+            ...state,
+            bootstrapEvents: [],
+            bootstrapEventCharacters: 0,
+            bootstrapError: message,
+            status: "failed",
+            log: appendLog(state, "error", message),
+            transcript: appendNoticeTranscript(state, message, "error"),
+          };
+        }
+        return {
+          ...state,
+          bootstrapEvents: [...state.bootstrapEvents, action.event],
+          bootstrapEventCharacters: state.bootstrapEventCharacters + characters,
+        };
+      }
       return applyEvent(state, action.event);
     default:
       return state;
@@ -235,6 +312,42 @@ async function startProviderSnapshot(
   }
 }
 
+export function pickAutoStartState(state: SessionState): SessionState {
+  return {
+    context: state.context,
+    providers: state.providers,
+    selectedProviderId: state.selectedProviderId,
+    runningSessionId: state.runningSessionId,
+    status: state.status,
+    input: "",
+    inputVersion: state.inputVersion,
+    log: [],
+    transcript: [],
+    autoStartAttemptedProviderIds: state.autoStartAttemptedProviderIds,
+    seenSessionIds: state.seenSessionIds,
+    requestedStopSessionId: state.requestedStopSessionId,
+    bootstrapEvents: state.bootstrapEvents,
+    bootstrapEventCharacters: state.bootstrapEventCharacters,
+    bootstrapError: state.bootstrapError,
+    nativeManagedProviderId: state.nativeManagedProviderId,
+  };
+}
+
+export function autoStartStateEquals(previous: SessionState, next: SessionState): boolean {
+  return (
+    previous.context === next.context &&
+    previous.providers === next.providers &&
+    previous.selectedProviderId === next.selectedProviderId &&
+    previous.runningSessionId === next.runningSessionId &&
+    previous.status === next.status &&
+    previous.autoStartAttemptedProviderIds === next.autoStartAttemptedProviderIds &&
+    previous.seenSessionIds === next.seenSessionIds &&
+    previous.requestedStopSessionId === next.requestedStopSessionId &&
+    previous.bootstrapError === next.bootstrapError &&
+    previous.nativeManagedProviderId === next.nativeManagedProviderId
+  );
+}
+
 export function shouldAutoStartProvider(state: SessionState): boolean {
   if (!canStartProvider(state)) {
     return false;
@@ -270,6 +383,7 @@ export async function sendInput(
   options: {
     attachments?: AgentSessionAttachment[];
     clearInput?: string;
+    clearInputVersion?: string;
     displayText?: string;
     permissionMode?: ComposerPermissionMode;
     text?: string;
@@ -277,6 +391,7 @@ export async function sendInput(
 ): Promise<boolean> {
   const submittedInput = options.text ?? state.input;
   const clearInput = options.clearInput ?? submittedInput;
+  const submittedInputVersion = options.clearInputVersion ?? state.inputVersion;
   if (submittedInput.length === 0 || !state.runningSessionId || state.status !== "running") {
     return false;
   }
@@ -295,6 +410,7 @@ export async function sendInput(
       sessionId,
       text: submittedInput,
       submittedInput: clearInput,
+      submittedInputVersion,
     });
     return true;
   } catch (error) {
@@ -321,6 +437,15 @@ export async function stopProvider(state: SessionState, dispatch: (action: Actio
   }
 }
 
+export function managedExecutionDisclosure(state: SessionState): string {
+  const provider = state.nativeManagedProviderId;
+  if (!provider) return "";
+  const session = state.context?.nativeSession;
+  if (session && isNativeSession(session, session.sessionId, provider)) return session.executionDisclosure;
+  const intent = state.context?.nativeManagedIntent;
+  return isNativeIntent(intent, provider) ? intent.executionDisclosure : "";
+}
+
 export function statusLabel(state: SessionState): string {
   switch (state.status) {
     case "loading":
@@ -339,11 +464,13 @@ export function statusLabel(state: SessionState): string {
 }
 
 export function canStartProvider(state: SessionState): boolean {
-  return (state.status === "idle" || state.status === "failed") && !state.runningSessionId && Boolean(state.context);
+  return !state.bootstrapError && !state.nativeManagedProviderId && state.selectedProviderId !== "copilot" &&
+    (state.status === "idle" || state.status === "failed") && !state.runningSessionId && Boolean(state.context);
 }
 
 export function canSelectProvider(state: SessionState): boolean {
-  return !state.runningSessionId && state.status !== "starting" && state.status !== "stopping";
+  return !state.bootstrapError && !state.nativeManagedProviderId &&
+    !state.runningSessionId && state.status !== "starting" && state.status !== "stopping";
 }
 
 export function canStopProvider(state: SessionState): boolean {
@@ -351,6 +478,7 @@ export function canStopProvider(state: SessionState): boolean {
 }
 
 function applyEvent(state: SessionState, event: AgentEvent): SessionState {
+  if (state.nativeManagedProviderId && "providerId" in event && event.providerId !== state.nativeManagedProviderId) return state;
   switch (event.type) {
     case "app.theme":
       if (!state.context) {
@@ -374,7 +502,28 @@ function applyEvent(state: SessionState, event: AgentEvent): SessionState {
           rateLimitRows: event.rateLimitRows,
         },
       };
-    case "provider.started":
+    case "provider.nativeIntent": {
+      const provider = state.nativeManagedProviderId;
+      if (!provider || !state.context) return state;
+      if (!isNativeIntent(event.nativeIntent, provider)) return nativeIntentFailure(state);
+      if (state.context.nativeManagedIntent?.status === "unavailable") return state;
+      if (event.nativeIntent.status === "unavailable") {
+        return nativeIntentFailure({
+          ...state,
+          context: { ...state.context, nativeManagedIntent: event.nativeIntent },
+        });
+      }
+      if (state.bootstrapError) return state;
+      return { ...state, context: { ...state.context, nativeManagedIntent: event.nativeIntent } };
+    }
+    case "provider.nativeSession":
+      return projectNativeSession(state, event.sessionId, event.nativeSession);
+    case "provider.started": {
+      if (state.nativeManagedProviderId || event.providerId === "copilot") {
+        return projectNativeSession(state, event.sessionId,
+          event.nativeSession ?? state.context?.nativeSession);
+      }
+      if (state.bootstrapError) return state;
       if (event.sessionId === state.requestedStopSessionId) {
         return state;
       }
@@ -395,6 +544,7 @@ function applyEvent(state: SessionState, event: AgentEvent): SessionState {
         status: "running",
         log: appendLog(state, "info", copyText(state, "providerStarted", "Provider started")),
       };
+    }
     case "provider.output":
       if (event.sessionId !== state.runningSessionId) {
         return state;
@@ -420,27 +570,32 @@ function applyEvent(state: SessionState, event: AgentEvent): SessionState {
         ...state,
         transcript: markAssistantTranscriptComplete(state.transcript, event.sessionId),
       };
-    case "provider.exit":
+    case "provider.exit": {
       if (!isCurrentOrPendingStartExit(state, event)) {
         return state;
       }
+      const context = state.context?.nativeSession?.sessionId === event.sessionId
+        ? { ...state.context, nativeSession: undefined }
+        : state.context;
       if (event.sessionId === state.requestedStopSessionId) {
         return {
           ...state,
+          context,
           runningSessionId: undefined,
           requestedStopSessionId: undefined,
           seenSessionIds: rememberSessionId(state, event.sessionId),
-          status: "idle",
+          status: state.bootstrapError ? "failed" : "idle",
           log: appendLog(state, "info", copyText(state, "stopped", "Stopped")),
           transcript: markAssistantTranscriptComplete(state.transcript, event.sessionId),
         };
       }
       return {
         ...state,
+        context,
         runningSessionId: undefined,
         requestedStopSessionId: undefined,
         seenSessionIds: rememberSessionId(state, event.sessionId),
-        status: event.status === 0 ? "idle" : "failed",
+        status: state.bootstrapError || event.status !== 0 ? "failed" : "idle",
         log: appendLog(
           state,
           event.status === 0 ? "info" : "error",
@@ -457,9 +612,81 @@ function applyEvent(state: SessionState, event: AgentEvent): SessionState {
               "error",
             ),
       };
+    }
     default:
       return state;
   }
+}
+
+function isNativeIntent(
+  intent: NativeManagedIntent | undefined, provider: NativeManagedProviderId,
+): intent is NativeManagedIntent {
+  return intent?.providerId === provider && (intent.status === "starting" || intent.status === "unavailable") &&
+    typeof intent.executionDisclosure === "string" && intent.executionDisclosure.length > 0 &&
+    intent.executionDisclosure.length <= 8192;
+}
+
+function nativeIntentFailure(state: SessionState): SessionState {
+  const message = "Native coding session is unavailable. Close and open a new managed panel.";
+  if (state.bootstrapError && state.status === "failed") return state;
+  return {
+    ...state,
+    status: "failed",
+    bootstrapError: state.bootstrapError ?? message,
+    log: appendLog(state, "error", message),
+    transcript: appendNoticeTranscript(state, message, "error"),
+  };
+}
+
+function isNativeSession(
+  session: NativeManagedSession | undefined, sessionId: string, provider: NativeManagedProviderId,
+): session is NativeManagedSession {
+  const revisions = { starting: 1, running: 2, stopping: 3, failed: 4 };
+  return session?.providerId === provider && session.sessionId === sessionId &&
+    typeof sessionId === "string" && sessionId.length > 0 && sessionId.length <= 512 &&
+    typeof session.executionDisclosure === "string" && session.executionDisclosure.length > 0 &&
+    session.executionDisclosure.length <= 8192 &&
+    Number.isSafeInteger(session.revision) && session.revision === revisions[session.status];
+}
+
+function nativeMetadataFailure(state: SessionState, sessionId?: string): SessionState {
+  const message = "Native coding session metadata is missing or invalid. Close and reopen the panel.";
+  return {
+    ...state,
+    runningSessionId: state.runningSessionId ?? sessionId,
+    context: state.context ? { ...state.context, nativeSession: undefined } : undefined,
+    status: "failed",
+    bootstrapError: message,
+    log: appendLog(state, "error", message),
+    transcript: appendNoticeTranscript(state, message, "error"),
+  };
+}
+
+function projectNativeSession(
+  state: SessionState, sessionId: string, session: NativeManagedSession | undefined,
+): SessionState {
+  const provider = state.nativeManagedProviderId;
+  if (!provider || state.context?.initialProviderId !== provider ||
+      (state.runningSessionId && state.runningSessionId !== sessionId) ||
+      (!state.runningSessionId && state.seenSessionIds.includes(sessionId))) return state;
+  if (!isNativeSession(session, sessionId, provider)) return nativeMetadataFailure(state, sessionId);
+  const current = state.context.nativeSession;
+  if (current?.sessionId === sessionId && current.revision >= session.revision) {
+    if (current.revision === session.revision && session.status === "failed" &&
+        (state.status !== "failed" || state.requestedStopSessionId != null)) {
+      return { ...state, status: "failed", requestedStopSessionId: undefined };
+    }
+    return state;
+  }
+  return {
+    ...state,
+    context: { ...state.context, nativeSession: session },
+    selectedProviderId: provider,
+    runningSessionId: sessionId,
+    requestedStopSessionId: session.status === "stopping" ? sessionId : undefined,
+    seenSessionIds: rememberSessionId(state, sessionId),
+    status: state.bootstrapError ? "failed" : session.status,
+  };
 }
 
 function isCurrentOrPendingStartExit(state: SessionState, event: Extract<AgentEvent, { type: "provider.exit" }>): boolean {

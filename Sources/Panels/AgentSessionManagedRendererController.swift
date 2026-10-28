@@ -1,0 +1,367 @@
+import CoreFoundation
+import Foundation
+
+final class AgentSessionManagedInputCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelled = true
+    }
+}
+
+/// Native custody of renderer evidence; never grants provider or profile authority.
+@MainActor
+final class AgentSessionManagedRendererController {
+    struct Context: Equatable {
+        let owner: ObjectIdentifier
+        let store: ObjectIdentifier
+        let coordinator: ObjectIdentifier
+        let host: ObjectIdentifier
+        let webView: ObjectIdentifier
+        let window: ObjectIdentifier
+        let responder: ObjectIdentifier
+        let workspaceID: UUID
+        let panelID: UUID
+        let renderer: String
+        let document: String
+        let paintGeneration: UInt64
+        let geometry: [Double]
+    }
+
+    enum Operation {
+        case capture
+        case reserve(snapshot: [String: String], text: String)
+        case validate(receipt: [String: String])
+        case release(leaseID: String)
+        case consume(receipt: [String: String])
+    }
+
+    final class Snapshot {
+        let editorText: String
+        let screen: String
+        let deadline: ContinuousClock.Instant
+        var renderEvidence: String { values["render"]! }
+        fileprivate let origin: UUID
+        fileprivate let epoch: UInt64
+        fileprivate let context: Context
+        fileprivate let values: [String: String]
+
+        fileprivate init(
+            origin: UUID, epoch: UInt64, context: Context, values: [String: String],
+            deadline: ContinuousClock.Instant
+        ) {
+            self.origin = origin
+            self.epoch = epoch
+            self.context = context
+            self.values = values
+            self.deadline = deadline
+            editorText = values["editorText"]!
+            screen = values["screen"]!
+        }
+    }
+
+    final class Insertion {
+        fileprivate let snapshot: Snapshot
+        fileprivate let text: String
+        fileprivate let ticket: AgentSessionManagedRendererReservation.Ticket
+        fileprivate let receipt: AgentSessionManagedRendererReservation.Receipt
+        fileprivate let inserted: ContinuousClock.Instant
+        fileprivate let deadline: ContinuousClock.Instant
+        fileprivate var claimed = false
+        fileprivate var cleanupClaimed = false
+
+        fileprivate init(
+            snapshot: Snapshot, text: String, ticket: AgentSessionManagedRendererReservation.Ticket,
+            receipt: AgentSessionManagedRendererReservation.Receipt, inserted: ContinuousClock.Instant,
+            deadline: ContinuousClock.Instant
+        ) {
+            self.snapshot = snapshot
+            self.text = text
+            self.ticket = ticket
+            self.receipt = receipt
+            self.inserted = inserted
+            self.deadline = deadline
+        }
+    }
+
+    @MainActor final class Submission {
+        let inputID: UUID
+        let text: String
+        let deadline: ContinuousClock.Instant
+        private let frame: AgentSessionManagedRendererReservation.Frame
+        private let owner: ObjectIdentifier
+        private let store: ObjectIdentifier
+        private let cancellation: AgentSessionManagedInputCancellation
+        private let now: @MainActor () -> ContinuousClock.Instant
+        private var claimed = false
+
+        fileprivate init(
+            inputID: UUID, insertion: Insertion, frame: AgentSessionManagedRendererReservation.Frame,
+            cancellation: AgentSessionManagedInputCancellation, expiresAt: ContinuousClock.Instant,
+            now: @escaping @MainActor () -> ContinuousClock.Instant
+        ) {
+            self.inputID = inputID
+            text = insertion.text
+            deadline = min(insertion.deadline, frame.deadline, expiresAt)
+            self.frame = frame
+            owner = insertion.snapshot.context.owner
+            store = insertion.snapshot.context.store
+            self.cancellation = cancellation
+            self.now = now
+        }
+
+        func claim(owner: AnyObject, store: AnyObject) -> Bool {
+            guard !claimed, !cancellation.isCancelled, now() < deadline,
+                  self.owner == ObjectIdentifier(owner), self.store == ObjectIdentifier(store),
+                  frame.validate(), !cancellation.isCancelled, now() < deadline, !claimed else { return false }
+            claimed = true
+            return true
+        }
+
+        func validate(owner: AnyObject, store: AnyObject) -> Bool {
+            claimed && !cancellation.isCancelled && now() < deadline &&
+                self.owner == ObjectIdentifier(owner) && self.store == ObjectIdentifier(store) &&
+                frame.validate() && !cancellation.isCancelled && now() < deadline
+        }
+    }
+
+    private let identity = UUID()
+    private var epoch: UInt64 = 0
+    private let context: @MainActor () -> Context?
+    private let operation: @MainActor (Operation) async throws -> Any?
+    private let now: @MainActor () -> ContinuousClock.Instant
+    private let sleep: @MainActor (Duration) async throws -> Void
+    private let onReleaseError: @MainActor (Error) -> Void
+    private var activeContext: Context?
+    private var activeInsertion: Insertion?
+    private var ownedInsertion: Insertion?
+    private var editorEpoch: UInt64 = 0
+    private lazy var reservation = AgentSessionManagedRendererReservation(
+        isCurrentHost: { [weak self] in
+            guard let self, let expected = self.activeContext else { return false }
+            return self.matches(expected, epoch: self.epoch)
+        }, now: now
+    )
+
+    init(
+        context: @escaping @MainActor () -> Context?,
+        operation: @escaping @MainActor (Operation) async throws -> Any?,
+        now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
+        sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        onReleaseError: @escaping @MainActor (Error) -> Void
+    ) {
+        self.context = context
+        self.operation = operation
+        self.now = now
+        self.sleep = sleep
+        self.onReleaseError = onReleaseError
+    }
+
+    func capture() async throws -> Snapshot? {
+        if let insertion = activeInsertion, now() >= insertion.deadline { invalidateRender() }
+        guard activeContext == nil else { return nil }
+        let began = now()
+        let deadline = began.advanced(by: .seconds(2))
+        let epoch = self.epoch
+        let editorEpoch = self.editorEpoch
+        let ownedInsertion = self.ownedInsertion
+        let current = context()
+        let lostOwnedContext = ownedInsertion.map {
+            self.ownedInsertion === $0 && current != $0.snapshot.context
+        } ?? false
+        if self.editorEpoch == editorEpoch, current == nil || lostOwnedContext {
+            invalidate()
+            return nil
+        }
+        guard let context = current, self.epoch == epoch else { return nil }
+        do {
+            let reply = try await operation(.capture)
+            guard matches(context, epoch: epoch),
+                  began <= now(), now() < deadline,
+                  let values = Self.strings(reply, keys: ["editorText", "editVersion", "render", "screen"]),
+                  Self.bounded(values["editorText"], maximum: 1024 * 1024, allowEmpty: true),
+                  Self.bounded(values["editVersion"], maximum: 128),
+                  Self.bounded(values["screen"], maximum: 1024 * 1024, allowEmpty: true),
+                  Self.bounded(values["render"], maximum: 1024 * 1024) else { return nil }
+            return Snapshot(origin: identity, epoch: epoch, context: context, values: values, deadline: deadline)
+        } catch {
+            revokeIfCurrent(epoch)
+            throw error
+        }
+    }
+
+    func insert(_ snapshot: Snapshot, text: String) async throws -> Insertion? {
+        guard snapshot.origin == identity, snapshot.editorText.isEmpty, Self.bounded(text, maximum: 256 * 1024),
+              activeContext == nil, matches(snapshot.context, epoch: snapshot.epoch),
+              now() < snapshot.deadline else { return nil }
+        ownedInsertion = nil
+        editorEpoch &+= 1
+        activeContext = snapshot.context
+        let deadline = snapshot.deadline
+        guard let ticket = reservation.begin(expiresAt: deadline) else {
+            revokeIfCurrent(snapshot.epoch)
+            return nil
+        }
+        do {
+            let reply = try await operation(.reserve(snapshot: snapshot.values, text: text))
+            let values = Self.strings(reply, keys: ["leaseId", "render"])
+            let receipt = values.flatMap { values -> AgentSessionManagedRendererReservation.Receipt? in
+                guard Self.bounded(values["leaseId"], maximum: 128),
+                      Self.bounded(values["render"], maximum: 1024 * 1024),
+                      let leaseID = values["leaseId"], let render = values["render"] else { return nil }
+                return .init(leaseID: leaseID, render: render)
+            }
+            guard matches(snapshot.context, epoch: snapshot.epoch), let receipt,
+                  reservation.didInsert(ticket, receipt: receipt) else {
+                revokeIfCurrent(snapshot.epoch)
+                if let receipt { release(receipt.leaseID) }
+                return nil
+            }
+            let insertion = Insertion(
+                snapshot: snapshot, text: text, ticket: ticket, receipt: receipt, inserted: now(), deadline: deadline
+            )
+            activeInsertion = insertion
+            ownedInsertion = insertion
+            return insertion
+        } catch {
+            revokeIfCurrent(snapshot.epoch)
+            throw error
+        }
+    }
+
+    func prepareSubmission(
+        _ insertion: Insertion, inputID: UUID,
+        cancellation: AgentSessionManagedInputCancellation = AgentSessionManagedInputCancellation(),
+        expiresAt: ContinuousClock.Instant? = nil
+    ) async throws -> Submission? {
+        let deadline = min(insertion.deadline, expiresAt ?? insertion.deadline)
+        guard !cancellation.isCancelled, now() < deadline, let frame = try await prepareFrame(insertion),
+              !cancellation.isCancelled, now() < deadline, frame.validate(),
+              !cancellation.isCancelled, now() < deadline else { return nil }
+        return Submission(
+            inputID: inputID, insertion: insertion, frame: frame, cancellation: cancellation,
+            expiresAt: deadline, now: now
+        )
+    }
+
+    func prepareFrame(_ insertion: Insertion) async throws -> AgentSessionManagedRendererReservation.Frame? {
+        guard activeInsertion === insertion, !insertion.claimed else { return nil }
+        let snapshot = insertion.snapshot
+        guard matches(snapshot.context, epoch: snapshot.epoch) else { return nil }
+        do {
+            let remaining = now().duration(to: insertion.inserted.advanced(by: .milliseconds(150)))
+            if remaining > .zero { try await sleep(remaining) }
+            guard activeInsertion === insertion, !insertion.claimed,
+                  matches(snapshot.context, epoch: snapshot.epoch) else { return nil }
+            let reply = try await operation(.validate(receipt: [
+                "leaseId": insertion.receipt.leaseID, "render": insertion.receipt.render,
+            ]))
+            guard activeInsertion === insertion, !insertion.claimed,
+                  matches(snapshot.context, epoch: snapshot.epoch),
+                  let boolean = reply as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID(),
+                  reservation.didValidate(insertion.ticket, receipt: insertion.receipt,
+                                          rendererConfirmed: boolean.boolValue),
+                  let frame = reservation.claimFrame(insertion.ticket) else {
+                revokeIfCurrent(snapshot.epoch)
+                return nil
+            }
+            insertion.claimed = true
+            return frame
+        } catch {
+            revokeIfCurrent(snapshot.epoch)
+            throw error
+        }
+    }
+
+    func invalidate() {
+        editorEpoch &+= 1
+        ownedInsertion = nil
+        invalidateRender()
+    }
+
+    func invalidateRender() {
+        epoch &+= 1
+        reservation.invalidate()
+        let leaseID = activeInsertion?.receipt.leaseID
+        activeInsertion = nil
+        activeContext = nil
+        if let leaseID { release(leaseID) }
+    }
+
+    func finish(_ insertion: Insertion) {
+        if activeInsertion === insertion { invalidateRender() }
+    }
+
+    func consume(_ insertion: Insertion) async throws -> Bool {
+        guard ownedInsertion === insertion, !insertion.cleanupClaimed else { return false }
+        let editorEpoch = self.editorEpoch
+        guard matchesEditor(insertion, epoch: editorEpoch),
+              ownedInsertion === insertion, !insertion.cleanupClaimed else {
+            if ownedInsertion === insertion { invalidate() }
+            return false
+        }
+        insertion.cleanupClaimed = true
+        defer { if ownedInsertion === insertion { ownedInsertion = nil } }
+        invalidateRender()
+        let reply = try await operation(.consume(receipt: [
+            "leaseId": insertion.receipt.leaseID, "render": insertion.receipt.render,
+        ]))
+        guard matchesEditor(insertion, epoch: editorEpoch),
+              let boolean = reply as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID() else { return false }
+        return boolean.boolValue
+    }
+
+    private func matchesEditor(_ insertion: Insertion, epoch: UInt64) -> Bool {
+        guard editorEpoch == epoch else { return false }
+        let current = context()
+        guard editorEpoch == epoch else { return false }
+        guard current == insertion.snapshot.context else {
+            invalidate()
+            return false
+        }
+        return true
+    }
+
+    private func matches(_ expected: Context, epoch: UInt64) -> Bool {
+        guard self.epoch == epoch else { return false }
+        let current = context()
+        guard self.epoch == epoch else { return false }
+        guard current == expected else {
+            invalidate()
+            return false
+        }
+        return true
+    }
+
+    private func revokeIfCurrent(_ epoch: UInt64) {
+        if self.epoch == epoch { invalidate() }
+    }
+
+    private func release(_ leaseID: String) {
+        let operation = self.operation
+        let onReleaseError = self.onReleaseError
+        Task { @MainActor in
+            do { _ = try await operation(.release(leaseID: leaseID)) }
+            catch { onReleaseError(error) }
+        }
+    }
+
+    private static func strings(_ value: Any?, keys: Set<String>) -> [String: String]? {
+        guard let values = value as? [String: String], Set(values.keys) == keys else { return nil }
+        return values
+    }
+
+    private static func bounded(_ value: String?, maximum: Int, allowEmpty: Bool = false) -> Bool {
+        guard let value else { return false }
+        return (allowEmpty || !value.isEmpty) && value.utf8.count <= maximum
+    }
+}

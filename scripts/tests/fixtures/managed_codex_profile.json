@@ -1,0 +1,110 @@
+{
+  "catalogSha256": "c21244950ae26f4e029cf91d9c3d85ff1691c83292ab91627bb528cfe0d7e0a9",
+  "commandAuthority": {
+    "activation": "fresh-native-panel-opt-in",
+    "authority": "native-user-project",
+    "execution": "general-purpose-foreground",
+    "rpcActivationAllowed": false,
+    "sdkApprovalPrompt": false,
+    "sdkSandbox": false
+  },
+  "commandSchemaSha256": "65e90ae9b000d5bd8d9c345706abaa94191afd6aee3a66b3bf29556c390183e6",
+  "integrationPatchSha256": "fe327838f4e4c909d41eb36ec9d34b702ab87bec7ff7cb8c488064cc84ab8922",
+  "nativeTool": {
+    "description": "Run one foreground command with the native project authority. No terminal, background work, stdin, directory, environment or timeout overrides.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {"items": {"type": "string"}, "type": "array"},
+        "program": {"type": "string"}
+      },
+      "required": ["program", "arguments"],
+      "type": "object"
+    },
+    "name": "cmux_run_foreground",
+    "type": "function"
+  },
+  "privateBridgeVersion": 1,
+  "profileId": "codex-0.154-frozen-native-foreground-v1",
+  "startupOptions": {
+    "channelCapacity": 1,
+    "enableCodexApiKeyEnv": false,
+    "initialize": {
+      "capabilities": {
+        "experimentalApi": true,
+        "optOutNotificationMethods": null,
+        "requestAttestation": false
+      },
+      "clientInfo": {
+        "name": "cmux-managed-codex-host",
+        "title": null,
+        "version": "0.1.0"
+      }
+    },
+    "sessionSource": {"custom": "cmux"}
+  },
+  "threadOptions": {
+    "approvalPolicy": null,
+    "approvalsReviewer": null,
+    "baseInstructions": null,
+    "config": null,
+    "cwd": null,
+    "developerInstructions": null,
+    "dynamicTools": [
+      {
+        "description": "Run one foreground command with the native project authority. No terminal, background work, stdin, directory, environment or timeout overrides.",
+        "inputSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {"items": {"type": "string"}, "type": "array"},
+            "program": {"type": "string"}
+          },
+          "required": ["program", "arguments"],
+          "type": "object"
+        },
+        "name": "cmux_run_foreground",
+        "type": "function"
+      }
+    ],
+    "environments": [],
+    "ephemeral": null,
+    "historyMode": null,
+    "mockExperimentalField": null,
+    "model": null,
+    "modelProvider": null,
+    "multiAgentMode": null,
+    "permissions": null,
+    "personality": null,
+    "projectId": null,
+    "runtimeWorkspaceRoots": null,
+    "sandbox": null,
+    "selectedCapabilityRoots": [],
+    "serviceName": null,
+    "sessionStartSource": null,
+    "threadSource": null
+  },
+  "turnOptions": {
+    "additionalContext": null,
+    "approvalPolicy": null,
+    "approvalsReviewer": null,
+    "clientUserMessageId": null,
+    "collaborationMode": null,
+    "cwd": null,
+    "cyberAccessProgram": null,
+    "effort": null,
+    "environments": [],
+    "model": null,
+    "multiAgentMode": null,
+    "outputSchema": null,
+    "permissions": null,
+    "personality": null,
+    "responsesapiClientMetadata": null,
+    "runtimeWorkspaceRoots": null,
+    "sandboxPolicy": null,
+    "serviceTierForTurn": null,
+    "summary": null,
+    "toolOutput": null,
+    "turnTrigger": null
+  },
+  "upstreamCommit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340"
+}

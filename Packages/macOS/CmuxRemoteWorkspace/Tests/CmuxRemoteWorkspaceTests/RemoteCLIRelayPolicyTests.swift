@@ -7,6 +7,30 @@ struct RemoteCLIRelayPolicyTests {
     private let tokenHex = "00112233445566778899aabbccddeeff"
     private let relayID = "relay-policy"
 
+    @Test("native Shepherd is local-only even for an authenticated relay's owned targets", arguments: [
+        "surface.shepherd.inspect", "surface.shepherd.continue", "surface.shepherd.receipt"
+    ])
+    func deniesNativeShepherdMethods(method: String) throws {
+        let workspace = UUID()
+        let surface = UUID()
+        let params: [String: String]
+        switch method {
+        case "surface.shepherd.inspect":
+            params = ["workspace_id": workspace.uuidString, "surface_id": surface.uuidString]
+        case "surface.shepherd.continue":
+            params = ["request_id": UUID().uuidString, "token": UUID().uuidString, "text": "Continue."]
+        default:
+            params = ["request_id": UUID().uuidString]
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["id": "shepherd", "method": method, "params": params])
+        try withServer(workspaceAliases: [workspace: workspace], surfaceAliases: [surface: surface]) { port, unixServer in
+            let exchange = try runPolicyRelayExchange(
+                port: port, relayID: relayID, tokenHex: tokenHex, commandLine: String(decoding: data, as: UTF8.self)
+            )
+            expectDenial(exchange, unixServer, method)
+        }
+    }
+
     @Test("core discovery uses canonical RPC names and the authenticated relay", arguments: [
         "system.ping", "system.capabilities", "workspace.list"
     ])

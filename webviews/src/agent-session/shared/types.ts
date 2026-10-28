@@ -1,4 +1,4 @@
-export type ProviderId = "codex" | "claude" | "opencode";
+export type ProviderId = "codex" | "claude" | "opencode" | "copilot";
 
 export type RendererKind = "react" | "solid";
 
@@ -8,7 +8,7 @@ export type ProviderInfo = {
   id: ProviderId;
   displayName: string;
   executableName: string;
-  transportKind: "stdio-jsonrpc" | "stdio-jsonl" | "http-loopback";
+  transportKind: "stdio-jsonrpc" | "stdio-jsonl" | "http-loopback" | "managed-stdio-jsonrpc";
   arguments: string[];
   autoStart: boolean;
 };
@@ -39,6 +39,24 @@ export type AppContext = {
   rateLimitRows?: AgentSessionRateLimitRow[];
   copy: AgentSessionCopy;
   theme: AgentSessionTheme;
+  nativeSession?: NativeManagedSession;
+  nativeManagedIntent?: NativeManagedIntent;
+};
+
+export type NativeManagedProviderId = "copilot" | "codex";
+
+export type NativeManagedIntent = {
+  providerId: NativeManagedProviderId;
+  status: "starting" | "unavailable";
+  executionDisclosure: string;
+};
+
+export type NativeManagedSession = {
+  providerId: NativeManagedProviderId;
+  sessionId: string;
+  status: "starting" | "running" | "stopping" | "failed";
+  revision: number;
+  executionDisclosure: string;
 };
 
 export type AgentSessionRateLimitRow = {
@@ -144,6 +162,17 @@ export type AgentEvent =
       providerId: ProviderId;
       executablePath: string;
       arguments: string[];
+      nativeSession?: NativeManagedSession;
+    }
+  | {
+      type: "provider.nativeIntent";
+      nativeIntent: NativeManagedIntent;
+    }
+  | {
+      type: "provider.nativeSession";
+      sessionId: string;
+      providerId: NativeManagedProviderId;
+      nativeSession: NativeManagedSession;
     }
   | {
       type: "provider.output";
