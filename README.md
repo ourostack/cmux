@@ -1,6 +1,14 @@
+<!-- ourostack:brand:start -->
+<p align="center">
+  <a href="https://github.com/ourostack"><img src="https://raw.githubusercontent.com/ourostack/.github/main/brand/headers/labs.webp" alt="Ouro curled in the meadow beside a little glass greenhouse workshop, where a small robot repots a glowing sprout among jars of seedlings while the glowing trail forks in two and loops back together" width="100%"></a>
+</p>
+<!-- ourostack:brand:end -->
+
 # ourostack/cmux
 
-This fork of [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux) is a mirror kept current for Ouro. Nothing is built or released from it.
+**Labs:** our mirror of [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux), the terminal for coding agents. Nothing is built or released from it. Want cmux itself? Go to [cmux.com](https://cmux.com).
+
+**Why we fork it:** [Shepherd](https://ouroboros.bot/#shepherd), the part of [Ouroboros](https://github.com/ourostack/ouroboros) that keeps terminal coding agents moving, works through cmux. This mirror lets us carry a patch on `ouro-patches` while it waits for upstream.
 
 - `main` is a pure mirror of upstream `main`. Never commit to it.
 - `v*` release tags are mirrored from upstream.
