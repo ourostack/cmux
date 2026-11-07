@@ -8,12 +8,12 @@
 
 **Labs, unsupported:** our mirror of [manaflow-ai/cmux](https://github.com/manaflow-ai/cmux), the terminal for coding agents. Nothing is built or released from it. Want cmux itself? Go to [cmux.com](https://cmux.com).
 
-**Why we fork it:** [Shepherd](https://ouroboros.bot/#shepherd), the part of [Ouroboros](https://github.com/ourostack/ouroboros) that keeps terminal coding agents moving, works through cmux. This mirror lets us carry a patch while it waits for upstream.
+**Why we fork it:** [Shepherd](https://ouroboros.bot/#shepherd), the part of [Ouroboros](https://github.com/ourostack/ouroboros) that keeps terminal coding agents moving, works through cmux. This mirror is where we would carry patches while they wait for upstream; today there are none.
 
 **About the "commits behind" banner:** GitHub compares this page's branch, `ouro`, which holds only this README and the sync. The mirror itself is [`main`](https://github.com/ourostack/cmux/tree/main), synced from upstream every few hours.
 
 - [`main`](https://github.com/ourostack/cmux/tree/main) mirrors upstream `main` and its `v*` tags.
-- [`ouro-patches`](https://github.com/ourostack/cmux/tree/ouro-patches) holds our patches on top of it. It is empty for now.
+- [`ouro-patches`](https://github.com/ourostack/cmux/tree/ouro-patches) is where our patches go, on top of it. It is empty for now. Other branches are working branches, not the patch stack.
 
 <details>
 <summary>How the sync works</summary>
