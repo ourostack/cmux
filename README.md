@@ -1,6 +1,6 @@
 <!-- ourostack:brand:start -->
 <p align="center">
-  <a href="https://github.com/ourostack"><img src="https://raw.githubusercontent.com/ourostack/.github/main/brand/headers/labs.webp" alt="Ouro curled in the meadow beside a little glass greenhouse workshop, where a small robot repots a glowing sprout among jars of seedlings while the glowing trail forks in two and loops back together" width="100%"></a>
+  <a href="https://github.com/ourostack"><img src="https://raw.githubusercontent.com/ourostack/.github/main/brand/headers/labs.webp" alt="Ouro curled in the meadow beside a little glass greenhouse workshop, where a small robot repots a sprout among jars of seedlings at a workbench beside a brass magnifier" width="100%"></a>
 </p>
 <!-- ourostack:brand:end -->
 
